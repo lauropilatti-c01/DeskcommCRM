@@ -71,61 +71,33 @@ jobs:
         id: rev
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v4
-
-      - name: app
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: ${{ env.NS }}/deskcommcrm:${{ steps.ver.outputs.versao }}
-          labels: |
-            org.opencontainers.image.title=DeskcommCRM (C01)
-            org.opencontainers.image.version=${{ steps.ver.outputs.versao }}
-            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
-          build-args: |
-            APP_VERSION=${{ steps.ver.outputs.versao }}
-          cache-from: type=gha,scope=c01-deskcommcrm
-          cache-to: type=gha,mode=max,scope=c01-deskcommcrm
-
-      - name: worker
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.worker
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: ${{ env.NS }}/deskcomm-worker:${{ steps.ver.outputs.versao }}
-          labels: |
-            org.opencontainers.image.title=DeskcommCRM worker (C01)
-            org.opencontainers.image.version=${{ steps.ver.outputs.versao }}
-            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
-          build-args: |
-            APP_VERSION=${{ steps.ver.outputs.versao }}
-          cache-from: type=gha,scope=c01-deskcomm-worker
-          cache-to: type=gha,mode=max,scope=c01-deskcomm-worker
-
-      - name: scheduler
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.scheduler
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: ${{ env.NS }}/deskcomm-scheduler:${{ steps.ver.outputs.versao }}
-          labels: |
-            org.opencontainers.image.title=DeskcommCRM scheduler (C01)
-            org.opencontainers.image.version=${{ steps.ver.outputs.versao }}
-            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
-          build-args: |
-            APP_VERSION=${{ steps.ver.outputs.versao }}
-          cache-from: type=gha,scope=c01-deskcomm-scheduler
-          cache-to: type=gha,mode=max,scope=c01-deskcomm-scheduler
+      # Construtor padrão do Docker do executor, sem buildx separado e sem cache
+      # do GitHub: com o construtor em contêiner + `load`, a entrega da imagem do
+      # app ao Docker estourou o tempo ("no active session … context deadline
+      # exceeded", run 36872822222) no executor de repositório privado (2 núcleos,
+      # 7 GB). Sem cache, cada versão monta tudo de novo (~12 min para o app).
+      - name: Montar app, worker e scheduler
+        env:
+          V: ${{ steps.ver.outputs.versao }}
+          SHA: ${{ steps.rev.outputs.sha }}
+        run: |
+          set -euo pipefail
+          montar() {  # $1 = nome da imagem, $2 = Dockerfile, $3 = título
+            docker build --platform linux/amd64 -f "$2" \
+              --build-arg "APP_VERSION=$V" \
+              --label "org.opencontainers.image.title=$3" \
+              --label "org.opencontainers.image.version=$V" \
+              --label "org.opencontainers.image.revision=$SHA" \
+              -t "$NS/$1:$V" .
+          }
+          montar deskcommcrm Dockerfile "DeskcommCRM (C01)"
+          montar deskcomm-worker Dockerfile.worker "DeskcommCRM worker (C01)"
+          montar deskcomm-scheduler Dockerfile.scheduler "DeskcommCRM scheduler (C01)"
+          for img in deskcommcrm deskcomm-worker deskcomm-scheduler; do
+            rot="$(docker image inspect "$NS/$img:$V" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')"
+            [ "$rot" = "$V" ] || { echo "::error::$img saiu com o rótulo de versão '$rot'"; exit 1; }
+          done
+          docker images "$NS/*"
 
       # Mesma sonda do `imagem-do-app-sobe` do autor: o contêiner chega a servir
       # e não falta módulo no standalone.
