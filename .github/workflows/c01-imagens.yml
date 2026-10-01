@@ -21,6 +21,10 @@ on:
       tag:
         description: "Tag que já existe (ex.: v1.69.0-c01.1)"
         required: true
+      so_conferir:
+        description: "Só montar e conferir as imagens, sem tocar na release (testar o workflow numa tag já publicada)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -54,6 +58,7 @@ jobs:
           ref: refs/tags/${{ steps.ver.outputs.tag }}
 
       - name: Versão nova não sobrescreve versão publicada
+        if: github.event.inputs.so_conferir != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
@@ -138,7 +143,125 @@ jobs:
           fi
           docker rm -f smoke >/dev/null
 
+      # As três provas abaixo vêm do job `imagens-de-fundo-sobem` do autor (publish-image.yml, que
+      # fica desligado aqui), sobre as NOSSAS imagens: o worker e o scheduler eram publicados sem
+      # ninguém executá-los antes (#648 do autor: o worker subia, o /healthz ficava verde e o
+      # event_log parava). "Contêiner de pé" não é o critério.
+      - name: O laço do event_log carrega dentro da imagem do worker?
+        env:
+          IMG: ${{ env.NS }}/deskcomm-worker:${{ steps.ver.outputs.versao }}
+        run: |
+          set -euo pipefail
+          saida=$(docker run --rm --name worker-laco \
+            --entrypoint pnpm \
+            -e NEXT_PUBLIC_SUPABASE_URL=https://exemplo.supabase.co \
+            -e NEXT_PUBLIC_SUPABASE_ANON_KEY=chave-de-mentira \
+            -e SUPABASE_SERVICE_ROLE_KEY=chave-de-mentira \
+            -e SENTRY_DSN=off \
+            "$IMG" \
+            exec tsx scripts/sonda-do-laco-de-event-log.ts)
+          echo "$saida"
+          printf '%s' "$saida" | tail -1 | grep -q '"ok":true' || {
+            echo "::error::o laço do event_log NÃO carregou dentro da imagem do worker (defeito da #648 do autor)."
+            exit 1
+          }
+          printf '%s' "$saida" | grep -q 'event-log drain: laço carregado' || {
+            echo "::error::a sonda não emitiu a marca 'event-log drain: laço carregado'."
+            exit 1
+          }
+
+      - name: O worker boota com o CMD da imagem? (sem banco no executor, o boot para na camada de banco)
+        env:
+          IMG: ${{ env.NS }}/deskcomm-worker:${{ steps.ver.outputs.versao }}
+        run: |
+          set -euo pipefail
+          docker rm -f worker-boot >/dev/null 2>&1 || true
+          docker run -d --name worker-boot \
+            -p 127.0.0.1:3971:3971 \
+            -e HEALTH_PORT=3971 \
+            -e NEXT_PUBLIC_SUPABASE_URL=https://exemplo.supabase.co \
+            -e NEXT_PUBLIC_SUPABASE_ANON_KEY=chave-de-mentira \
+            -e SUPABASE_SERVICE_ROLE_KEY=chave-de-mentira \
+            -e SUPABASE_DB_URL=postgres://127.0.0.1:5432/postgres \
+            -e SENTRY_DSN=off \
+            "$IMG"
+          # Espera um SINAL (não o `docker ps`, que fica running antes de o tsx importar nada).
+          estado=nao_bootou
+          corpo=""
+          for _ in $(seq 1 30); do
+            sleep 3
+            if ! docker ps --filter name=worker-boot --filter status=running -q | grep -q .; then
+              estado=saiu; break
+            fi
+            logs_ate_agora=$(docker logs worker-boot 2>&1 || true)
+            if printf '%s' "$logs_ate_agora" | grep -qE 'agent-engine pronto'; then estado=pronto; break; fi
+            if printf '%s' "$logs_ate_agora" | grep -qE 'event-log drain OFF|Cannot find module|ERR_MODULE_NOT_FOUND|Cannot use import statement'; then
+              estado=fatal_no_log; break
+            fi
+            corpo=$(curl -s -m 2 "http://127.0.0.1:3971/healthz" || true)
+            if [ -n "$corpo" ]; then estado=servindo; break; fi
+          done
+          docker logs worker-boot > boot.log 2>&1 || true
+          echo "--- logs do boot (fim) ---"; tail -30 boot.log; echo "estado: $estado"
+          [ -n "$corpo" ] || corpo=$(curl -s -m 5 "http://127.0.0.1:3971/healthz" || true)
+          if grep -q 'event-log drain OFF' boot.log; then
+            echo "::error::o laço do event_log NÃO carregou no boot da imagem (defeito da #648 do autor)."; exit 1
+          fi
+          if grep -qE 'Cannot find module|ERR_MODULE_NOT_FOUND|Cannot use import statement|SyntaxError|is not a function|Failed to resolve' boot.log; then
+            echo "::error::o worker morreu com a cadeia de boot quebrada (import ou módulo)."; exit 1
+          fi
+          # Banco ausente é o desfecho declarado deste executor: o /healthz respondendo 200 se
+          # mede na produção (conferir_no_ar do publicar_versao.sh), não aqui.
+          if grep -qE 'ECONNREFUSED|ENOTFOUND|getaddrinfo|schema do harness ausente|password authentication|Connection terminated|timeout expired|ECONNRESET' boot.log; then
+            echo "::notice::o worker parou na camada de banco (sem Postgres no executor); o laço carregado foi medido pela sonda."
+            exit 0
+          fi
+          if [ -n "$corpo" ]; then
+            echo "healthz: $corpo"
+            printf '%s' "$corpo" | grep -q '"event_log_drain":{"carregado":true' || {
+              echo "::error::o worker está de pé mas o /healthz não publica event_log_drain carregado."; exit 1
+            }
+            exit 0
+          fi
+          echo "::error::o worker não bootou por um motivo que esta prova não reconhece (estado: $estado)."
+          exit 1
+
+      - name: O scheduler sobe e tem o event-log-drain no crontab?
+        env:
+          IMG: ${{ env.NS }}/deskcomm-scheduler:${{ steps.ver.outputs.versao }}
+        run: |
+          set -euo pipefail
+          docker run -d --name sched \
+            --health-interval=3s --health-timeout=3s --health-start-period=3s --health-retries=20 \
+            -e INTERNAL_SECRET=chave-de-mentira \
+            -e APP_URL=http://127.0.0.1:3000 \
+            -e TZ=UTC \
+            "$IMG"
+          cron=nao
+          for _ in $(seq 1 20); do
+            if ! docker ps --filter name=sched --filter status=running -q | grep -q .; then
+              echo "::error::o scheduler morreu durante o boot"; docker logs sched 2>&1 | tail -40; exit 1
+            fi
+            docker exec sched sh -lc 'crontab -l 2>/dev/null || cat /etc/crontabs/root 2>/dev/null || cat "${CRONTAB_PATH:-/etc/crontabs/root}" 2>/dev/null' > cron.txt 2>/dev/null || true
+            if grep -q 'api/v1/cron/event-log-drain' cron.txt; then cron=sim; break; fi
+            sleep 3
+          done
+          if [ "$cron" != "sim" ]; then
+            echo "::error::o crontab do scheduler não tem a linha do event-log-drain"; cat cron.txt || true; exit 1
+          fi
+          grep -c 'api/v1/cron' cron.txt | sed 's/^/linhas de cron instaladas: /'
+          saude=nao
+          for _ in $(seq 1 20); do
+            estado=$(docker inspect -f '{{.State.Health.Status}}' sched 2>/dev/null || echo sem-healthcheck)
+            if [ "$estado" = "healthy" ]; then saude=sim; break; fi
+            [ "$estado" = "sem-healthcheck" ] && { echo "::error::a imagem do scheduler perdeu o HEALTHCHECK"; exit 1; }
+            sleep 3
+          done
+          [ "$saude" = "sim" ] || { echo "::error::o scheduler não chegou a healthy (crond de pé) em 60 s"; docker logs sched 2>&1 | tail -40; exit 1; }
+          docker rm -f sched worker-boot >/dev/null 2>&1 || true
+
       - name: Pacote e release
+        if: github.event.inputs.so_conferir != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
