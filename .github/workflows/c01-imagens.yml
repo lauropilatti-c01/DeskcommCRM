@@ -1,0 +1,184 @@
+name: C01 — imagens da versão nossa
+
+# Monta as três imagens que a produção da C01 usa (app, worker e scheduler),
+# só para amd64 (a VPS), e guarda o pacote como arquivo da release da tag.
+#
+# Por que não publica no registro (ghcr.io): este repositório é privado e a VPS
+# não guarda credencial do GitHub. Quem leva o pacote até a VPS é o roteiro de
+# publicação descrito em C01.md, com o link temporário que o GitHub gera para o
+# arquivo da release. O nome das imagens continua sendo o do IMG_NS do kit, que
+# é o que o `update.sh` grava no `.env`.
+#
+# Os workflows do autor ficam desligados neste repositório (`gh workflow
+# disable`, não apagados, para a mescla com o autor não conflitar neles): eles
+# gastariam os minutos do plano privado e tentariam publicar no registro.
+
+on:
+  push:
+    tags: ["v*-c01.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag que já existe (ex.: v1.69.0-c01.1)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: c01-imagens-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  imagens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NS: ghcr.io/lauropilatti-c01
+    steps:
+      - name: Qual versão
+        id: ver
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*-c01.[0-9]*) ;;
+            *) echo "::error::tag fora do padrão vX.Y.Z-c01.N: $TAG"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "versao=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ steps.ver.outputs.tag }}
+
+      - name: Versão nova não sobrescreve versão publicada
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -q '^imagens-'; then
+            echo "::error::a release $TAG já tem pacote de imagens. Versão publicada não muda: crie a tag seguinte (-c01.N+1)."
+            exit 1
+          fi
+
+      - name: O kit aponta para o nosso namespace
+        run: grep -qx 'IMG_NS="${{ env.NS }}"' hostgator-setup-kit/_common.sh
+
+      - name: Revisão
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: app
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.NS }}/deskcommcrm:${{ steps.ver.outputs.versao }}
+          labels: |
+            org.opencontainers.image.title=DeskcommCRM (C01)
+            org.opencontainers.image.version=${{ steps.ver.outputs.versao }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+          build-args: |
+            APP_VERSION=${{ steps.ver.outputs.versao }}
+          cache-from: type=gha,scope=c01-deskcommcrm
+          cache-to: type=gha,mode=max,scope=c01-deskcommcrm
+
+      - name: worker
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.worker
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.NS }}/deskcomm-worker:${{ steps.ver.outputs.versao }}
+          labels: |
+            org.opencontainers.image.title=DeskcommCRM worker (C01)
+            org.opencontainers.image.version=${{ steps.ver.outputs.versao }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+          build-args: |
+            APP_VERSION=${{ steps.ver.outputs.versao }}
+          cache-from: type=gha,scope=c01-deskcomm-worker
+          cache-to: type=gha,mode=max,scope=c01-deskcomm-worker
+
+      - name: scheduler
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.scheduler
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.NS }}/deskcomm-scheduler:${{ steps.ver.outputs.versao }}
+          labels: |
+            org.opencontainers.image.title=DeskcommCRM scheduler (C01)
+            org.opencontainers.image.version=${{ steps.ver.outputs.versao }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+          build-args: |
+            APP_VERSION=${{ steps.ver.outputs.versao }}
+          cache-from: type=gha,scope=c01-deskcomm-scheduler
+          cache-to: type=gha,mode=max,scope=c01-deskcomm-scheduler
+
+      # Mesma sonda do `imagem-do-app-sobe` do autor: o contêiner chega a servir
+      # e não falta módulo no standalone.
+      - name: O app chega a servir?
+        env:
+          IMG: ${{ env.NS }}/deskcommcrm:${{ steps.ver.outputs.versao }}
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 3000:3000 \
+            -e NEXT_PUBLIC_SUPABASE_URL=https://exemplo.supabase.co \
+            -e NEXT_PUBLIC_SUPABASE_ANON_KEY=chave-de-mentira \
+            -e SUPABASE_SERVICE_ROLE_KEY=chave-de-mentira \
+            -e SUPABASE_DB_URL=postgres://127.0.0.1:5432/postgres \
+            -e SENTRY_DSN=off \
+            "$IMG"
+          pronto=nao
+          for _ in $(seq 1 40); do
+            if ! docker ps --filter name=smoke --filter status=running -q | grep -q .; then
+              echo "::error::o contêiner do app morreu durante o boot"
+              docker logs smoke 2>&1 | tail -40
+              exit 1
+            fi
+            if docker logs smoke 2>&1 | grep -qE "Ready in|started server on"; then
+              pronto=sim
+              break
+            fi
+            sleep 3
+          done
+          if [ "$pronto" != "sim" ]; then
+            echo "::error::o app não chegou a servir em 120 s"
+            docker logs smoke 2>&1 | tail -40
+            exit 1
+          fi
+          if docker logs smoke 2>&1 | grep -q "MODULE_NOT_FOUND"; then
+            echo "::error::falta módulo no standalone"
+            docker logs smoke 2>&1 | grep -A5 MODULE_NOT_FOUND | head -20
+            exit 1
+          fi
+          docker rm -f smoke >/dev/null
+
+      - name: Pacote e release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          V: ${{ steps.ver.outputs.versao }}
+        run: |
+          set -euo pipefail
+          arq="imagens-${V}-amd64.tar.gz"
+          docker save "$NS/deskcommcrm:$V" "$NS/deskcomm-worker:$V" "$NS/deskcomm-scheduler:$V" | gzip -1 > "$arq"
+          sha256sum "$arq" > "$arq.sha256"
+          ls -la "$arq"
+          cat "$arq.sha256"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "$TAG" \
+                 --notes "Versão da C01 sobre a ${TAG%%-c01.*} do autor. O que muda está em C01.md."
+          gh release upload "$TAG" "$arq" "$arq.sha256"
