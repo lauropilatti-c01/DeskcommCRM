@@ -236,6 +236,14 @@ const GATILHO_ESPERADO: Record<string, { condicao: string | null; efeito: string
   },
 
   // --- e o que legitimamente tem interruptor -----------------------------------
+  // C01 (versão nossa, repositório privado lauropilatti-c01/deskcomm-c01): ver C01.md.
+  "c01-imagens.yml::imagens": {
+    condicao: null,
+    efeito:
+      "C01: monta app, worker e scheduler da tag nossa, prova que sobem e guarda o pacote na " +
+      "release. Sem ele, a tag nossa não tem imagens e o roteiro de publicação para no portão " +
+      "do pacote; nada chega à produção sem passar por aqui.",
+  },
   "acolhida.yml::acolher": {
     condicao:
       "github.repository_owner == 'melgarafael' && " +

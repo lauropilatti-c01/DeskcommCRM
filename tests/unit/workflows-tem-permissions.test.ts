@@ -61,6 +61,10 @@ const ESCRITA_JUSTIFICADA: Record<string, string> = {
   "acolhida.yml::pull-requests: write":
     "comenta a acolhida no PR de fork; é o ÚNICO escopo do workflow (o bloco zera o resto), " +
     "e o job não faz checkout nem usa action nenhuma — ver tests/unit/acolhida-nao-toca-no-fork.test.ts",
+  // C01 (versão nossa, repositório privado lauropilatti-c01/deskcomm-c01): ver C01.md.
+  "c01-imagens.yml::contents: write":
+    "C01: cria a release da tag nossa e sobe o pacote das imagens como arquivo dela (gh release " +
+    "create/upload). Não publica no registro; roda só em tag v*-c01.* ou à mão, nunca em PR",
 };
 
 interface Workflow {
