@@ -1019,6 +1019,29 @@ export function blocosDeAgendaResidentes(toolIds: readonly string[]): string[] {
  * Tools de agenda cuja EXECUÇÃO neste turno arma o `agendaStallGate` (before-send.ts) —
  * ver o wrap no loop de montagem das tools MCP, mais abaixo.
  */
+/** (C01) A leitura da base da empresa; suas URLs são as únicas liberadas no gate de vocabulário. */
+const FERRAMENTA_DA_BASE = 'crm_query_external_data';
+const RE_URL = /https?:\/\/[^\s"'<>\\)\]]+/g;
+/**
+ * (C01) Toda URL em qualquer string do resultado da ferramenta, em profundidade.
+ * Exportada para o teste; não interpreta o formato do resultado de propósito —
+ * o que vale é o texto exato que o modelo pode copiar.
+ */
+export function urlsNoResultado(valor: unknown, achadas: Set<string> = new Set(), profundidade = 0): Set<string> {
+  if (profundidade > 8 || valor === null || valor === undefined) return achadas;
+  if (typeof valor === 'string') {
+    for (const m of valor.matchAll(RE_URL)) achadas.add(m[0].replace(/[.,;:!?]+$/, ''));
+    return achadas;
+  }
+  if (Array.isArray(valor)) {
+    for (const item of valor) urlsNoResultado(item, achadas, profundidade + 1);
+    return achadas;
+  }
+  if (typeof valor === 'object') {
+    for (const item of Object.values(valor as Record<string, unknown>)) urlsNoResultado(item, achadas, profundidade + 1);
+  }
+  return achadas;
+}
 const AGENDA_TOOL_NAMES = new Set([
   'crm_find_free_slots',
   'crm_book_appointment',
@@ -2565,6 +2588,10 @@ async function executarTurnoDoAgente(
   // na posição da primeira antiga e era descartada como `already_sent` (C54).
   // O ledger reconcilia os recibos pendentes e devolve a maior posição aceita.
   let seq = preview ? 0 : await posicaoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
+  // (C01) As URLs que a base da empresa devolveu NESTE turno (resultado de
+  // `crm_query_external_data`). O gate de vocabulário interno libera a ocorrência
+  // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
+  const urlsDaBase = new Set<string>();
   // (C01) O único caminho de `seq` ao canal. `already_sent` é o ledger dizendo
   // que ESTE texto já saiu numa execução anterior do job: não é mensagem física
   // nova, não ocupa posição e não conta no teto do turno — por isso devolve a
@@ -3148,6 +3175,8 @@ async function executarTurnoDoAgente(
             // não é dele, e a única saída seria o silêncio. O follow-up determinístico
             // idem (ver GateContext.internalVocabularyEnforced).
             enforceInternalVocabulary: true,
+            // (C01) As URLs que a base devolveu neste turno passam pelo gate acima.
+            urlsDaBase,
             // Mesmo padrão do vocabulário interno: só o `send_message` arma — é o único
             // corpo escrito pelo modelo. `active` é ter QUALQUER ferramenta de agenda:
             // um agente que só CONSULTA promete "vou verificar" igual, e enquanto a
@@ -3901,6 +3930,18 @@ async function executarTurnoDoAgente(
                 execute: (async (...args: Parameters<typeof executeOriginal>) => {
                   agendaToolCalledThisTurn = true;
                   return executeOriginal(...args);
+                }) as typeof mcpTool.execute,
+              };
+            } else if (name === FERRAMENTA_DA_BASE && typeof mcpTool.execute === 'function') {
+              // (C01) Guarda as URLs que a base devolveu: só elas passam pelo gate
+              // de vocabulário interno quando carregam um identificador.
+              const executeOriginal = mcpTool.execute.bind(mcpTool);
+              rawTools[name] = {
+                ...mcpTool,
+                execute: (async (...args: Parameters<typeof executeOriginal>) => {
+                  const resultado = await executeOriginal(...args);
+                  for (const url of urlsNoResultado(resultado)) urlsDaBase.add(url);
+                  return resultado;
                 }) as typeof mcpTool.execute,
               };
             } else {

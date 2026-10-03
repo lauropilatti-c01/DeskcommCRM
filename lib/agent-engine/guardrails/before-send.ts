@@ -226,6 +226,13 @@ export interface GateContext {
    */
   internalVocabularyEnforced?: boolean;
   /**
+   * (C01) URLs que a base da empresa devolveu NESTE turno (`crm_query_external_data`).
+   * O `internalVocabularyGate` mascara a ocorrência exata de cada uma antes de
+   * varrer: o link de vídeo legítimo carrega um UUID e caía como "identificador
+   * interno". Ausente = nada liberado. Ver `OpcoesDeDeteccao.urlsPermitidas`.
+   */
+  urlsDaBase?: ReadonlySet<string>;
+  /**
    * Arma o `spinningGate`. **Ausente = ARMADO** — a direção segura aqui é a
    * oposta do `internalVocabularyEnforced` logo acima, e a assimetria é
    * deliberada: aquele protege o CLIENTE de uma palavra feia, este protege o
@@ -446,12 +453,16 @@ export const internalVocabularyGate: Gate = {
   name: 'internal_vocabulary',
   evaluate: (ctx) => {
     if (ctx.internalVocabularyEnforced !== true) return { pass: true };
-    const achado = detectarVazamentoInterno(ctx.body);
+    const achado = detectarVazamentoInterno(ctx.body, { urlsPermitidas: ctx.urlsDaBase ?? [] });
     if (!achado.achou) return { pass: true };
     return {
       pass: false,
       code: 'internal_vocabulary_leak',
-      reason: renderVetoDeVazamento(achado.termos),
+      reason: renderVetoDeVazamento(achado.termos, {
+        // (C01) UUID dentro de um link: a saída é copiar o link da base, não omitir.
+        identificadorEmLink:
+          achado.termos.includes('identificador interno') && /https?:\/\//i.test(ctx.body),
+      }),
       // detail é LOGADO e persistido: contagem + CATEGORIAS (rótulos nossos, fechados),
       // nunca os termos — termo casado é trecho da candidata, e um snake_case pode ter
       // vindo de um dado do lead. A medição que a doutrina pede cabe nestes dois campos.
@@ -959,6 +970,8 @@ export interface RunBeforeSendArgs {
    * depois de N vetos no mesmo turno o envio sai, com registro.
    */
   enforceInternalVocabulary?: boolean;
+  /** (C01) Ver `GateContext.urlsDaBase`. Ausente = nenhuma URL liberada. */
+  urlsDaBase?: ReadonlySet<string>;
   /**
    * Desarma o `spinningGate` para ESTA tentativa. Ausente = armado (ver
    * `GateContext.spinningEnforced` para a razão da assimetria e para a conta que
@@ -1247,6 +1260,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
         ? { humanPromiseExtraTargets: args.humanPromiseExtraTargets }
         : {}),
       internalVocabularyEnforced: args.enforceInternalVocabulary ?? false,
+      ...(args.urlsDaBase !== undefined ? { urlsDaBase: args.urlsDaBase } : {}),
       ...(args.agenda !== undefined ? { agenda: args.agenda } : {}),
     };
 
