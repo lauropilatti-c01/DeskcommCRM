@@ -20,7 +20,12 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *     seguinte, tenta `send_template` — o template NÃO chega ao cliente, e a etapa
  *     seguinte nem acontece (o laço para no fail-safe);
  *   - achado 3: o canal está indisponível quando a frase de espera sai — o turno
- *     NÃO fecha como se o cliente tivesse sido avisado: o job falha e volta à fila.
+ *     NÃO fecha como se o cliente tivesse sido avisado: o job falha e volta à fila;
+ *   - rodada 3, achado 3 (segunda revisão): `send_template` e o 3º vazamento pedidos
+ *     na MESMA etapa (o SDK executa as ferramentas da etapa em paralelo). O template
+ *     passa pela trava de entrada antes de o fail-safe ligar, espera a consulta do
+ *     modelo aprovado e, quando chega ao ponto comum, a passagem já aconteceu: é
+ *     barrado ali, sob a serialização — só a frase de espera chega ao cliente.
  *
  * Canal Cloud API (`meta_cloud`) de propósito: é o único em que a ferramenta
  * `send_template` existe. A mensagem do cliente tem 5 minutos — a janela de 24 h
@@ -88,12 +93,18 @@ const VAZAMENTOS = [
   "A tabela lead_notes mostra o seu último contato.",
 ];
 
+const TEMPLATE = { template_name: "retomada", language: "pt_BR", values: { "1": "Ana" } };
+
 /**
  * Modelo falso que vaza vocabulário interno três vezes e, se ganhar uma 4ª etapa,
  * tenta mandar um template. Conta as etapas do laço (fora a chamada de checkpoint)
  * e guarda cada resultado de ferramenta que o SDK lhe devolveu.
+ *
+ * (C01, rodada 3) Com `templateJuntoDoTerceiroVazamento`, a 3ª etapa pede DUAS
+ * ferramentas — `send_template` primeiro e o 3º vazamento depois —, que o SDK executa
+ * em paralelo: é a corrida do achado 3 da segunda revisão.
  */
-function modeloQueVazaEDepoisTentaTemplate() {
+function modeloQueVazaEDepoisTentaTemplate(opcoes: { templateJuntoDoTerceiroVazamento?: boolean } = {}) {
   const estado = { etapas: 0, checkpoints: 0, resultados: [] as string[] };
   const doGenerate = async (opts: { prompt?: unknown }) => {
     const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
@@ -120,19 +131,21 @@ function modeloQueVazaEDepoisTentaTemplate() {
       };
     }
     estado.etapas += 1;
-    const chamada =
+    const template = { toolName: "send_template", input: TEMPLATE };
+    const chamadas =
       estado.etapas <= VAZAMENTOS.length
-        ? { toolName: "send_message", input: { body: VAZAMENTOS[estado.etapas - 1] } }
-        : { toolName: "send_template", input: { template_name: "retomada", language: "pt_BR", values: { "1": "Ana" } } };
+        ? [
+            ...(opcoes.templateJuntoDoTerceiroVazamento && estado.etapas === VAZAMENTOS.length ? [template] : []),
+            { toolName: "send_message", input: { body: VAZAMENTOS[estado.etapas - 1] } },
+          ]
+        : [template];
     return {
-      content: [
-        {
-          type: "tool-call" as const,
-          toolCallId: `c${estado.etapas}`,
-          toolName: chamada.toolName,
-          input: JSON.stringify(chamada.input),
-        },
-      ],
+      content: chamadas.map((chamada, i) => ({
+        type: "tool-call" as const,
+        toolCallId: `c${estado.etapas}-${i}`,
+        toolName: chamada.toolName,
+        input: JSON.stringify(chamada.input),
+      })),
       finishReason: { unified: "tool-calls" as const, raw: undefined },
       usage: USO,
       warnings: [],
@@ -179,7 +192,12 @@ function montaHandler(doGenerate: unknown) {
   });
 }
 
-async function rodaTurno(handler: ReturnType<typeof montaHandler>, evento: string): Promise<Error | null> {
+async function rodaTurno(
+  handler: ReturnType<typeof montaHandler>,
+  evento: string,
+  /** O banco que o HANDLER usa (a fila continua no `pool`): o teste da corrida o embrulha para segurar uma consulta. */
+  bancoDoHandler: pg.Pool = pool,
+): Promise<Error | null> {
   await pool.query("update job_queue set status = 'done' where status = 'pending'");
   const { job } = await m.queue.enqueueJob(pool, ORG, {
     kind: "inbound_turn",
@@ -196,7 +214,7 @@ async function rodaTurno(handler: ReturnType<typeof montaHandler>, evento: strin
   const [claimed] = await m.queue.claimJobs(pool, { workerId: "fs", maxConcurrency: 1 });
   expect(claimed?.id).toBe(job.id);
   try {
-    await handler(claimed!, pool, { workerId: "fs" });
+    await handler(claimed!, bancoDoHandler, { workerId: "fs" });
     await m.queue.completeJob(pool, claimed!.id, "fs");
     return null;
   } catch (err) {
@@ -331,5 +349,76 @@ describe("turno completo — o fail-safe de vocabulário interno (achados 2 e 3 
       [ORG],
     );
     expect(rows[0]!.status).not.toBe("done");
+  });
+
+  it("(rodada 3) `send_template` e o 3º vazamento na MESMA etapa: o template passa pela trava de entrada antes do fail-safe e é barrado no ponto comum — só a frase sai", async () => {
+    // A corrida, encenada: a consulta do modelo aprovado (`meta_templates`) do
+    // `send_template` fica SEGURA até a frase de espera sair pelo canal. É o atraso
+    // que o Codex descreveu (consulta ou gate demorando enquanto a outra ferramenta
+    // da etapa liga o fail-safe), tornado determinístico. Teto de 3 s para o teste
+    // falhar com asserção legível, e não por tempo, se a frase nunca sair.
+    const ordem: string[] = [];
+    let liberaOTemplate: () => void = () => {};
+    const fraseSaiu = new Promise<void>((resolve) => {
+      liberaOTemplate = resolve;
+    });
+    respostaDoCanal = () => {
+      const ultimo = enviados[enviados.length - 1]!;
+      if (ultimo.template) ordem.push("template_enviado");
+      else if (ultimo.body.includes(m.turno.FRASE_DE_ESPERA_PADRAO)) {
+        ordem.push("frase_enviada");
+        liberaOTemplate();
+      } else ordem.push("texto_enviado");
+      return { kind: "sent", idempotencyKey: "k", messageId: "m1" };
+    };
+    const banco = new Proxy(pool, {
+      get(alvo, prop) {
+        if (prop === "query") {
+          return async (...args: unknown[]) => {
+            if (typeof args[0] === "string" && args[0].includes("from meta_templates")) {
+              ordem.push("template_consultado");
+              await Promise.race([fraseSaiu, new Promise((r) => setTimeout(r, 3000))]);
+              ordem.push("template_definido");
+            }
+            return (alvo.query as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const valor = Reflect.get(alvo, prop, alvo) as unknown;
+        return typeof valor === "function" ? (valor as (...a: unknown[]) => unknown).bind(alvo) : valor;
+      },
+    }) as pg.Pool;
+
+    const modelo = modeloQueVazaEDepoisTentaTemplate({ templateJuntoDoTerceiroVazamento: true });
+    const erro = await rodaTurno(montaHandler(modelo.doGenerate), "dddddddd-0000-4000-8000-000000000008", banco);
+    expect(erro).toBeNull();
+
+    // A corrida aconteceu como descrita: o template pediu a consulta ANTES de a frase
+    // sair (passou pela trava de entrada com `passadoAoHumano` ainda falso) e só a
+    // teve de volta DEPOIS.
+    expect(ordem.slice(0, 3)).toEqual(["template_consultado", "frase_enviada", "template_definido"]);
+
+    // E ainda assim o cliente recebeu UMA mensagem: a frase de espera. Antes, o template
+    // seguia ao canal depois dela (`ordem` terminava em `template_enviado`).
+    expect(ordem).not.toContain("template_enviado");
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0]!.body).toContain(m.turno.FRASE_DE_ESPERA_PADRAO);
+    expect(enviados[0]!.template).toBeUndefined();
+
+    // Três etapas, as duas ferramentas da 3ª na mesma etapa; a 4ª não existe.
+    expect(modelo.estado.etapas).toBe(VAZAMENTOS.length);
+    expect(modelo.estado.checkpoints).toBe(1);
+    // O modelo leu o template como barrado pela passagem (veto traduzido), não como enviado.
+    const resultados = modelo.estado.resultados.join("\n");
+    expect(resultados).toMatch(/internal_vocabulary_leak_handoff/);
+    expect(resultados).toMatch(/turno_passado_ao_humano/);
+    expect(resultados).not.toMatch(/template enviado/);
+
+    // Uma pessoa foi acionada uma vez só.
+    const { rows: casos } = await pool.query<{ source: string }>(
+      "select source from agent_cases where organization_id = $1 and conversation_id = $2",
+      [ORG, CONV],
+    );
+    expect(casos).toHaveLength(1);
+    expect(casos[0]!.source).toBe("guardrail_autofallback");
   });
 });

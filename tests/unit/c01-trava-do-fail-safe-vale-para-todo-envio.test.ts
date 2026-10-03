@@ -169,6 +169,9 @@ describe("(C01) a ligação no turno: toda ferramenta de envio recusa, e a chama
     expect(trava).toBeLessThan(template.indexOf("definicaoNaConexao"));
     expect(trava).toBeLessThan(template.indexOf("renderTemplateBody("));
     expect(trava).toBeLessThan(template.indexOf("runBeforeSend("));
+    // (rodada 3) e a cadeia roda dentro de `cadeiaDeEnvio`, que traduz a reconferência
+    // do ponto comum em veto `turno_passado_ao_humano`.
+    expect(template).toMatch(/cadeiaDeEnvio\(\(\) =>\s*runBeforeSend\(\{/);
   });
 
   it("send_message recusa antes da cadeia; a pergunta do roteiro também não sai", () => {
@@ -183,7 +186,7 @@ describe("(C01) a ligação no turno: toda ferramenta de envio recusa, e a chama
     // `enviarPeloCanal` é o único caminho ao canal; quem o chama: send_template,
     // send_message e a pergunta do roteiro. Um 4º chamador sem trava reprova aqui.
     expect(FONTE.match(/liveChannel\(\)\.send\(/g)).toHaveLength(1);
-    expect(FONTE.match(/enviarPeloCanal\(\{/g)).toHaveLength(3);
+    expect(FONTE.match(/enviarPeloCanal\(\s*\{/g)).toHaveLength(3);
     expect(FONTE.match(/if \(passadoAoHumano\) return recusaPorPassagemAoHumano\(\);/g)).toHaveLength(2);
   });
 
