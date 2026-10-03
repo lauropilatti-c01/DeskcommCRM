@@ -56,7 +56,7 @@ import { WahaChannelAdapter } from '../edge/channel/waha-adapter';
 // egress de canal — o envio em si vai pelo adapter (ChannelAdapter). Ver F2-25.
 import { applySendOutcome } from '../edge/crm/send-message';
 // (C01) A posição inicial do turno vem do ledger: re-execução continua de onde parou.
-import { conteudoRegistradoNoJob, posicaoInicialDoJob } from '../edge/crm/send-ledger';
+import { conteudoRegistradoNoJob, estadoInicialDoJob } from '../edge/crm/send-ledger';
 import {
   LlmBudgetExceededError,
   runModelCall,
@@ -2707,7 +2707,19 @@ async function executarTurnoDoAgente(
   // mesmo job (reaper, retry) `seq` recomeçava em 0: a primeira bolha nova caía
   // na posição da primeira antiga e era descartada como `already_sent` (C54).
   // O ledger reconcilia os recibos pendentes e devolve a maior posição aceita.
-  let seq = preview ? 0 : await posicaoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
+  //
+  // (C01) Dois números, não um: `posicao` é a dica de posição do próximo recibo no
+  // ledger; `seq` é quantas mensagens o cliente recebeu (ou vai receber) deste job —
+  // o que conta no teto do turno, nos "já falei neste turno" e no que resta para
+  // bolhas e fotos. Quando eram o mesmo número, a posição 1 'failed' com as 2 e 3
+  // aceitas valia "3 enviadas" e a re-execução recusava por teto antes de consultar
+  // o ledger: a primeira mensagem ficava sem entrega (achado 1 da terceira revisão
+  // adversarial). O preview não tem job: parte do zero.
+  const estadoInicial = preview
+    ? { posicao: 0, enviadas: 0 }
+    : await estadoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
+  let posicao = estadoInicial.posicao;
+  let seq = estadoInicial.enviadas;
   // (C01) As URLs que a base da empresa devolveu NESTE turno (resultado de
   // `crm_query_external_data`). O gate de vocabulário interno libera a ocorrência
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
@@ -2727,10 +2739,12 @@ async function executarTurnoDoAgente(
         'NÃO envie mais nada — encerre o turno agora.',
     },
   });
-  // (C01) O único caminho de `seq` ao canal. `already_sent` é o ledger dizendo
-  // que ESTE texto já saiu numa execução anterior do job: não é mensagem física
-  // nova, não ocupa posição e não conta no teto do turno — por isso devolve a
-  // posição. O teto continua contando o que o lead de fato recebeu neste turno.
+  // (C01) O único caminho ao canal. `posicao` é a dica de posição do recibo (o
+  // ledger pode acomodar o conteúdo noutra: já aceito, pendente retomado, colisão);
+  // `seq` conta o que de fato saiu. `already_sent` é o ledger dizendo que ESTE
+  // conteúdo já saiu numa execução anterior do job: não é mensagem física nova, não
+  // ocupa posição e não conta no teto do turno. Qualquer outro desfecho conta — como
+  // sempre contou — e o teto continua medindo o que o lead recebeu neste turno.
   //
   // (C01) E é aqui, no ponto comum imediatamente anterior ao envio físico — já sob
   // a serialização do número (a cadeia chama `send` dentro da transação com o
@@ -2743,9 +2757,10 @@ async function executarTurnoDoAgente(
     opcoes?: { fraseDeEspera?: boolean },
   ): Promise<ChannelSendResult> => {
     if (passadoAoHumano && opcoes?.fraseDeEspera !== true) throw new EnvioAposPassagemAoHumano();
-    seq += 1;
-    const resultado = await liveChannel().send({ ...envio, seq });
-    if (resultado.kind === 'already_sent') seq -= 1;
+    posicao += 1;
+    const resultado = await liveChannel().send({ ...envio, seq: posicao });
+    if (resultado.kind === 'already_sent') posicao -= 1;
+    else seq += 1;
     return resultado;
   };
   /**

@@ -220,6 +220,6 @@ describe("(C01) a ligação no turno", () => {
     expect(bloco).toMatch(
       /\.\.\.\(preview\s*\?\s*\{\}\s*:\s*\{\s*jaRegistrada: \(bolha: string\) =>\s*conteudoRegistradoNoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id, body: bolha \}\),/,
     );
-    expect(FONTE).toMatch(/import \{ conteudoRegistradoNoJob, posicaoInicialDoJob \} from '\.\.\/edge\/crm\/send-ledger';/);
+    expect(FONTE).toMatch(/import \{ conteudoRegistradoNoJob, estadoInicialDoJob \} from '\.\.\/edge\/crm\/send-ledger';/);
   });
 });

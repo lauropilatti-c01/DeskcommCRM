@@ -337,31 +337,66 @@ export async function reconcileAcceptedSend(
   return true;
 }
 /**
- * (C01) De onde a execução parte: a maior posição ACEITA do job, depois de
- * reconciliar os recibos que ficaram em 'requested'/'queued' (crash entre o envio
- * e a gravação). Até aqui `seq` recomeçava em 0 a cada execução, e a primeira
- * bolha nova da re-execução caía na posição da primeira antiga (C54). Posições
- * com 'failed' ou 'vetoed' acima da aceita seguem reaproveitáveis pelos ramos de
- * colisão. 0 em job sem envio aceito.
+ * (C01) De onde a execução parte, em DOIS números que não se confundem:
+ *
+ * - `posicao`: a maior posição ACEITA do job, depois de reconciliar os recibos que
+ *   ficaram em 'requested'/'queued' (crash entre o envio e a gravação). É a dica de
+ *   posição para o próximo recibo; posições com 'failed' ou 'vetoed' acima dela
+ *   seguem reaproveitáveis pelos ramos de colisão. Até aqui `seq` recomeçava em 0 a
+ *   cada execução, e a primeira bolha nova da re-execução caía na posição da
+ *   primeira antiga (C54).
+ * - `enviadas`: quantas mensagens deste job o cliente já recebeu ou vai receber — as
+ *   aceitas (depois da reconciliação) mais as que o canal segura (recibo 'queued', ou
+ *   'requested' com mensagem gravada e não falhada). É isto que conta no teto do
+ *   turno. A posição NÃO conta: com teto 3, a posição 1 'failed' e as 2 e 3 aceitas
+ *   davam "3 enviadas", as ferramentas de envio recusavam por teto antes de consultar
+ *   o ledger, e a primeira mensagem ficava sem entrega para sempre (achado 1 da
+ *   terceira revisão adversarial).
+ *
+ * `{ posicao: 0, enviadas: 0 }` em job sem recibo.
  */
-export async function posicaoInicialDoJob(
+export async function estadoInicialDoJob(
   db: Queryable,
   input: { tenantId: string; jobId: string },
-): Promise<number> {
+): Promise<{ posicao: number; enviadas: number }> {
+  const store = pgSendLedger(db);
   const { rows } = await db.query<{ seq: number | string; status: SendLedgerStatus }>(
     "select seq,status from send_ledger where organization_id=$1 and job_id=$2 order by seq",
     [input.tenantId, input.jobId],
   );
-  let maior = 0;
+  let posicao = 0;
+  let enviadas = 0;
   for (const row of rows) {
     const seq = Number(row.seq);
-    const aceito =
-      row.status === "accepted" ||
-      ((row.status === "requested" || row.status === "queued") &&
-        (await reconcileAcceptedSend(db, { ...input, seq })));
-    if (aceito && seq > maior) maior = seq;
+    let aceita = row.status === "accepted";
+    let aCaminho = false;
+    if (row.status === "requested" || row.status === "queued") {
+      const recibo = await store.find({ ...input, leadId: null, seq, body: "" });
+      const mensagem = recibo ? await store.message(input.tenantId, recibo.id) : null;
+      if (recibo && mensagem && ["sent", "delivered", "read"].includes(mensagem.status)) {
+        await store.update(input.tenantId, recibo.id, "accepted", mensagem.id, null);
+        aceita = true;
+      } else if (mensagem && mensagem.status !== "failed") {
+        // O CRM tem a mensagem (queued/sending): o canal a entrega quando a sessão
+        // voltar. Conta como enviada; a posição fica com quem a ocupa.
+        aCaminho = true;
+      }
+    }
+    if (aceita) {
+      enviadas += 1;
+      if (seq > posicao) posicao = seq;
+    } else if (aCaminho) {
+      enviadas += 1;
+    }
   }
-  return maior;
+  return { posicao, enviadas };
+}
+/** (C01) Só a posição de `estadoInicialDoJob` (quem precisa dos dois números usa aquela). */
+export async function posicaoInicialDoJob(
+  db: Queryable,
+  input: { tenantId: string; jobId: string },
+): Promise<number> {
+  return (await estadoInicialDoJob(db, input)).posicao;
 }
 export function pgSendLedger(db: Queryable): LedgerStore {
   return {

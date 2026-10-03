@@ -43,13 +43,13 @@ describe("(C01) o erro da reconferência", () => {
 });
 
 describe("(C01) a reconferência no ponto comum e a tradução em veto", () => {
-  it("`enviarPeloCanal` reconfere a passagem ANTES de avançar `seq` e de chamar o canal; só a frase marcada passa", () => {
+  it("`enviarPeloCanal` reconfere a passagem ANTES de avançar a posição e de chamar o canal; só a frase marcada passa", () => {
     const envio = corpo("const enviarPeloCanal = async (", "const cadeiaDeEnvio = async (");
     const trava = envio.indexOf(
       "if (passadoAoHumano && opcoes?.fraseDeEspera !== true) throw new EnvioAposPassagemAoHumano();",
     );
     expect(trava).toBeGreaterThan(-1);
-    expect(trava).toBeLessThan(envio.indexOf("seq += 1;"));
+    expect(trava).toBeLessThan(envio.indexOf("posicao += 1;"));
     expect(trava).toBeLessThan(envio.indexOf("liveChannel().send("));
     expect(envio).toMatch(/opcoes\?: \{ fraseDeEspera\?: boolean \}/);
   });
