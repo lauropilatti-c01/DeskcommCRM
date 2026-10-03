@@ -593,15 +593,18 @@ describe("(C01) a ligação no código", () => {
   });
 
   it("`send_message`: cada mensagem física declara a identidade a partir do corpo entregue à cadeia (o do modelo, ou a frase de espera); a sonda das bolhas usa a mesma", () => {
-    expect(TURNO).toContain("let corpoDaCadeia: string = body;");
     expect(TURNO).toMatch(
-      /corpoDaCadeia = deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO;\s*const espera = await runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: corpoDaCadeia,/,
+      /const corpoDaCadeia = \(\): string =>\s*enviandoFraseDeEspera \? \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\) : body;/,
+    );
+    // A frase de espera é marcada imediatamente antes de sair, e o `body:` dela é o mesmo valor.
+    expect(TURNO).toMatch(
+      /enviandoFraseDeEspera = true;\s*const espera = await runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,/,
     );
     expect(TURNO).toMatch(
-      /body: corpo,\s*\.\.\.\(media \? \{ media \} : \{\}\),\s*\.\.\.identidadeDoEnvio\(corpo, finalBody, comoACadeiaComeca\(corpoDaCadeia\)\),/,
+      /body: corpo,\s*\.\.\.\(media \? \{ media \} : \{\}\),\s*\.\.\.identidadeDoEnvio\(corpo, finalBody, comoACadeiaComeca\(corpoDaCadeia\(\)\)\),/,
     );
     expect(TURNO).toContain(
-      "conhecido({ body: bolha, ...identidadeDoEnvio(bolha, finalBody, comoACadeiaComeca(corpoDaCadeia)) })",
+      "conhecido({ body: bolha, ...identidadeDoEnvio(bolha, finalBody, comoACadeiaComeca(corpoDaCadeia())) })",
     );
     // O plano da retomada com o teto cheio parte do mesmo corpo.
     expect(TURNO).toMatch(/const texto = comoACadeiaComeca\(textoDoModelo\);/);

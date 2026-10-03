@@ -3521,8 +3521,10 @@ async function executarTurnoDoAgente(
         // depois da passagem ao humano.
         let enviandoFraseDeEspera = false;
         // (C01, rodada 6) O texto entregue à cadeia neste envio — o do modelo, ou a frase
-        // de espera do fail-safe: é dele que a identidade no ledger parte (`identidadeDoEnvio`).
-        let corpoDaCadeia: string = body;
+        // de espera do fail-safe (o mesmo valor do `body:` dela, abaixo): é dele que a
+        // identidade no ledger parte (`identidadeDoEnvio`).
+        const corpoDaCadeia = (): string =>
+          enviandoFraseDeEspera ? (deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO) : body;
         if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
           const preparadas = await prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog), {
             tenantId,
@@ -3702,7 +3704,7 @@ async function executarTurnoDoAgente(
                     conversationId: input.conversationId,
                     body: corpo,
                     ...(media ? { media } : {}),
-                    ...identidadeDoEnvio(corpo, finalBody, comoACadeiaComeca(corpoDaCadeia)),
+                    ...identidadeDoEnvio(corpo, finalBody, comoACadeiaComeca(corpoDaCadeia())),
                   },
                   { fraseDeEspera: enviandoFraseDeEspera },
                 );
@@ -3733,7 +3735,7 @@ async function executarTurnoDoAgente(
                       : {
                           // A mesma identidade com que a bolha vai ao ledger (`identidadeDoEnvio`).
                           jaRegistrada: (bolha: string) =>
-                            conhecido({ body: bolha, ...identidadeDoEnvio(bolha, finalBody, comoACadeiaComeca(corpoDaCadeia)) }),
+                            conhecido({ body: bolha, ...identidadeDoEnvio(bolha, finalBody, comoACadeiaComeca(corpoDaCadeia())) }),
                         }),
                     sleep,
                     jitter,
@@ -3865,10 +3867,9 @@ async function executarTurnoDoAgente(
             // fotos que a mensagem vetada pedia (a mensagem vetada não sai mais).
             fotosDoProduto = [];
             enviandoFraseDeEspera = true;
-            corpoDaCadeia = deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO;
             const espera = await runBeforeSend({
               ...beforeSendArgs,
-              body: corpoDaCadeia,
+              body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
               hasOpenCase: true,
               openedCaseThisTurn: true,
               enforceSpinning: false,

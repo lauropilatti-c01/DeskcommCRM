@@ -221,7 +221,7 @@ describe("(C01) a ligação no turno", () => {
     // vivo) e declara a mesma identidade com que a bolha vai ao ledger — o texto sem a
     // emenda da apresentação (`identidadeDoEnvio`).
     expect(bloco).toMatch(
-      /\.\.\.\(preview\s*\?\s*\{\}\s*:\s*\{\s*(?:\/\/[^\n]*\n\s*)*jaRegistrada: \(bolha: string\) =>\s*conhecido\(\{ body: bolha, \.\.\.identidadeDoEnvio\(bolha, finalBody, comoACadeiaComeca\(corpoDaCadeia\)\) \}\),/,
+      /\.\.\.\(preview\s*\?\s*\{\}\s*:\s*\{\s*(?:\/\/[^\n]*\n\s*)*jaRegistrada: \(bolha: string\) =>\s*conhecido\(\{ body: bolha, \.\.\.identidadeDoEnvio\(bolha, finalBody, comoACadeiaComeca\(corpoDaCadeia\(\)\)\) \}\),/,
     );
     expect(FONTE).toMatch(
       /const conhecido = \(envio: MensagemPlanejada & \{ template\?: object; identidade\?: string \}\): Promise<boolean> =>\s*preview \? Promise\.resolve\(false\) : conteudoRegistradoNoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.envio \}\);/,
