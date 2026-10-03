@@ -108,6 +108,7 @@ import { podeExporScheduleFollowup } from '@/lib/followup/callback-policy';
 import {
   avisarLeadDaEscalacao,
   avisarLeadLendoOContato,
+  CODIGO_DO_VETO,
   type AvisoDeEscalacaoIds,
   type AvisoDeEscalacaoOpts,
   type DesfechoDoAviso,
@@ -487,8 +488,9 @@ export const AGENT_TOOL_DEFS = {
  * ler, só que medido. Agora: o 1º veto ensina; o 2º ensina e avisa que é a última
  * tentativa (reescrita limitada, com o motivo do veto); no 3º o texto vetado NÃO sai,
  * o cliente recebe uma frase curta de espera (`FRASE_DE_ESPERA_PADRAO`, configurável),
- * um caso é aberto para uma pessoa da equipe e o lead vai à etapa de passagem. Ninguém
- * fica sem resposta, e nada vetado chega ao cliente.
+ * um caso é aberto para uma pessoa da equipe, o lead vai à etapa de passagem e a
+ * passagem ao humano fica GRAVADA (`performHumanHandoff`: é o que o início do próximo
+ * turno lê). Ninguém fica sem resposta, e nada vetado chega ao cliente.
  */
 export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 3;
 
@@ -508,8 +510,12 @@ export const FRASE_DE_ESPERA_PADRAO =
  *   anterior do job (`already_sent`) — só aqui o cliente está avisado;
  * - `a_caminho`: o canal segurou (`queued`, sessão fora) e entrega quando voltar —
  *   não se reenvia;
- * - `pendente`: não saiu agora e o job vai re-tentar pela fila (`unavailable`,
- *   `failed`, veto da cadeia) — com a MESMA identidade no ledger, sem duplicar;
+ * - `pendente`: não saiu (`unavailable`, `failed`, veto da cadeia). O erro fica
+ *   registrado e o job falha, mas a re-execução NÃO manda a frase: a passagem ao
+ *   humano já está gravada e o turno de um lead em handoff é pulado antes de qualquer
+ *   envio (achado 2 da quarta revisão adversarial). Quem assume lê na Central que o
+ *   cliente NÃO foi avisado (`avisoAoLeadPelaFraseDeEspera`) — a doutrina do autor:
+ *   aviso que falha não impede a passagem, e a informação fica com a pessoa;
  * - `nao_sai`: o contato pediu para não receber mensagens (`blocked`); o fim do
  *   turno cancela o job.
  */
@@ -537,10 +543,18 @@ export type DesfechoDaFraseDeEspera = 'entregue' | 'a_caminho' | 'pendente' | 'n
  * que não fosse veto entrava em `outcomes` e o turno fechava normal: com o canal
  * indisponível (`unavailable`), o cliente ficava sem o aviso, o recibo ficava
  * 'requested' e ninguém voltava para mandá-lo — enquanto o envio normal registra
- * o erro e o job re-tenta. Aqui o `unavailable` faz o mesmo que lá: o turno falha e
- * a re-execução manda a frase com a mesma identidade (o ledger reconhece o que já
- * saiu). `failed` e `blocked` seguem para o fim do turno como todo envio
- * (`failed` re-tenta, `blocked` cancela o job).
+ * o erro e o job re-tenta. Aqui o `unavailable` registra o erro como lá e o turno
+ * falha. `failed` e `blocked` seguem para o fim do turno como todo envio (`failed`
+ * falha o job, `blocked` o cancela).
+ *
+ * (C01, rodada 5) O que a re-execução faz mudou com a passagem gravada: o lead já
+ * está em handoff, então o retry é pulado antes de qualquer envio e a frase pendente
+ * NÃO sai — nem por este caminho, nem pelo modelo (que não é mais chamado). O que
+ * garante que ninguém a espera em vão é a Central: o desfecho vai na passagem
+ * (`avisoAoLeadPelaFraseDeEspera`) e quem assume lê "O cliente NÃO foi avisado".
+ * Reenviar a frase de forma determinística no retry exigiria furar a trava
+ * (`stopGate` lê `force_human`) no início do turno de um lead em handoff — fora
+ * desta rodada, limite documentado em `docs/loops/motor-c54.md`.
  */
 export function desfechoDaFraseDeEspera(
   espera: BeforeSendResult,
@@ -568,19 +582,70 @@ export function desfechoDaFraseDeEspera(
     case 'blocked':
       return 'nao_sai';
     case 'failed':
-      // O fim do turno re-tenta o job ao ver um `failed` em `outcomes` (mesmo
-      // caminho do envio normal: a posição é rotacionada na re-execução).
+      // O fim do turno falha o job ao ver um `failed` em `outcomes` (mesmo caminho
+      // do envio normal); a re-execução é pulada — a passagem já está gravada.
       return 'pendente';
     case 'unavailable':
-      efeitos.log.error('frase de espera não saiu: canal indisponível — job re-tentado pela fila', {
-        reason: desfecho.reason,
-      });
+      efeitos.log.error(
+        'frase de espera não saiu: canal indisponível — a passagem ao humano fica gravada e a Central lê que o cliente não foi avisado',
+        { reason: desfecho.reason },
+      );
       efeitos.noteRunError(
-        new Error(`frase de espera não enviada: canal indisponível (${desfecho.reason}) — job re-tentado pela fila`),
+        new Error(
+          `frase de espera não enviada: canal indisponível (${desfecho.reason}) — a passagem ao humano fica gravada; a frase não é reenviada`,
+        ),
       );
       return 'pendente';
   }
 }
+
+/**
+ * (C01, rodada 5) O desfecho da frase de espera traduzido para o que
+ * `performHumanHandoff` escreve na Central — a pergunta de quem assume é "essa pessoa
+ * sabe que estou vindo?". O MESMO vocabulário de `avisarLeadDaEscalacao`, desfecho a
+ * desfecho: só `sent`/`already_sent` é cliente avisado; `queued` é fila com o canal
+ * fora; veto da cadeia leva o código do gate e o par fechado quando há
+ * (`CODIGO_DO_VETO`); `failed`/`unavailable` é falha no envio; `blocked` fica sem par,
+ * como lá — inventar um seria escrever na tela uma razão que ninguém mediu.
+ */
+export function avisoAoLeadPelaFraseDeEspera(espera: BeforeSendResult): DesfechoDoAviso {
+  if (espera.status === 'vetoed') {
+    const codigo = CODIGO_DO_VETO[espera.code];
+    return {
+      avisado: false,
+      porque: espera.code,
+      ...(codigo !== undefined ? { motivoCodigo: codigo } : {}),
+    };
+  }
+  switch (espera.outcome.kind) {
+    case 'sent':
+    case 'already_sent':
+      return { avisado: true };
+    case 'queued':
+      return { avisado: false, porque: 'na_fila_canal_fora', motivoCodigo: 'na_fila_canal_fora' };
+    case 'blocked':
+      return { avisado: false, porque: 'contato_bloqueado' };
+    case 'failed':
+      return { avisado: false, porque: 'canal_falhou', motivoCodigo: 'falhou_no_envio' };
+    case 'unavailable':
+      return { avisado: false, porque: 'canal_indisponivel', motivoCodigo: 'falhou_no_envio' };
+  }
+}
+
+/**
+ * (C01, rodada 5) O motivo da passagem gravado em `conversations.last_handoff_reason` e
+ * no corpo do aviso da Central (`Motivo: …`). Frase legível, não código: sem a linha
+ * de `passagens_de_atendimento` (ver o fail-safe em `send_message.execute`), este
+ * texto é o único "por quê" que quem assume lê — e a Central não traduz código cru.
+ * Constante exportada pela mesma razão de `HANDOFF_REASON_ORCAMENTO`: quem procurar
+ * no banco por que a conversa foi parar na fila humana busca por este valor.
+ */
+export const MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO =
+  'A revisão automática travou a resposta da IA (vocabulário interno do sistema); uma pessoa precisa responder';
+
+/** (C01, rodada 5) O título do aviso na Central — o mesmo título do caso, com a ação de quem lê. */
+export const TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO =
+  'Resposta travada pela revisão automática — assumir a conversa';
 
 /** (C01) O que o modelo lê sobre a frase de espera, conforme o desfecho — nunca "o cliente recebeu" sem ter recebido. */
 export const AVISO_AO_MODELO_POR_DESFECHO: Record<DesfechoDaFraseDeEspera, string> = {
@@ -589,7 +654,7 @@ export const AVISO_AO_MODELO_POR_DESFECHO: Record<DesfechoDaFraseDeEspera, strin
   a_caminho:
     'A conversa passou a uma pessoa da equipe; o canal entrega a frase de espera ao cliente quando a sessão voltar.',
   pendente:
-    'A conversa passou a uma pessoa da equipe; a frase de espera ao cliente ainda não saiu e o sistema vai tentar de novo.',
+    'A conversa passou a uma pessoa da equipe; a frase de espera ao cliente não saiu, e a equipe lê isso na Central.',
   nao_sai:
     'A conversa passou a uma pessoa da equipe; o cliente pediu para não receber mensagens e a frase de espera não sai.',
 };
@@ -2778,6 +2843,14 @@ async function executarTurnoDoAgente(
     else if (contaNoTeto(resultado)) seq += 1;
     return resultado;
   };
+  /** (C01) O veto que a passagem ao humano devolve às ferramentas de envio (ensino da trava). */
+  const vetoPorPassagemAoHumano = (trace: BeforeSendResult['trace'] = []): BeforeSendResult => ({
+    status: 'vetoed',
+    gate: 'turno_passado_ao_humano',
+    code: 'turno_passado_ao_humano',
+    message: recusaPorPassagemAoHumano().error.message,
+    trace,
+  });
   /**
    * (C01) A cadeia de envio (`runBeforeSend`) com a reconferência acima traduzida:
    * o envio barrado em `enviarPeloCanal` volta como veto `turno_passado_ao_humano`
@@ -2786,17 +2859,21 @@ async function executarTurnoDoAgente(
    */
   const cadeiaDeEnvio = async (cadeia: () => Promise<BeforeSendResult>): Promise<BeforeSendResult> => {
     try {
-      return await cadeia();
+      const resultado = await cadeia();
+      // (C01, rodada 5) A passagem GRAVADA pelo fail-safe arma o `stopGate`
+      // (`force_human`, lido sob o lock): o envio que chega à cadeia depois dela
+      // é vetado como `contato_bloqueado`, com o texto do opt-out — e o lead não
+      // pediu para sair; o turno passou a uma pessoa. O ensino ao modelo é o da
+      // passagem, o mesmo da reconferência abaixo. O veto em si fica: nada sai.
+      if (passadoAoHumano && resultado.status === 'vetoed' && resultado.gate === 'stop') {
+        runLog.warn('envio barrado pela trava da passagem gravada: o turno já passou a uma pessoa');
+        return vetoPorPassagemAoHumano(resultado.trace);
+      }
+      return resultado;
     } catch (err) {
       if (err instanceof EnvioAposPassagemAoHumano) {
         runLog.warn('envio barrado no ponto comum: o turno já passou a uma pessoa (corrida entre ferramentas da etapa)');
-        return {
-          status: 'vetoed',
-          gate: 'turno_passado_ao_humano',
-          code: 'turno_passado_ao_humano',
-          message: recusaPorPassagemAoHumano().error.message,
-          trace: [],
-        };
+        return vetoPorPassagemAoHumano();
       }
       throw err;
     }
@@ -3578,9 +3655,10 @@ async function executarTurnoDoAgente(
             // medição é produto deste gate; a liberação não era. Agora os dois lados
             // valem ao mesmo tempo: 1º veto ensina; 2º ensina e avisa que é a última
             // tentativa; 3º: o texto vetado não sai, o cliente recebe uma frase curta de
-            // espera, um caso é aberto para uma pessoa da equipe (é ela quem responde) e
-            // o lead vai à etapa de passagem. A frase passa pela cadeia inteira (pacing,
-            // LGPD, stop) — nunca chamamos o canal por fora.
+            // espera, um caso é aberto para uma pessoa da equipe (é ela quem responde),
+            // o lead vai à etapa de passagem e a passagem fica gravada
+            // (`performHumanHandoff`, depois da frase). A frase passa pela cadeia
+            // inteira (pacing, LGPD, stop) — nunca chamamos o canal por fora.
             internalVocabularyVetoCount += 1;
             if (internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO) {
               const ultima = internalVocabularyVetoCount === MAX_VETOS_DE_VOCABULARIO_INTERNO - 1;
@@ -3650,9 +3728,51 @@ async function executarTurnoDoAgente(
               enforceSpinning: false,
             });
             // (C01) Desfecho por desfecho: só `sent`/`already_sent` é cliente avisado;
-            // `unavailable` registra o erro e o job re-tenta com a mesma identidade
-            // (achado 3 da revisão adversarial). Ver `desfechoDaFraseDeEspera`.
+            // `unavailable` registra o erro (achado 3 da revisão adversarial). Ver
+            // `desfechoDaFraseDeEspera`.
             const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+            // (C01) A PASSAGEM FICA GRAVADA (achado 2 da quarta revisão adversarial). Até
+            // aqui o fail-safe abria o caso, movia a etapa em best-effort e ligava
+            // `passadoAoHumano` — só na closure. `openCase` não grava `force_human` nem
+            // `bot_silenced_until`, que é o que `isLeadInHandoff` lê no início de cada
+            // turno; a etapa de passagem é opt-in do tenant. Num pipeline sem ela, a
+            // próxima mensagem do cliente (ou o retry deste job) voltava ao modelo, que
+            // respondia normal — depois de o cliente ler "Uma pessoa continua a conversa
+            // com você por aqui". Agora o mecanismo canônico: `force_human`, silêncio
+            // durável, crons cancelados e o aviso na Central, com o desfecho da frase
+            // ("essa pessoa sabe que estou vindo?").
+            //
+            // DEPOIS da frase, não antes: `force_human` arma o `stopGate` que a vetaria
+            // (a ordem do autor nos outros gatilhos). O caso não duplica o aviso —
+            // `openCase` escreve só `agent_cases`/`agent_case_events`. Sem `passagem`
+            // (a linha de `passagens_de_atendimento`): as listas de origem e de motivo
+            // são fechadas no código e no banco (CHECK da migration 0291), e nenhuma
+            // descreve este caminho sem mentir na tela (`caso_escalado` é "Uma pessoa da
+            // equipe escalou um atendimento"); valor novo é migration, fora desta
+            // branch. O caso `guardrail_autofallback` é o registro: carrega o texto
+            // vetado, que é o que a pessoa precisa ler.
+            //
+            // Idempotente (re-executar é no-op semântico). Se falhar, o erro não some:
+            // `noteRunError` derruba o job e o retry refaz tudo — como na ferramenta
+            // `request_human_handoff`.
+            try {
+              await performHumanHandoff(
+                pool,
+                { tenantId, leadId, conversationId: input.conversationId },
+                {
+                  reason: MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
+                  conversationSummary: buildHandoffSummary(previous),
+                  inboxTitle: TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
+                  avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
+                  log: runLog,
+                },
+              );
+            } catch (err) {
+              runLog.error('fail-safe de vocabulário interno: a passagem ao humano não foi gravada — job re-tentado', {
+                error: err instanceof Error ? err.message.slice(0, 200) : 'erro desconhecido',
+              });
+              noteRunError(err instanceof Error ? err : new Error(String(err)));
+            }
             return {
               ok: false,
               error: {

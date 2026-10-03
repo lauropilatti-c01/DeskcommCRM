@@ -55,12 +55,29 @@ describe("(C01) a reconferência no ponto comum e a tradução em veto", () => {
   });
 
   it("`cadeiaDeEnvio` devolve o veto `turno_passado_ao_humano` só para esse erro; qualquer outro sobe", () => {
-    const cadeia = corpo("const cadeiaDeEnvio = async (", "const corposEnviados: string[] = [];");
-    expect(cadeia).toMatch(/if \(err instanceof EnvioAposPassagemAoHumano\) \{/);
+    const cadeia = corpo(
+      "const vetoPorPassagemAoHumano = (",
+      "const corposEnviados: string[] = [];",
+    );
+    expect(cadeia).toMatch(
+      /if \(err instanceof EnvioAposPassagemAoHumano\) \{\s*runLog\.warn\([\s\S]*?\);\s*return vetoPorPassagemAoHumano\(\);/,
+    );
     expect(cadeia).toMatch(
       /status: 'vetoed',\s*gate: 'turno_passado_ao_humano',\s*code: 'turno_passado_ao_humano',\s*message: recusaPorPassagemAoHumano\(\)\.error\.message,/,
     );
     expect(cadeia).toMatch(/\}\s*throw err;/);
+  });
+
+  it("(rodada 5) o veto do `stopGate` armado pela passagem GRAVADA também vira `turno_passado_ao_humano` — só com o turno já passado a uma pessoa", () => {
+    // `performHumanHandoff` grava `force_human`, que o `stopGate` lê sob o lock: a
+    // ferramenta da mesma etapa que chega à cadeia depois da passagem seria vetada
+    // como `contato_bloqueado`, com o texto do opt-out — e o lead não pediu para sair.
+    const cadeia = corpo("const cadeiaDeEnvio = async (", "const corposEnviados: string[] = [];");
+    expect(cadeia).toMatch(
+      /if \(passadoAoHumano && resultado\.status === 'vetoed' && resultado\.gate === 'stop'\) \{[\s\S]*?return vetoPorPassagemAoHumano\(resultado\.trace\);/,
+    );
+    // Sem a passagem neste turno, o veto do stop passa intacto (opt-out real continua opt-out).
+    expect(cadeia).toMatch(/return resultado;/);
   });
 
   it("toda cadeia de ferramenta roda por `cadeiaDeEnvio`: template, send_message, re-run do caso e pergunta do roteiro; só a frase de espera vai direto", () => {

@@ -66,8 +66,11 @@ export const SEQ_DO_AVISO = 0;
  * `aviso_motivo_codigo` nulo, e a tela diz "motivo desconhecido" — que é a
  * verdade disponível. Um mapa exaustivo obrigaria este arquivo a conhecer cada
  * gate novo só para não mentir.
+ *
+ * (C01) Exportado para o fail-safe de vocabulário interno (`inbound-turn.ts`,
+ * `avisoAoLeadPelaFraseDeEspera`) traduzir o veto da frase de espera com o MESMO mapa.
  */
-const CODIGO_DO_VETO: Readonly<Record<string, CodigoDeAvisoNaoEntregue>> = {
+export const CODIGO_DO_VETO: Readonly<Record<string, CodigoDeAvisoNaoEntregue>> = {
   messaging_window_closed: 'fora_da_janela',
   pre_go_live: 'pre_go_live',
   pre_go_live_indisponivel: 'pre_go_live',

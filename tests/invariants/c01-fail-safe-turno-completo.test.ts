@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
+import type * as HumanHandoff from "@/lib/agent-engine/agent/human-handoff";
 import type * as InboundTurn from "@/lib/agent-engine/agent/inbound-turn";
 import type * as Providers from "@/lib/agent-engine/edge/llm/providers";
 import type * as Queue from "@/lib/agent-engine/queue/queue";
@@ -25,7 +26,11 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *     na MESMA etapa (o SDK executa as ferramentas da etapa em paralelo). O template
  *     passa pela trava de entrada antes de o fail-safe ligar, espera a consulta do
  *     modelo aprovado e, quando chega ao ponto comum, a passagem já aconteceu: é
- *     barrado ali, sob a serialização — só a frase de espera chega ao cliente.
+ *     barrado ali, sob a serialização — só a frase de espera chega ao cliente;
+ *   - rodada 5, achado 2 (quarta revisão): o fail-safe PERSISTE a passagem
+ *     (`performHumanHandoff`). Num pipeline sem etapa de passagem, a próxima mensagem
+ *     do cliente e o retry do job não voltam ao modelo — e, quando a frase de espera
+ *     não saiu, a Central lê que o cliente NÃO foi avisado.
  *
  * Canal Cloud API (`meta_cloud`) de propósito: é o único em que a ferramenta
  * `send_template` existe. A mensagem do cliente tem 5 minutos — a janela de 24 h
@@ -53,6 +58,8 @@ const CONTACT = "dddddddd-0000-4000-8000-000000000002";
 const SESSION_META = "dddddddd-0000-4000-8000-000000000003";
 const CONV = "dddddddd-0000-4000-8000-000000000004";
 const MSG = "dddddddd-0000-4000-8000-000000000005";
+/** A mensagem SEGUINTE do cliente (rodada 5): chega depois do fail-safe e acorda outro turno. */
+const MSG_SEGUINTE = "dddddddd-0000-4000-8000-000000000015";
 /** O instante do turno (dentro da janela horária do anti-ban) e o da mensagem do cliente, 5 min antes. */
 const AGORA = new Date("2026-07-30T15:00:00Z");
 const MENSAGEM_DO_CLIENTE_EM = "2026-07-30T14:55:00Z";
@@ -64,6 +71,7 @@ interface EnvioCapturado {
 
 type Modules = {
   turno: typeof InboundTurn;
+  isLeadInHandoff: typeof HumanHandoff.isLeadInHandoff;
   queue: typeof Queue;
   createLogger: typeof ObsLogger.createLogger;
   createFakeRegistry: typeof Providers.createFakeRegistry;
@@ -94,6 +102,9 @@ const VAZAMENTOS = [
 ];
 
 const TEMPLATE = { template_name: "retomada", language: "pt_BR", values: { "1": "Ana" } };
+/** O que um modelo que NÃO vaza responderia à mensagem seguinte do cliente. */
+const RESPOSTA_NORMAL =
+  "Oi! Seu cadastro está ativo, sim. Quer que eu te explique os próximos passos?";
 
 /**
  * Modelo falso que vaza vocabulário interno três vezes e, se ganhar uma 4ª etapa,
@@ -104,14 +115,17 @@ const TEMPLATE = { template_name: "retomada", language: "pt_BR", values: { "1": 
  * ferramentas — `send_template` primeiro e o 3º vazamento depois —, que o SDK executa
  * em paralelo: é a corrida do achado 3 da segunda revisão.
  */
-function modeloQueVazaEDepoisTentaTemplate(opcoes: { templateJuntoDoTerceiroVazamento?: boolean } = {}) {
+function modeloQueVazaEDepoisTentaTemplate(
+  opcoes: { templateJuntoDoTerceiroVazamento?: boolean } = {},
+) {
   const estado = { etapas: 0, checkpoints: 0, resultados: [] as string[] };
   const doGenerate = async (opts: { prompt?: unknown }) => {
     const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
     for (const msg of msgs) {
       if (!Array.isArray(msg.content)) continue;
       for (const parte of msg.content as Array<Record<string, unknown>>) {
-        if (parte.type === "tool-result") estado.resultados.push(JSON.stringify(parte.output ?? parte));
+        if (parte.type === "tool-result")
+          estado.resultados.push(JSON.stringify(parte.output ?? parte));
       }
     }
     const ultima = msgs[msgs.length - 1];
@@ -135,7 +149,9 @@ function modeloQueVazaEDepoisTentaTemplate(opcoes: { templateJuntoDoTerceiroVaza
     const chamadas =
       estado.etapas <= VAZAMENTOS.length
         ? [
-            ...(opcoes.templateJuntoDoTerceiroVazamento && estado.etapas === VAZAMENTOS.length ? [template] : []),
+            ...(opcoes.templateJuntoDoTerceiroVazamento && estado.etapas === VAZAMENTOS.length
+              ? [template]
+              : []),
             { toolName: "send_message", input: { body: VAZAMENTOS[estado.etapas - 1] } },
           ]
         : [template];
@@ -146,6 +162,56 @@ function modeloQueVazaEDepoisTentaTemplate(opcoes: { templateJuntoDoTerceiroVaza
         toolName: chamada.toolName,
         input: JSON.stringify(chamada.input),
       })),
+      finishReason: { unified: "tool-calls" as const, raw: undefined },
+      usage: USO,
+      warnings: [],
+    };
+  };
+  return { doGenerate, estado };
+}
+
+/**
+ * (C01, rodada 5) Modelo que responde normalmente: uma `send_message` limpa e fim.
+ * É o que atenderia a mensagem seguinte do cliente se o turno chegasse ao modelo.
+ */
+function modeloQueRespondeNormal() {
+  const estado = { etapas: 0, checkpoints: 0 };
+  const doGenerate = async (opts: { prompt?: unknown }) => {
+    const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
+    const ultima = msgs[msgs.length - 1];
+    const pedeCheckpoint =
+      ultima?.role === "user" &&
+      Array.isArray(ultima.content) &&
+      (ultima.content as Array<Record<string, unknown>>).some(
+        (p) => p.type === "text" && p.text === m.turno.CHECKPOINT_INSTRUCTION,
+      );
+    if (pedeCheckpoint) {
+      estado.checkpoints += 1;
+      return {
+        content: [{ type: "text" as const, text: CHECKPOINT }],
+        finishReason: { unified: "stop" as const, raw: undefined },
+        usage: USO,
+        warnings: [],
+      };
+    }
+    estado.etapas += 1;
+    if (estado.etapas > 1) {
+      return {
+        content: [{ type: "text" as const, text: "" }],
+        finishReason: { unified: "stop" as const, raw: undefined },
+        usage: USO,
+        warnings: [],
+      };
+    }
+    return {
+      content: [
+        {
+          type: "tool-call" as const,
+          toolCallId: "n1",
+          toolName: "send_message",
+          input: JSON.stringify({ body: RESPOSTA_NORMAL }),
+        },
+      ],
       finishReason: { unified: "tool-calls" as const, raw: undefined },
       usage: USO,
       warnings: [],
@@ -197,6 +263,8 @@ async function rodaTurno(
   evento: string,
   /** O banco que o HANDLER usa (a fila continua no `pool`): o teste da corrida o embrulha para segurar uma consulta. */
   bancoDoHandler: pg.Pool = pool,
+  /** A mensagem do cliente que acorda este turno (rodada 5: a seguinte, depois do fail-safe). */
+  inboundMessageId: string = MSG,
 ): Promise<Error | null> {
   await pool.query("update job_queue set status = 'done' where status = 'pending'");
   const { job } = await m.queue.enqueueJob(pool, ORG, {
@@ -206,7 +274,7 @@ async function rodaTurno(
       conversation_id: CONV,
       contact_id: CONTACT,
       channel_session_id: SESSION_META,
-      inbound_message_id: MSG,
+      inbound_message_id: inboundMessageId,
       crm_event_id: evento,
     },
     maxAttempts: 1,
@@ -229,6 +297,7 @@ beforeAll(async () => {
     queue: await import("@/lib/agent-engine/queue/queue"),
     createLogger: (await import("@/lib/agent-engine/obs/logger")).createLogger,
     createFakeRegistry: (await import("@/lib/agent-engine/edge/llm/providers")).createFakeRegistry,
+    isLeadInHandoff: (await import("@/lib/agent-engine/agent/human-handoff")).isLeadInHandoff,
   };
 
   await pool.query(
@@ -290,12 +359,75 @@ beforeEach(async () => {
   await pool.query("delete from agent_case_events where organization_id = $1", [ORG]);
   await pool.query("delete from agent_cases where organization_id = $1", [ORG]);
   await pool.query("delete from send_ledger where organization_id = $1", [ORG]);
+  // (rodada 5) …e fora da passagem ao humano: o fail-safe de um caso grava
+  // `force_human` + silêncio durável, e o turno seguinte do mesmo lead seria pulado.
+  await pool.query(
+    "update contacts set force_human = false where organization_id = $1 and id = $2",
+    [ORG, CONTACT],
+  );
+  await pool.query(
+    `update conversations
+        set bot_silenced_until = null, status = 'open', last_handoff_at = null, last_handoff_reason = null
+      where organization_id = $1 and id = $2`,
+    [ORG, CONV],
+  );
+  await pool.query("delete from agent_inbox_items where organization_id = $1", [ORG]);
+  await pool.query("delete from passagens_de_atendimento where organization_id = $1", [ORG]);
+  await pool.query("delete from messages where organization_id = $1 and id = $2", [
+    ORG,
+    MSG_SEGUINTE,
+  ]);
 });
+
+/** O que a passagem gravou — o que `isLeadInHandoff` lê e o que a Central mostra. */
+async function estadoDaPassagem() {
+  const { rows: contato } = await pool.query<{ force_human: boolean }>(
+    "select force_human from contacts where organization_id = $1 and id = $2",
+    [ORG, CONTACT],
+  );
+  const { rows: conversa } = await pool.query<{
+    silenciada: boolean;
+    last_handoff_reason: string | null;
+  }>(
+    `select (bot_silenced_until is not null and bot_silenced_until > now()) as silenciada, last_handoff_reason
+       from conversations where organization_id = $1 and id = $2`,
+    [ORG, CONV],
+  );
+  const { rows: central } = await pool.query<{ kind: string; title: string; body: string | null }>(
+    "select kind, title, body from agent_inbox_items where organization_id = $1 and ref_id = $2 order by created_at",
+    [ORG, CONV],
+  );
+  const { rows: passagens } = await pool.query<{ n: string }>(
+    "select count(*)::text as n from passagens_de_atendimento where organization_id = $1",
+    [ORG],
+  );
+  return {
+    forceHuman: contato[0]!.force_human,
+    silenciada: conversa[0]!.silenciada,
+    motivo: conversa[0]!.last_handoff_reason,
+    emHandoff: await m.isLeadInHandoff(pool, ORG, CONTACT),
+    central,
+    passagens: Number(passagens[0]!.n),
+  };
+}
+
+/** A mensagem seguinte do cliente, gravada DEPOIS do fail-safe (é a inbound mais nova da conversa). */
+async function clienteEscreveDeNovo(): Promise<void> {
+  await pool.query(
+    `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+       type, direction, status, body, sent_via, sent_at)
+     values ($1,$2,$3,$4,$5,'text','inbound','delivered','e então, consegue me ajudar?','external_device',$6)`,
+    [MSG_SEGUINTE, ORG, CONV, SESSION_META, CONTACT, AGORA.toISOString()],
+  );
+}
 
 describe("turno completo — o fail-safe de vocabulário interno (achados 2 e 3 do Codex)", () => {
   it("3 vetos → frase de espera UMA vez, caso aberto, e o template da etapa seguinte NÃO sai porque a etapa não existe", async () => {
     const modelo = modeloQueVazaEDepoisTentaTemplate();
-    const erro = await rodaTurno(montaHandler(modelo.doGenerate), "dddddddd-0000-4000-8000-000000000006");
+    const erro = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "dddddddd-0000-4000-8000-000000000006",
+    );
     expect(erro).toBeNull();
 
     // O cliente recebeu UMA mensagem: a frase de espera (o disclosure da 1ª mensagem
@@ -322,21 +454,84 @@ describe("turno completo — o fail-safe de vocabulário interno (achados 2 e 3 
     expect(casos).toHaveLength(1);
     expect(casos[0]!.source).toBe("guardrail_autofallback");
     expect(casos[0]!.summary).toBe(VAZAMENTOS[2]);
+
+    // (rodada 5) E a passagem ao humano está GRAVADA, não só na closure: é o que o
+    // início do próximo turno lê. A Central tem o aviso, com o desfecho da frase
+    // ("JÁ FOI avisado", porque o canal aceitou) e o motivo legível.
+    const passagem = await estadoDaPassagem();
+    expect(passagem.forceHuman).toBe(true);
+    expect(passagem.silenciada).toBe(true);
+    expect(passagem.emHandoff).toBe(true);
+    expect(passagem.motivo).toBe(m.turno.MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO);
+    expect(passagem.central).toHaveLength(1);
+    expect(passagem.central[0]!.kind).toBe("handoff");
+    expect(passagem.central[0]!.title).toBe(m.turno.TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO);
+    expect(passagem.central[0]!.body).toContain(m.turno.MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO);
+    expect(passagem.central[0]!.body).toMatch(/JÁ FOI avisado/);
+    // Sem linha em `passagens_de_atendimento`: nenhuma origem do vocabulário fechado
+    // (CHECK do banco) descreve este caminho sem mentir — limite documentado.
+    expect(passagem.passagens).toBe(0);
+  });
+
+  it("(rodada 5) a mensagem SEGUINTE do cliente, num pipeline sem etapa de passagem, NÃO volta ao modelo: a passagem gravada pula o turno", async () => {
+    // 1º turno: o fail-safe. A etapa de passagem não existe neste tenant (e o
+    // `createAdminClient` do best-effort nem tem Supabase aqui): o que segura o
+    // turno seguinte tem de ser o que ficou no banco.
+    const vazador = modeloQueVazaEDepoisTentaTemplate();
+    expect(
+      await rodaTurno(montaHandler(vazador.doGenerate), "dddddddd-0000-4000-8000-000000000016"),
+    ).toBeNull();
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0]!.body).toContain(m.turno.FRASE_DE_ESPERA_PADRAO);
+
+    // O cliente escreve de novo, e o turno dele acorda com um modelo que responderia
+    // normalmente. Antes desta rodada ele respondia: `openCase` não grava
+    // `force_human` nem `bot_silenced_until`.
+    await clienteEscreveDeNovo();
+    const normal = modeloQueRespondeNormal();
+    const erro = await rodaTurno(
+      montaHandler(normal.doGenerate),
+      "dddddddd-0000-4000-8000-000000000017",
+      pool,
+      MSG_SEGUINTE,
+    );
+    expect(erro).toBeNull();
+
+    // Nenhuma chamada ao modelo, nada enviado: a pessoa da equipe é quem responde.
+    expect(normal.estado.etapas).toBe(0);
+    expect(normal.estado.checkpoints).toBe(0);
+    expect(enviados).toHaveLength(1);
+    expect(enviados.map((e) => e.body)).not.toContain(RESPOSTA_NORMAL);
+    expect((await estadoDaPassagem()).emHandoff).toBe(true);
+    // Um caso só, um aviso só na Central: o turno pulado não repete nada.
+    const { rows: casos } = await pool.query<{ n: string }>(
+      "select count(*)::text as n from agent_cases where organization_id = $1 and conversation_id = $2",
+      [ORG, CONV],
+    );
+    expect(Number(casos[0]!.n)).toBe(1);
+    expect((await estadoDaPassagem()).central).toHaveLength(1);
   });
 
   it("canal indisponível na frase de espera → o turno NÃO fecha como avisado: o job falha e volta à fila", async () => {
     respostaDoCanal = () => ({ kind: "unavailable", reason: "CrmTransportError" });
     const modelo = modeloQueVazaEDepoisTentaTemplate();
-    const erro = await rodaTurno(montaHandler(modelo.doGenerate), "dddddddd-0000-4000-8000-000000000007");
+    const erro = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "dddddddd-0000-4000-8000-000000000007",
+    );
 
     // A tentativa da frase aconteceu (e só ela), mas o canal não a aceitou…
     expect(enviados).toHaveLength(1);
     expect(enviados[0]!.body).toContain(m.turno.FRASE_DE_ESPERA_PADRAO);
     // …então o turno termina em erro, como o envio normal faz com `unavailable`:
-    // o worker falha o job e a fila re-tenta — a frase sai na re-execução, com a
-    // mesma identidade no ledger. Antes, o turno fechava "ok" e o cliente ficava mudo.
+    // o worker falha o job. Antes, o turno fechava "ok" e o cliente ficava mudo.
+    // (rodada 5) O erro não promete mais que a re-execução manda a frase: com a
+    // passagem gravada, o retry é pulado (lead em handoff) — ver o caso seguinte.
     expect(erro).not.toBeNull();
-    expect(erro!.message).toMatch(/frase de espera não enviada: canal indisponível \(CrmTransportError\)/);
+    expect(erro!.message).toMatch(
+      /frase de espera não enviada: canal indisponível \(CrmTransportError\)/,
+    );
+    expect(erro!.message).not.toMatch(/re-tentado pela fila/);
     // Sem checkpoint: o turno não chegou ao fechamento.
     expect(modelo.estado.checkpoints).toBe(0);
     expect(modelo.estado.etapas).toBe(VAZAMENTOS.length);
@@ -349,6 +544,42 @@ describe("turno completo — o fail-safe de vocabulário interno (achados 2 e 3 
       [ORG],
     );
     expect(rows[0]!.status).not.toBe("done");
+
+    // (rodada 5) A passagem está gravada MESMO com a frase pendente ("aviso que
+    // falha NÃO impede a passagem", a doutrina do autor), e a Central diz a verdade
+    // a quem assume: o cliente NÃO foi avisado, e por quê.
+    const passagem = await estadoDaPassagem();
+    expect(passagem.forceHuman).toBe(true);
+    expect(passagem.emHandoff).toBe(true);
+    expect(passagem.central).toHaveLength(1);
+    expect(passagem.central[0]!.body).toMatch(/O cliente NÃO foi avisado/);
+    expect(passagem.central[0]!.body).toMatch(/O canal recusou a mensagem de aviso/);
+    expect(passagem.central[0]!.body).not.toMatch(/JÁ FOI avisado/);
+  });
+
+  it("(rodada 5) o retry depois do fail-safe com a frase pendente NÃO volta ao modelo nem reenvia: a passagem já está com a pessoa, e a Central sabe que o cliente não foi avisado", async () => {
+    respostaDoCanal = () => ({ kind: "unavailable", reason: "CrmTransportError" });
+    const vazador = modeloQueVazaEDepoisTentaTemplate();
+    expect(
+      await rodaTurno(montaHandler(vazador.doGenerate), "dddddddd-0000-4000-8000-000000000018"),
+    ).not.toBeNull();
+    expect(enviados).toHaveLength(1);
+    expect(vazador.estado.etapas).toBe(VAZAMENTOS.length);
+
+    // A fila re-executa o job da MESMA mensagem; o canal voltou. Antes desta rodada o
+    // retry chegava ao modelo e a frase só saía se ele vazasse três vezes de novo.
+    respostaDoCanal = () => ({ kind: "sent", idempotencyKey: "k", messageId: "m1" });
+    const retry = modeloQueVazaEDepoisTentaTemplate();
+    expect(
+      await rodaTurno(montaHandler(retry.doGenerate), "dddddddd-0000-4000-8000-000000000019"),
+    ).toBeNull();
+    expect(retry.estado.etapas).toBe(0);
+    expect(enviados).toHaveLength(1); // nada novo saiu — limite documentado: a frase pendente não é reenviada
+
+    const passagem = await estadoDaPassagem();
+    expect(passagem.emHandoff).toBe(true);
+    expect(passagem.central).toHaveLength(1);
+    expect(passagem.central[0]!.body).toMatch(/O cliente NÃO foi avisado/);
   });
 
   it("(rodada 3) `send_template` e o 3º vazamento na MESMA etapa: o template passa pela trava de entrada antes do fail-safe e é barrado no ponto comum — só a frase sai", async () => {
@@ -384,18 +615,28 @@ describe("turno completo — o fail-safe de vocabulário interno (achados 2 e 3 
           };
         }
         const valor = Reflect.get(alvo, prop, alvo) as unknown;
-        return typeof valor === "function" ? (valor as (...a: unknown[]) => unknown).bind(alvo) : valor;
+        return typeof valor === "function"
+          ? (valor as (...a: unknown[]) => unknown).bind(alvo)
+          : valor;
       },
     }) as pg.Pool;
 
     const modelo = modeloQueVazaEDepoisTentaTemplate({ templateJuntoDoTerceiroVazamento: true });
-    const erro = await rodaTurno(montaHandler(modelo.doGenerate), "dddddddd-0000-4000-8000-000000000008", banco);
+    const erro = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "dddddddd-0000-4000-8000-000000000008",
+      banco,
+    );
     expect(erro).toBeNull();
 
     // A corrida aconteceu como descrita: o template pediu a consulta ANTES de a frase
     // sair (passou pela trava de entrada com `passadoAoHumano` ainda falso) e só a
     // teve de volta DEPOIS.
-    expect(ordem.slice(0, 3)).toEqual(["template_consultado", "frase_enviada", "template_definido"]);
+    expect(ordem.slice(0, 3)).toEqual([
+      "template_consultado",
+      "frase_enviada",
+      "template_definido",
+    ]);
 
     // E ainda assim o cliente recebeu UMA mensagem: a frase de espera. Antes, o template
     // seguia ao canal depois dela (`ordem` terminava em `template_enviado`).

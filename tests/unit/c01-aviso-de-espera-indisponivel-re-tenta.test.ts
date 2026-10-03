@@ -11,11 +11,15 @@
  * mandá-lo, enquanto o envio normal registra o erro e o job re-tenta.
  *
  * Agora `desfechoDaFraseDeEspera` trata cada desfecho: só `sent`/`already_sent` é
- * cliente avisado; `unavailable` registra o erro (`noteRunError`) para o job
- * re-tentar com a MESMA identidade no ledger (sem duplicar); `queued` é o canal
- * entregando quando a sessão voltar; `failed` e `blocked` seguem para o fim do
- * turno como todo envio. E o que o modelo lê acompanha o desfecho: nunca "o cliente
- * recebeu" sem ter recebido.
+ * cliente avisado; `unavailable` registra o erro (`noteRunError`) e o job falha;
+ * `queued` é o canal entregando quando a sessão voltar; `failed` e `blocked` seguem
+ * para o fim do turno como todo envio. E o que o modelo lê acompanha o desfecho: nunca
+ * "o cliente recebeu" sem ter recebido.
+ *
+ * (Rodada 5, achado 2 da quarta revisão) A passagem ao humano passou a ficar GRAVADA
+ * no fail-safe, então a re-execução do job NÃO reenvia a frase pendente: o turno de um
+ * lead em handoff é pulado. Os textos deixaram de prometer o reenvio; quem assume lê
+ * na Central que o cliente não foi avisado (`c01-fail-safe-persiste-a-passagem`).
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
@@ -27,8 +31,18 @@ import {
 import type { ChannelSendResult } from "@/lib/agent-engine/channel-adapter";
 import type { BeforeSendResult } from "@/lib/agent-engine/guardrails/before-send";
 
-const enviado = (outcome: ChannelSendResult): BeforeSendResult => ({ status: "sent", outcome, trace: [] });
-const vetado = (code: string): BeforeSendResult => ({ status: "vetoed", gate: "stop", code, message: "vetado", trace: [] });
+const enviado = (outcome: ChannelSendResult): BeforeSendResult => ({
+  status: "sent",
+  outcome,
+  trace: [],
+});
+const vetado = (code: string): BeforeSendResult => ({
+  status: "vetoed",
+  gate: "stop",
+  code,
+  message: "vetado",
+  trace: [],
+});
 
 function efeitos() {
   const outcomes: ChannelSendResult[] = [];
@@ -43,13 +57,18 @@ function efeitos() {
 }
 
 describe("(C01) os desfechos da frase de espera, um a um", () => {
-  it("`unavailable`: registra erro (o job re-tenta pela fila) e NÃO conta como cliente avisado", () => {
+  it("`unavailable`: registra erro (o job falha) e NÃO conta como cliente avisado", () => {
     const e = efeitos();
-    const desfecho = desfechoDaFraseDeEspera(enviado({ kind: "unavailable", reason: "CrmTransportError" }), e.args);
+    const desfecho = desfechoDaFraseDeEspera(
+      enviado({ kind: "unavailable", reason: "CrmTransportError" }),
+      e.args,
+    );
     expect(desfecho).toBe("pendente");
     expect(e.erros).toHaveLength(1);
     expect(e.erros[0]!.message).toMatch(/canal indisponível \(CrmTransportError\)/);
-    expect(e.erros[0]!.message).toMatch(/re-tentado pela fila/);
+    // (rodada 5) sem prometer reenvio: a passagem gravada pula o retry.
+    expect(e.erros[0]!.message).toMatch(/a passagem ao humano fica gravada/);
+    expect(e.erros[0]!.message).not.toMatch(/re-tentado pela fila/);
     expect(e.log.error).toHaveBeenCalledTimes(1);
     // O desfecho fica registrado como todo envio (telemetria do turno).
     expect(e.outcomes.map((o) => o.kind)).toEqual(["unavailable"]);
@@ -58,7 +77,10 @@ describe("(C01) os desfechos da frase de espera, um a um", () => {
   it("`sent` e `already_sent` são as ÚNICAS confirmações de entrega — sem erro, turno segue", () => {
     for (const kind of ["sent", "already_sent"] as const) {
       const e = efeitos();
-      const desfecho = desfechoDaFraseDeEspera(enviado({ kind, idempotencyKey: "k", messageId: "m" }), e.args);
+      const desfecho = desfechoDaFraseDeEspera(
+        enviado({ kind, idempotencyKey: "k", messageId: "m" }),
+        e.args,
+      );
       expect(desfecho).toBe("entregue");
       expect(e.erros).toEqual([]);
       expect(e.log.error).not.toHaveBeenCalled();
@@ -68,29 +90,43 @@ describe("(C01) os desfechos da frase de espera, um a um", () => {
 
   it("`queued`: o canal segurou e entrega quando a sessão voltar — não é erro, não se reenvia", () => {
     const e = efeitos();
-    expect(desfechoDaFraseDeEspera(enviado({ kind: "queued", idempotencyKey: "k", messageId: null }), e.args)).toBe("a_caminho");
+    expect(
+      desfechoDaFraseDeEspera(
+        enviado({ kind: "queued", idempotencyKey: "k", messageId: null }),
+        e.args,
+      ),
+    ).toBe("a_caminho");
     expect(e.erros).toEqual([]);
     expect(e.outcomes.map((o) => o.kind)).toEqual(["queued"]);
   });
 
-  it("`failed`: fica em `outcomes` para o fim do turno re-tentar o job, como todo envio", () => {
+  it("`failed`: fica em `outcomes` para o fim do turno falhar o job, como todo envio", () => {
     const e = efeitos();
-    expect(desfechoDaFraseDeEspera(enviado({ kind: "failed", idempotencyKey: "k", messageId: null }), e.args)).toBe("pendente");
+    expect(
+      desfechoDaFraseDeEspera(
+        enviado({ kind: "failed", idempotencyKey: "k", messageId: null }),
+        e.args,
+      ),
+    ).toBe("pendente");
     expect(e.outcomes.map((o) => o.kind)).toEqual(["failed"]);
   });
 
   it("`blocked`: o contato não recebe mensagens; a frase não sai e o fim do turno cancela o job", () => {
     const e = efeitos();
-    expect(desfechoDaFraseDeEspera(enviado({ kind: "blocked", idempotencyKey: "k" }), e.args)).toBe("nao_sai");
+    expect(desfechoDaFraseDeEspera(enviado({ kind: "blocked", idempotencyKey: "k" }), e.args)).toBe(
+      "nao_sai",
+    );
     expect(e.erros).toEqual([]);
     expect(e.outcomes.map((o) => o.kind)).toEqual(["blocked"]);
   });
 
-  it("veto da cadeia: erro registrado (o job re-tenta), nada em `outcomes`", () => {
+  it("veto da cadeia: erro registrado (o job falha), nada em `outcomes`", () => {
     const e = efeitos();
     expect(desfechoDaFraseDeEspera(vetado("daily_cap"), e.args)).toBe("pendente");
     expect(e.erros.map((x) => x.message)).toEqual(["frase de espera vetada: daily_cap"]);
-    expect(e.log.error).toHaveBeenCalledWith(expect.stringMatching(/frase de espera vetada/), { code: "daily_cap" });
+    expect(e.log.error).toHaveBeenCalledWith(expect.stringMatching(/frase de espera vetada/), {
+      code: "daily_cap",
+    });
     expect(e.outcomes).toEqual([]);
   });
 
@@ -100,7 +136,9 @@ describe("(C01) os desfechos da frase de espera, um a um", () => {
       expect(AVISO_AO_MODELO_POR_DESFECHO[desfecho]).not.toMatch(/recebeu/);
       expect(AVISO_AO_MODELO_POR_DESFECHO[desfecho]).toMatch(/passou a uma pessoa da equipe/);
     }
-    expect(AVISO_AO_MODELO_POR_DESFECHO.pendente).toMatch(/ainda não saiu e o sistema vai tentar de novo/);
+    expect(AVISO_AO_MODELO_POR_DESFECHO.pendente).toMatch(
+      /não saiu, e a equipe lê isso na Central/,
+    );
   });
 });
 
@@ -111,7 +149,9 @@ describe("(C01) a ligação no fail-safe e o fim do turno", () => {
 
   it("o fail-safe trata a frase por `desfechoDaFraseDeEspera` e fala ao modelo conforme o desfecho", () => {
     expect(i).toBeGreaterThan(-1);
-    expect(failSafe).toMatch(/const desfecho = desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);/);
+    expect(failSafe).toMatch(
+      /const desfecho = desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);/,
+    );
     const retorno = FONTE.slice(i, FONTE.indexOf("encerre agora.',", i));
     expect(retorno).toMatch(/\$\{AVISO_AO_MODELO_POR_DESFECHO\[desfecho\]\}/);
     // Sem o atalho antigo: nenhum `outcomes.push` da frase fora da função que decide.
@@ -123,13 +163,20 @@ describe("(C01) a ligação no fail-safe e o fim do turno", () => {
     const titulo = FONTE.indexOf("title: 'Resposta travada pela revisão automática'");
     expect(titulo).toBeGreaterThan(-1);
     expect(titulo).toBeLessThan(i); // o caso vem antes da frase
-    const blocker = FONTE.slice(FONTE.indexOf("blocker:", titulo), FONTE.indexOf("source: 'guardrail_autofallback'", titulo));
+    const blocker = FONTE.slice(
+      FONTE.indexOf("blocker:", titulo),
+      FONTE.indexOf("source: 'guardrail_autofallback'", titulo),
+    );
     expect(blocker).not.toMatch(/recebeu/);
-    expect(blocker).toMatch(/O sistema manda uma frase de espera ' \+\s*'ao cliente \(a entrega aparece na conversa\)/);
+    expect(blocker).toMatch(
+      /O sistema manda uma frase de espera ' \+\s*'ao cliente \(a entrega aparece na conversa\)/,
+    );
   });
 
-  it("o fim do turno honra o registro: `runError` derruba o job (retry pela fila) e `failed` em `outcomes` também", () => {
+  it("o fim do turno honra o registro: `runError` derruba o job e `failed` em `outcomes` também", () => {
     expect(FONTE).toMatch(/if \(runError !== null\) \{\s*throw runError;/);
-    expect(FONTE).toMatch(/if \(outcomes\.some\(\(o\) => o\.kind === 'failed'\)\) \{[\s\S]*?throw new Error\(/);
+    expect(FONTE).toMatch(
+      /if \(outcomes\.some\(\(o\) => o\.kind === 'failed'\)\) \{[\s\S]*?throw new Error\(/,
+    );
   });
 });
