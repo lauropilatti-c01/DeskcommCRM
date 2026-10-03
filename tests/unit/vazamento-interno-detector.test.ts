@@ -120,8 +120,10 @@ const VAZAMENTO_MEDIDO: readonly string[] = [
  *       - exigir prefixo conhecido exige copiar a lista de 65 tabelas + 343 colunas,
  *         exatamente a "lista copiada que envelhece no dia seguinte" que o cabeçalho do
  *         detector proíbe — e ainda perderia `em_separacao`, que não é tabela nem `crm_`.
- *     O custo real do resíduo é UM turno a mais: `MAX_VETOS_DE_VOCABULARIO_INTERNO = 2`
- *     em `inbound-turn.ts` libera o envio no segundo veto. FP aqui não cala cliente.
+ *     O custo real do resíduo: duas reescritas e, se o modelo insistir
+ *     (`MAX_VETOS_DE_VOCABULARIO_INTERNO = 3` em `inbound-turn.ts`), o cliente recebe
+ *     uma frase de espera e uma pessoa da equipe assume (C01: o texto vetado não sai
+ *     mais "com registro"). FP aqui não cala cliente — custa uma passagem a humano.
  *
  * (2) `webhook` — a única palavra de arquitetura com vazamento MEDIDO ("nenhuma entrada
  *     automática de contatos (webhook) configurada"). Tirá-la reabre o defeito que este

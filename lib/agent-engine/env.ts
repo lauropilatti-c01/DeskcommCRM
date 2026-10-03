@@ -234,6 +234,9 @@ const envSchema = z.object({
   // Teto de mensagens FÍSICAS enviadas ao lead por turno (send_message + send_template
   // somados, bolhas incluídas) — nenhum gate de before-send limita CONTAGEM, só ritmo.
   MAX_SENDS_PER_TURN: z.coerce.number().int().positive().default(3),
+  // (C01) Frase de espera do fail-safe de vocabulário interno (3 vetos seguidos): o que o
+  // cliente lê enquanto uma pessoa assume. Sem valor = `FRASE_DE_ESPERA_PADRAO` do turno.
+  AGENT_FRASE_DE_ESPERA: z.string().trim().min(1).optional(),
   // Circuit breaker de tools por run.
   TOOL_BREAKER_EXACT_WARN: z.coerce.number().int().positive().default(2),
   TOOL_BREAKER_EXACT_BLOCK: z.coerce.number().int().positive().default(5),

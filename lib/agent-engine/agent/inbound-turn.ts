@@ -178,6 +178,8 @@ import {
 import { readSkillReference, skillHasReferences } from './skill-references';
 import { READ_ONLY_TOOLS, wrapToolsWithBreaker, type ToolBreakerThresholds } from './tool-breaker';
 import { loadChannelProvider, nomesDasFerramentas, runBeforeSend } from '../guardrails/before-send';
+// (C01) O aviso de última tentativa do fail-safe de vocabulário interno.
+import { AVISO_DE_ULTIMA_TENTATIVA } from '../guardrails/vazamento-interno';
 import { isStatusSendable } from '../../channels/meta/template-binding';
 import { capabilitiesOf } from '@/lib/channels/capabilities';
 import { renderTemplateBody } from '@/lib/channels/meta/render-template';
@@ -472,12 +474,27 @@ export const AGENT_TOOL_DEFS = {
 } as const;
 
 /**
- * Quantos vetos de `internal_vocabulary_leak` o turno tolera antes de o fail-safe soltar
- * o envio (ver o bloco em `send_message.execute`). Mesmo degrau do fail-safe de casos
- * humanos — 1ª vez ensina, a 2ª decide — porque a assimetria é a mesma: uma reescrita
- * que o modelo não fez não vale um cliente sem resposta.
+ * Quantos vetos de `internal_vocabulary_leak` o turno tolera antes de o fail-safe agir
+ * (ver o bloco em `send_message.execute`).
+ *
+ * (C01) O fail-safe NÃO desarma mais o gate. Até aqui, no 2º veto o texto vetado saía
+ * para o cliente "com registro" — isto é, o vocabulário interno chegava a quem não podia
+ * ler, só que medido. Agora: o 1º veto ensina; o 2º ensina e avisa que é a última
+ * tentativa (reescrita limitada, com o motivo do veto); no 3º o texto vetado NÃO sai,
+ * o cliente recebe uma frase curta de espera (`FRASE_DE_ESPERA_PADRAO`, configurável),
+ * um caso é aberto para uma pessoa da equipe e o lead vai à etapa de passagem. Ninguém
+ * fica sem resposta, e nada vetado chega ao cliente.
  */
-export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 2;
+export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 3;
+
+/**
+ * (C01) O que o cliente lê quando a resposta do modelo não pôde sair (3 vetos de
+ * vocabulário interno): curta, sem prazo, sem nome de ferramenta, e verdadeira — uma
+ * pessoa da equipe foi acionada pelo caso aberto no mesmo instante. Configurável por
+ * `AGENT_FRASE_DE_ESPERA` (knob `fraseDeEspera`). Texto a validar com o operador.
+ */
+export const FRASE_DE_ESPERA_PADRAO =
+  'Para te responder direitinho, vou pedir ajuda à equipe. Uma pessoa continua a conversa com você por aqui.';
 
 /**
  * O mesmo degrau para o veto de `false_empty_inbound`, e pela mesma assimetria.
@@ -1142,6 +1159,11 @@ export interface InboundTurnKnobs {
    * testes que não exercitam o teto o omitem sem custo.
    */
   maxSendsPerTurn?: number;
+  /**
+   * (C01) A frase de espera do fail-safe de vocabulário interno (AGENT_FRASE_DE_ESPERA).
+   * Ausente = `FRASE_DE_ESPERA_PADRAO`.
+   */
+  fraseDeEspera?: string;
   /** atraso do reagendamento em veto/queued herdado da F2-06 (SEND_QUEUED_RETRY_MS) */
   queuedRetryDelayMs: number;
   /**
@@ -2612,6 +2634,10 @@ async function executarTurnoDoAgente(
   // ligada, NADA mais sai dele, nem a pergunta pendente do roteiro (que segue
   // feita para o turno da mensagem nova). Ver `perguntaDoRoteiroPodeSair`.
   let turnoDescartado = false;
+  // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
+  // frase de espera NADA mais sai dele — nem outro send_message, nem a pergunta do
+  // roteiro. O modelo recebe o erro e encerra.
+  let passadoAoHumano = false;
   // Teto de mensagens físicas por turno (F2-15b) — `seq` JÁ é a contagem certa: ele só
   // avança quando o envio de fato sai pro canal (send_message + send_template, bolhas
   // incluídas), nunca em veto de gate. Checar `seq` antes de tentar o próximo envio
@@ -3053,6 +3079,17 @@ async function executarTurnoDoAgente(
             vetos: falseEmptyInboundVetoCount,
           });
         }
+        if (passadoAoHumano) {
+          return {
+            ok: false,
+            error: {
+              code: 'turno_passado_ao_humano',
+              message:
+                'A conversa já passou a uma pessoa da equipe neste turno e o cliente já recebeu a frase de espera. ' +
+                'NÃO envie mais nada — encerre o turno agora.',
+            },
+          };
+        }
         if (seq >= maxSendsPerTurn) {
           return {
             ok: false,
@@ -3344,37 +3381,96 @@ async function executarTurnoDoAgente(
             });
           }
           if (chain.status === 'vetoed' && chain.code === 'internal_vocabulary_leak') {
-            // Fail-safe do gate de vazamento — O CLIENTE NUNCA FICA SEM RESPOSTA.
+            // Fail-safe do gate de vazamento — O CLIENTE NUNCA FICA SEM RESPOSTA, E O
+            // TEXTO VETADO NUNCA CHEGA A ELE.
             //
-            // Este gate é REDE, não invariante sagrada (ao contrário do case_promise, cuja
-            // 2ª camada ABRE o caso antes de liberar). Aqui não há o que o sistema possa
-            // fazer no lugar do modelo: ou ele reescreve, ou a escolha é entre uma frase
-            // com um termo técnico e o silêncio. Silêncio é pior — some com o atendimento
-            // sem sintoma, que é o oposto do invariante 4 do sistema vivo. Então: 1º veto
-            // ensina (o modelo re-tenta); persistiu, o envio sai DESARMANDO só este gate —
-            // todos os outros continuam valendo, porque o re-run passa pela cadeia inteira.
-            //
-            // O veto da 1ª tentativa já virou linha em `before_send_traces` (com a
-            // categoria do vazamento) e atividade na timeline: a liberação não apaga a
-            // medição, que é o produto deste gate.
+            // (C01) A versão anterior desarmava o gate no 2º veto e soltava o texto "com
+            // registro": o vocabulário interno chegava ao cliente, só que medido. A
+            // medição é produto deste gate; a liberação não era. Agora os dois lados
+            // valem ao mesmo tempo: 1º veto ensina; 2º ensina e avisa que é a última
+            // tentativa; 3º: o texto vetado não sai, o cliente recebe uma frase curta de
+            // espera, um caso é aberto para uma pessoa da equipe (é ela quem responde) e
+            // o lead vai à etapa de passagem. A frase passa pela cadeia inteira (pacing,
+            // LGPD, stop) — nunca chamamos o canal por fora.
             internalVocabularyVetoCount += 1;
             if (internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO) {
-              return { ok: false, error: { code: chain.code, message: chain.message } };
+              const ultima = internalVocabularyVetoCount === MAX_VETOS_DE_VOCABULARIO_INTERNO - 1;
+              return {
+                ok: false,
+                error: {
+                  code: chain.code,
+                  message: ultima ? `${chain.message} ${AVISO_DE_ULTIMA_TENTATIVA}` : chain.message,
+                },
+              };
             }
             runLog.warn(
-              'fail-safe do gate de vocabulário interno: envio liberado após vetos seguidos',
+              'fail-safe do gate de vocabulário interno: texto vetado não sai — caso aberto e frase de espera enviada',
+              { vetos: internalVocabularyVetoCount },
+            );
+            const caso = await openCase(
+              pool,
               {
-                vetos: internalVocabularyVetoCount,
+                tenantId,
+                conversationId: input.conversationId,
+                agentId: agentConfig?.agentId ?? null,
+              },
+              {
+                title: 'Resposta travada pela revisão automática',
+                // O texto que o modelo tentou mandar: é o que a pessoa precisa ver para
+                // responder no lugar dele.
+                summary: body,
+                blocker:
+                  `Aberto automaticamente: a IA tentou ${internalVocabularyVetoCount} vezes responder com ` +
+                  'vocabulário interno do sistema e a mensagem não saiu. O cliente recebeu uma frase de espera; ' +
+                  'uma pessoa precisa responder.',
+                source: 'guardrail_autofallback',
+                contextSnapshot: buildCaseContextSnapshot(),
               },
             );
-            // `openedCaseThisTurn` vai pelo valor VIVO (o fail-safe de casos acima pode
-            // tê-lo mudado); reusar o do objeto capturado re-vetaria no case_promise.
-            chain = await runBeforeSend({
+            if (!caso.ok && caso.error.code !== 'case_already_open') {
+              // Sem pessoa acionada não há frase de espera honesta: o erro sobe e o job
+              // re-tenta pela fila (o cliente não fica mudo — fica atrasado, com rastro).
+              const falha = new Error(`fail-safe de vocabulário interno sem caso: ${caso.error.code}`);
+              noteRunError(falha);
+              return {
+                ok: false,
+                error: {
+                  code: 'internal_error',
+                  message: 'não foi possível acionar a equipe — encerre o turno agora.',
+                },
+              };
+            }
+            openedCaseThisTurn = true;
+            moverParaHandoffBestEffort('vocabulario_interno_autofallback');
+            passadoAoHumano = true;
+            // A frase de espera é texto de código, não do modelo: a cadeia inteira vale
+            // (inclusive este gate), menos o spinning — frase fixa repetida entre leads
+            // não é blast, é a mesma razão do aviso de escalação (`enforceSpinning`).
+            const espera = await runBeforeSend({
               ...beforeSendArgs,
-              openedCaseThisTurn,
-              hasOpenCase: hasOpenCase || openedCaseThisTurn,
-              enforceInternalVocabulary: false,
+              body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+              hasOpenCase: true,
+              openedCaseThisTurn: true,
+              enforceSpinning: false,
             });
+            if (espera.status === 'vetoed') {
+              runLog.error('frase de espera vetada pela cadeia — cliente sem resposta neste turno', {
+                code: espera.code,
+              });
+              noteRunError(new Error(`frase de espera vetada: ${espera.code}`));
+            } else {
+              outcomes.push(espera.outcome);
+            }
+            return {
+              ok: false,
+              error: {
+                code: 'internal_vocabulary_leak_handoff',
+                message:
+                  `Sua mensagem NÃO foi enviada: depois de ${internalVocabularyVetoCount} tentativas ela ainda levava ` +
+                  'vocabulário interno do sistema. O cliente recebeu uma frase de espera e a conversa passou a uma ' +
+                  'pessoa da equipe. NÃO escreva mais nada neste turno — encerre agora.',
+              },
+            };
           }
           if (chain.status === 'vetoed') {
             // Cap de warm-up/diário: reescrever o texto não resolve (é rate limit, não
@@ -4353,7 +4449,7 @@ async function executarTurnoDoAgente(
             // #1943: turno descartado como obsoleto → a pergunta do roteiro NÃO
             // sai (segue pendente para o turno seguinte). Também vigia o teto
             // de mensagens físicas do turno (F2-15b).
-            if (!perguntaDoRoteiroPodeSair({ turnoDescartado, seq, maxSendsPerTurn })) return false;
+            if (!perguntaDoRoteiroPodeSair({ turnoDescartado: turnoDescartado || passadoAoHumano, seq, maxSendsPerTurn })) return false;
             const chain = await runBeforeSend({
               pool,
               log: runLog,
