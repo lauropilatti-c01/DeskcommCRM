@@ -165,7 +165,8 @@ describe("(C01) a ligação no send_message.execute", () => {
     expect(failSafe).toMatch(/!caso\.ok && caso\.error\.code !== 'case_already_open'/);
     // A frase vai pela cadeia INTEIRA com o caso declarado (é o que o casePromiseGate
     // exige para uma promessa de pessoa) e sem spinning (texto fixo, como o aviso de escalação).
-    expect(failSafe).toMatch(/runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,\s*hasOpenCase: true,\s*openedCaseThisTurn: true,\s*enforceSpinning: false,\s*\}\)/);
+    // (Rodada 7) …e por um `send` só dela, que manda o `finalBody` validado e nada do corpo do modelo.
+    expect(failSafe).toMatch(/runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,\s*hasOpenCase: true,\s*openedCaseThisTurn: true,\s*enforceSpinning: false,\s*(?:\/\/[^\n]*\n\s*)?send: enviarFraseDeEspera,\s*\}\)/);
     // Depois dela, o turno encerra: erro ao modelo e trava para qualquer outro envio.
     expect(failSafe).toMatch(/passadoAoHumano = true;/);
     expect(failSafe).toMatch(/code: 'internal_vocabulary_leak_handoff'/);

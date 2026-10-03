@@ -184,9 +184,12 @@ describe("(C01) a ligação no turno: toda ferramenta de envio recusa, e a chama
 
   it("todo caminho ao canal está atrás de uma trava: o canal é chamado por um lugar só e os três chamadores dele a consultam", () => {
     // `enviarPeloCanal` é o único caminho ao canal; quem o chama: send_template,
-    // send_message e a pergunta do roteiro. Um 4º chamador sem trava reprova aqui.
+    // send_message, a frase de espera (rodada 7: o `send` exclusivo dela, que é o único
+    // a passar a marca `fraseDeEspera: true` fixa) e a pergunta do roteiro. Um 5º
+    // chamador sem trava reprova aqui.
     expect(FONTE.match(/liveChannel\(\)\.send\(/g)).toHaveLength(1);
-    expect(FONTE.match(/enviarPeloCanal\(\s*\{/g)).toHaveLength(3);
+    expect(FONTE.match(/enviarPeloCanal\(\s*\{/g)).toHaveLength(4);
+    expect(FONTE.match(/\{ fraseDeEspera: true \},/g)).toHaveLength(1);
     expect(FONTE.match(/if \(passadoAoHumano\) return recusaPorPassagemAoHumano\(\);/g)).toHaveLength(2);
   });
 

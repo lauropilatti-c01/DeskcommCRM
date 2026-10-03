@@ -46,6 +46,16 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * era do corpo entregue e não casava: a resposta saía de novo. Agora a identidade é o
  * texto antes da emenda, e a re-execução reconhece o recibo. Aqui o turno roda DUAS
  * vezes de fato (a 1ª falha, a 2ª é a re-execução do mesmo job pela fila).
+ *
+ * (Rodada 7) O cenário do achado 1 da SEXTA revisão, o pior tipo: o fail-safe de
+ * vocabulário interno RETOMANDO o que acabou de vetar. A execução anterior (a versão do
+ * autor soltava o texto depois dos vetos) deixou o texto com vocabulário interno
+ * `queued` no CRM; o teto está cheio; o modelo insiste no mesmo texto três vezes. Cada
+ * chamada passa pelo teto porque o conteúdo é conhecido (retomada), a cadeia veta as
+ * três, e o fail-safe manda a frase de espera pela cadeia — mas o `send` era o do
+ * modelo, que com o plano da retomada mandava o texto vetado (ou a foto pendente)
+ * marcado como frase de espera, e a frase não saía. Agora a frase tem um `send` só
+ * dela: sai ela, e só ela; o texto vetado fica como estava.
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -875,5 +885,131 @@ describe("(rodada 6, 2) a apresentação automática emendada na 1ª mensagem (a
       [ORG],
     );
     expect(mensagens).toEqual([{ body: emendado, status: "sent" }]);
+  });
+});
+
+describe("(rodada 7) o fail-safe de vocabulário interno com o teto cheio e uma pendência conhecida (achado 1 da sexta revisão)", () => {
+  /** O texto com vocabulário interno que a versão anterior soltou e o CRM segura. */
+  const VETADO = "Pelo crm_leads, o seu cadastro está ativo.";
+
+  /** O que a passagem gravou e o que a Central mostra — como em `c01-fail-safe-turno-completo`. */
+  async function estadoDaPassagem() {
+    const { rows: contato } = await pool.query<{ force_human: boolean }>(
+      "select force_human from contacts where organization_id = $1 and id = $2",
+      [ORG, CONTACT],
+    );
+    const { rows: casos } = await pool.query<{ summary: string; source: string }>(
+      "select summary, source from agent_cases where organization_id = $1 and conversation_id = $2",
+      [ORG, CONV],
+    );
+    const { rows: central } = await pool.query<{ body: string | null }>(
+      "select body from agent_inbox_items where organization_id = $1 and ref_id = $2",
+      [ORG, CONV],
+    );
+    return { forceHuman: contato[0]!.force_human, casos, central };
+  }
+
+  /** Cada caso começa fora da passagem ao humano e sem caso aberto (o fail-safe grava os dois). */
+  async function foraDaPassagem(): Promise<void> {
+    await pool.query("update contacts set force_human = false where organization_id = $1 and id = $2", [ORG, CONTACT]);
+    await pool.query(
+      `update conversations
+          set bot_silenced_until = null, status = 'open', last_handoff_at = null, last_handoff_reason = null
+        where organization_id = $1 and id = $2`,
+      [ORG, CONV],
+    );
+    await pool.query("delete from agent_case_events where organization_id = $1", [ORG]);
+    await pool.query("delete from agent_cases where organization_id = $1", [ORG]);
+    await pool.query("delete from agent_inbox_items where organization_id = $1", [ORG]);
+    await pool.query("delete from passagens_de_atendimento where organization_id = $1", [ORG]);
+  }
+  beforeEach(foraDaPassagem);
+  afterEach(foraDaPassagem);
+
+  /** O que vale nos dois casos: só a frase saiu, por chave nova; a passagem e o caso estão gravados. */
+  async function soAFraseSaiu(jobId: string, chaveDaPendencia: string, mensagemDaPendencia: string) {
+    expect(entregues.map((e) => e.body)).toEqual([m.turno.FRASE_DE_ESPERA_PADRAO]);
+    expect(entregues[0]!.media).toBeUndefined();
+    expect(entregues[0]!.key).not.toBe(chaveDaPendencia);
+    // A pendência ficou como estava: o CRM continua segurando a mensagem, o recibo continua `queued`.
+    const { rows: pendencia } = await pool.query<{ status: string }>(
+      "select status from messages where organization_id = $1 and id = $2",
+      [ORG, mensagemDaPendencia],
+    );
+    expect(pendencia).toEqual([{ status: "queued" }]);
+    const { rows } = await pool.query<{ seq: number; status: string; id: string; body_hash: string }>(
+      "select seq, status, id, body_hash from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(rows.map((r) => [Number(r.seq), r.status])).toEqual([
+      [1, "accepted"],
+      [2, "accepted"],
+      [3, "queued"],
+      [4, "accepted"],
+    ]);
+    expect(rows[2]!.id).toBe(chaveDaPendencia);
+    expect(rows[3]!.body_hash).toBe(m.ledger.hashDoConteudo({ body: m.turno.FRASE_DE_ESPERA_PADRAO }));
+    // O caso carrega o texto vetado; a passagem está gravada; a Central sabe que o cliente foi avisado.
+    const passagem = await estadoDaPassagem();
+    expect(passagem.forceHuman).toBe(true);
+    expect(passagem.casos).toEqual([{ summary: VETADO, source: "guardrail_autofallback" }]);
+    expect(passagem.central).toHaveLength(1);
+    expect(passagem.central[0]!.body).toMatch(/JÁ FOI avisado/);
+  }
+
+  it("o texto vetado está `queued` (teto 3 cheio) e o modelo insiste nele três vezes: sai SÓ a frase de espera; o texto vetado não é retomado nem reavaliado", async () => {
+    const modelo = modeloQueChama([VETADO, VETADO, VETADO].map((body) => ({ tool: "send_message", input: { body } })));
+    let chave = "";
+    let mensagem = "";
+    const { erro, jobId } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000013",
+      async (id) => {
+        await recibo(id, 1, "accepted", A);
+        await recibo(id, 2, "accepted", B);
+        chave = await recibo(id, 3, "queued", VETADO);
+        mensagem = await mensagemNaFila(chave, VETADO);
+      },
+    );
+    expect(erro).toBeNull();
+    await soAFraseSaiu(jobId, chave, mensagem);
+    // As três chamadas passaram pelo teto (conteúdo conhecido) e foram vetadas; a 3ª
+    // devolveu a passagem ao humano, e o laço parou ali.
+    expect(modelo.estado.etapas).toBe(3);
+    expect(modelo.estado.checkpoints).toBe(1);
+    const resultados = [...modelo.estado.resultados.values()];
+    expect(resultados).toHaveLength(3);
+    expect(resultados[0]).toMatch(/internal_vocabulary_leak"/);
+    expect(resultados[1]).toMatch(/internal_vocabulary_leak"/);
+    expect(resultados[2]).toMatch(/internal_vocabulary_leak_handoff/);
+    expect(resultados.join("\n")).not.toMatch(/max_sends_per_turn/);
+  });
+
+  it("a pendência é uma FOTO legada (hash só da legenda vazia, como a versão anterior gravava) e o modelo insiste no texto vetado com o produto: sai SÓ a frase; a foto não é retomada", async () => {
+    const modelo = modeloQueChama(
+      [VETADO, VETADO, VETADO].map((body) => ({
+        tool: "send_message",
+        input: { body, produto_codigo: CODIGO_DO_PRODUTO },
+      })),
+    );
+    let chave = "";
+    let mensagem = "";
+    const { erro, jobId } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000014",
+      async (id) => {
+        await recibo(id, 1, "accepted", A);
+        await recibo(id, 2, "accepted", B);
+        // O recibo legado da 2ª foto, sem legenda: `body_hash` = sha256("") — só a mensagem
+        // gravada diz que foto é.
+        chave = await recibo(id, 3, "queued", "");
+        mensagem = await mensagemNaFila(chave, { body: "", media: FOTOS[1]! });
+      },
+    );
+    expect(erro).toBeNull();
+    await soAFraseSaiu(jobId, chave, mensagem);
+    expect(modelo.estado.etapas).toBe(3);
+    const resultados = [...modelo.estado.resultados.values()];
+    expect(resultados[2]).toMatch(/internal_vocabulary_leak_handoff/);
   });
 });

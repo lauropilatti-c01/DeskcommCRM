@@ -3583,6 +3583,29 @@ async function executarTurnoDoAgente(
         // identidade no ledger parte (`identidadeDoEnvio`).
         const corpoDaCadeia = (): string =>
           enviandoFraseDeEspera ? (deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO) : body;
+        // (C01, rodada 7) O `send` EXCLUSIVO da frase de espera: UMA mensagem, só o
+        // `finalBody` que a cadeia validou — sem o plano da retomada, sem as fotos, sem
+        // nada do corpo do modelo. O `send` do modelo (em `beforeSendArgs`, abaixo)
+        // servia também à frase; com o teto cheio e uma pendência conhecida ele mandava
+        // o plano da retomada: a cadeia validava a frase e saía o texto que acabara de
+        // ser vetado, marcado como frase de espera, e a frase não saía (achado 1 da
+        // sexta revisão adversarial). A reconferência do ponto comum continua a mesma.
+        const enviarFraseDeEspera = (finalBody: string): Promise<ChannelSendResult> => {
+          corposEnviados.push(finalBody);
+          return enviarPeloCanal(
+            {
+              tenantId,
+              leadId,
+              jobId: liveJob().id,
+              jobClaim: claimOfJob(liveJob()),
+              agentOperation,
+              conversationId: input.conversationId,
+              body: finalBody,
+              ...identidadeDoEnvio(finalBody, finalBody, comoACadeiaComeca(corpoDaCadeia())),
+            },
+            { fraseDeEspera: true },
+          );
+        };
         if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
           const preparadas = await prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog), {
             tenantId,
@@ -3922,7 +3945,8 @@ async function executarTurnoDoAgente(
             // (inclusive este gate), menos o spinning — frase fixa repetida entre leads
             // não é blast, é a mesma razão do aviso de escalação (`enforceSpinning`).
             // (C01) A frase é texto de código, não a apresentação do produto: sai sem as
-            // fotos que a mensagem vetada pedia (a mensagem vetada não sai mais).
+            // fotos que a mensagem vetada pedia (a mensagem vetada não sai mais) e por um
+            // `send` só dela — o plano da retomada do teto cheio é do corpo do modelo.
             fotosDoProduto = [];
             enviandoFraseDeEspera = true;
             const espera = await runBeforeSend({
@@ -3931,6 +3955,8 @@ async function executarTurnoDoAgente(
               hasOpenCase: true,
               openedCaseThisTurn: true,
               enforceSpinning: false,
+              // (C01, rodada 7) Só a frase sai: nunca o `send` do modelo (ver `enviarFraseDeEspera`).
+              send: enviarFraseDeEspera,
             });
             // (C01) Desfecho por desfecho: só `sent`/`already_sent` é cliente avisado;
             // `unavailable` registra o erro (achado 3 da revisão adversarial). Ver
