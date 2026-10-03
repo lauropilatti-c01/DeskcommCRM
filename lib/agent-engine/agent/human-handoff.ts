@@ -51,6 +51,7 @@ import type { DesfechoDoAviso } from './aviso-de-escalacao';
 import type { Logger } from '../obs/logger';
 import { cancelPendingCronsForLead } from '../cron/scheduler';
 import { findForbiddenKey, zodIssuesSummary } from './lead-state';
+import { negadoLogoAntes } from './negacao-de-pedido';
 import type { DeclaracaoDoTurno } from './declaracao';
 
 /** Postgres `infinity`: o bot nunca reassume após handoff. */
@@ -79,11 +80,20 @@ const HUMAN_HANDOFF_PATTERNS: readonly RegExp[] = [
   /\b(?:atendente|humano|pessoa)\s+de\s+verdade\b/,
 ];
 
-/** True se a mensagem do lead é um pedido explícito de atendimento humano (determinístico). */
+/**
+ * True se a mensagem do lead é um pedido explícito de atendimento humano (determinístico).
+ *
+ * (C01) Pedido logo depois de uma negação de vontade ("não quero falar com
+ * atendente") não é pedido — ver `negacao-de-pedido.ts`. "não consigo falar com
+ * atendente" continua sendo: é pedido de ajuda, não recusa.
+ */
 export function detectHumanHandoffRequest(message: string): boolean {
   if (message.trim() === '') return false;
   const normalized = normalize(message);
-  return HUMAN_HANDOFF_PATTERNS.some((re) => re.test(normalized));
+  return HUMAN_HANDOFF_PATTERNS.some((re) => {
+    const m = re.exec(normalized);
+    return m !== null && !negadoLogoAntes(normalized, m.index);
+  });
 }
 
 

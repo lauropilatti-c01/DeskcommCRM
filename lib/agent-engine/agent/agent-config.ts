@@ -13,6 +13,7 @@
  *   - sem agente publicado para a sessão ⇒ null (o turno cai no comportamento
  *     de fallback: playbook por ponteiro + settings.llm da org + knobs de env).
  */
+import { negadoLogoAntes, normalizarParaPedido } from './negacao-de-pedido';
 import type pg from 'pg';
 
 import { lerJanelaDeAtendimento, type JanelaDeAtendimento } from './janela-de-atendimento';
@@ -305,15 +306,33 @@ export function palavrasDePassagem(brutas: readonly string[] | null | undefined)
   return (brutas ?? []).map((k) => k.toLowerCase().trim()).filter((k) => k !== '');
 }
 
+const escaparRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /**
  * Detecção de handoff por keywords CONFIGURADAS na tela (soma-se à detecção
- * determinística regex do engine — nunca a substitui). Case-insensitive,
- * substring simples: a semântica do EPIC-13 (sentinel de handoff_keywords).
+ * determinística regex do engine — nunca a substitui). Case-insensitive e sem
+ * diacríticos.
+ *
+ * (C01) Era substring simples: "atendente" casava "trabalho como atendente" e
+ * "não quero falar com atendente", e o lead ia parar numa pessoa sem ter pedido.
+ * Agora cada palavra configurada casa como EXPRESSÃO inteira, com fronteira de
+ * palavra nas duas pontas, e não casa quando vem logo depois de uma negação de
+ * vontade (`negadoLogoAntes`). Palavra solta configurada ("atendente") continua
+ * casando "trabalho como atendente": a lista é da tela, e a lista padrão passou
+ * a trazer expressões de PEDIDO ("falar com atendente").
  */
 export function matchesHandoffKeyword(signal: string, keywords: readonly string[]): boolean {
   if (keywords.length === 0) return false;
-  const lower = signal.toLowerCase();
-  return keywords.some((k) => lower.includes(k));
+  const texto = normalizarParaPedido(signal);
+  return keywords.some((k) => {
+    const chave = normalizarParaPedido(k).trim();
+    if (chave === '') return false;
+    const re = new RegExp(`(?<![\\p{L}\\p{N}_])${escaparRegex(chave)}(?![\\p{L}\\p{N}_])`, 'gu');
+    for (const m of texto.matchAll(re)) {
+      if (!negadoLogoAntes(texto, m.index)) return true;
+    }
+    return false;
+  });
 }
 
 /** Exact authenticated version, including a draft: uses the production projection. */
