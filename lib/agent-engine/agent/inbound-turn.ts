@@ -2635,9 +2635,20 @@ async function executarTurnoDoAgente(
   // feita para o turno da mensagem nova). Ver `perguntaDoRoteiroPodeSair`.
   let turnoDescartado = false;
   // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
-  // frase de espera NADA mais sai dele — nem outro send_message, nem a pergunta do
-  // roteiro. O modelo recebe o erro e encerra.
+  // frase de espera NADA mais sai dele — nem send_message, nem send_template, nem a
+  // pergunta do roteiro. Toda ferramenta de envio recusa com o mesmo erro, e o laço
+  // do modelo para ao fim da etapa (`pararQuando`, na chamada do modelo): ele não
+  // ganha outra etapa para tentar outra ferramenta (achado 2 da revisão adversarial).
   let passadoAoHumano = false;
+  const recusaPorPassagemAoHumano = () => ({
+    ok: false as const,
+    error: {
+      code: 'turno_passado_ao_humano' as const,
+      message:
+        'A conversa já passou a uma pessoa da equipe neste turno e o cliente já recebeu a frase de espera. ' +
+        'NÃO envie mais nada — encerre o turno agora.',
+    },
+  });
   // Teto de mensagens físicas por turno (F2-15b) — `seq` JÁ é a contagem certa: ele só
   // avança quando o envio de fato sai pro canal (send_message + send_template, bolhas
   // incluídas), nunca em veto de gate. Checar `seq` antes de tentar o próximo envio
@@ -2882,6 +2893,10 @@ async function executarTurnoDoAgente(
     send_template: tool({
       ...AGENT_TOOL_DEFS.send_template,
       execute: async ({ template_name, language, values }) => {
+        // (C01) A trava do fail-safe vale para TODA ferramenta de envio: um template
+        // depois da frase de espera chegaria ao cliente contrariando o encerramento
+        // (o texto do template não passa pelo gate de vocabulário, de propósito).
+        if (passadoAoHumano) return recusaPorPassagemAoHumano();
         if (seq >= maxSendsPerTurn) {
           return {
             ok: false,
@@ -3079,17 +3094,7 @@ async function executarTurnoDoAgente(
             vetos: falseEmptyInboundVetoCount,
           });
         }
-        if (passadoAoHumano) {
-          return {
-            ok: false,
-            error: {
-              code: 'turno_passado_ao_humano',
-              message:
-                'A conversa já passou a uma pessoa da equipe neste turno e o cliente já recebeu a frase de espera. ' +
-                'NÃO envie mais nada — encerre o turno agora.',
-            },
-          };
-        }
+        if (passadoAoHumano) return recusaPorPassagemAoHumano();
         if (seq >= maxSendsPerTurn) {
           return {
             ok: false,
@@ -4384,12 +4389,16 @@ async function executarTurnoDoAgente(
         ...(agentConfig?.tokenBudget !== undefined
           ? { tetoDeTokensDoTurno: agentConfig.tokenBudget }
           : {}),
+        // (C01) O laço para ao fim da etapa em que o fail-safe passou o turno a uma
+        // pessoa: o modelo não ganha outra etapa para chamar send_template (ou
+        // qualquer outra ferramenta) depois da frase de espera — o erro de ensino
+        // nas ferramentas de envio é a segunda trava, esta é a primeira.
         // Rascunho: a resposta é o send_message ACEITO; a etapa seguinte só
         // "encerrava". Aceito, e não chamado: o envio vetado pela cadeia
         // before_send volta ao modelo para ele reescrever (o 1º veto ensina).
-        ...(preview?.kind === 'assisted'
-          ? { pararQuando: () => preview.result.candidates.length > 0 }
-          : {}),
+        pararQuando: () =>
+          passadoAoHumano ||
+          (preview?.kind === 'assisted' && preview.result.candidates.length > 0),
         ...(agentConfig !== null
           ? {
               model: agentConfig.model,

@@ -169,7 +169,10 @@ describe("(C01) a ligação no send_message.execute", () => {
     // Depois dela, o turno encerra: erro ao modelo e trava para qualquer outro envio.
     expect(failSafe).toMatch(/passadoAoHumano = true;/);
     expect(failSafe).toMatch(/code: 'internal_vocabulary_leak_handoff'/);
-    expect(corpo).toMatch(/if \(passadoAoHumano\) \{[\s\S]*?code: 'turno_passado_ao_humano'/);
+    // A recusa é a mesma para toda ferramenta de envio (rodada 2, achado 2 do Codex:
+    // `c01-trava-do-fail-safe-vale-para-todo-envio`); aqui basta que o send_message a use.
+    expect(corpo).toMatch(/if \(passadoAoHumano\) return recusaPorPassagemAoHumano\(\);/);
+    expect(FONTE).toMatch(/const recusaPorPassagemAoHumano = \(\) => \(\{[\s\S]*?code: 'turno_passado_ao_humano'/);
     expect(FONTE).toMatch(/turnoDescartado: turnoDescartado \|\| passadoAoHumano/);
   });
 });
