@@ -311,6 +311,12 @@ export async function sendWithLedger(
  * Quem fatia a resposta em bolhas pergunta isto para CADA bolha antes de aplicar o
  * teto do turno ao que falta (achado 1 da segunda revisão adversarial): a bolha
  * conhecida mantém a divisão e a identidade; o teto vale só para as novas. Só lê.
+ *
+ * (Rodada 6) Também para foto e template, e com o teto do turno CHEIO: o turno só
+ * deixa passar, nesse estado, o conteúdo que já tem recibo — a retomada do pendente
+ * ou a confirmação do aceito —, nunca intenção nova. A resposta aqui tem de bater
+ * com o que `sendWithLedger` vai reconhecer: por isso o recibo LEGADO de foto e
+ * template (hash só do texto, confirmado pela mensagem gravada) também conta.
  */
 export async function conteudoRegistradoNoJob(
   db: Queryable,
@@ -320,7 +326,8 @@ export async function conteudoRegistradoNoJob(
   const hash = hashDoConteudo(input);
   const intent: Intent = { ...input, leadId: null, seq: 0 };
   if ((await store.findAccepted!(intent, hash)) !== null) return true;
-  return (await store.findPendente!(intent, hash)) !== null;
+  if ((await store.findPendente!(intent, hash)) !== null) return true;
+  return (await reciboLegado(store, intent, ["accepted", "requested", "queued"])) !== null;
 }
 /** Reconcilia um recibo já existente sem criar intenção nem chamar o canal.
  * Consumidores determinísticos consultam isto antes dos gates de um NOVO envio. */

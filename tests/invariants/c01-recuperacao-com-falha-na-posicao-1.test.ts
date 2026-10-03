@@ -29,6 +29,14 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * `sent` — antes isso contava DE NOVO, o teto fechava em 3 com duas mensagens e C era
  * omitida com o envio devolvendo sucesso. Agora as três saem, nenhuma duplicada, e o
  * teto continua valendo para a quarta.
+ *
+ * (Rodada 6) O cenário do achado 1 da QUINTA revisão: as pendências PREENCHEM o teto.
+ * Foto 1 aceita (com a legenda), fotos 2 e 3 `queued` sem legenda — `enviadas = 3`.
+ * Antes, `send_message` recusava por `max_sends_per_turn` antes de consultar o ledger,
+ * e as duas fotos ficavam presas (o vigia da sessão pula mensagem sem corpo). Agora o
+ * teto vale só para intenção nova: as duas pendentes são retomadas pela mesma chave,
+ * nada novo sai, e a 4ª mensagem é recusada. O mesmo com um template pendente — e com
+ * as duas mensagens de texto já aceitas que o modelo regenera antes dele.
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -51,6 +59,21 @@ const CONTACT = "eeeeeeee-0000-4000-8000-000000000002";
 const SESSION = "eeeeeeee-0000-4000-8000-000000000003";
 const CONV = "eeeeeeee-0000-4000-8000-000000000004";
 const MSG = "eeeeeeee-0000-4000-8000-000000000005";
+// (Rodada 6) A conexão do canal oficial, para o template: outra sessão e outra
+// conversa do mesmo contato; o produto do catálogo com três fotos, para a foto.
+const SESSION_META = "eeeeeeee-0000-4000-8000-000000000020";
+const CONV_META = "eeeeeeee-0000-4000-8000-000000000021";
+const MSG_META = "eeeeeeee-0000-4000-8000-000000000022";
+const PRODUTO = "eeeeeeee-0000-4000-8000-000000000030";
+const CODIGO_DO_PRODUTO = "MOTO-1";
+const ARQUIVOS = [1, 2, 3].map((n) => `aaaaaaaa-0000-4000-8000-00000000000${n}.jpg`);
+/** As fotos como `prepararFotosDoProduto` as deixa: copiadas para a pasta da conversa. */
+const FOTOS = ARQUIVOS.map((arquivo) => ({
+  storagePath: `${ORG}/${CONV}/catalogo-${arquivo}`,
+  mime: "image/jpeg",
+}));
+const TEMPLATE = { name: "retomada", language: "pt_BR", values: { "1": "Lead" } };
+const RENDERIZADO = "Oi Lead, tudo certo?";
 const AGORA = new Date("2026-07-30T15:00:00Z");
 const MENSAGEM_DO_CLIENTE_EM = "2026-07-30T14:55:00Z";
 const TETO = 3;
@@ -70,7 +93,8 @@ type Modules = {
 let m: Modules;
 
 /** O que o CRM falso entregou (na ordem), e com que chave de idempotência. */
-let entregues: Array<{ body: string; key: string }> = [];
+type Envio = { body: string; media?: { storagePath: string; mime: string }; template?: object };
+let entregues: Array<Envio & { key: string }> = [];
 
 const CHECKPOINT = JSON.stringify({
   commitments: [],
@@ -83,12 +107,17 @@ const USO = {
   outputTokens: { total: 1, text: 1, reasoning: 0 },
 };
 
-/**
- * Modelo falso que manda A, B e C (uma por etapa) e depois encerra. Guarda o que o SDK
- * lhe devolveu, um resultado por chamada de ferramenta (o prompt de cada etapa repete
- * os resultados anteriores).
- */
+type Chamada = { tool: string; input: Record<string, unknown> };
+/** Modelo falso que manda A, B e C (uma por etapa) e depois encerra. */
 function modeloQueRegeneraAsTres(textos: readonly string[] = [A, B, C]) {
+  return modeloQueChama(textos.map((body) => ({ tool: "send_message", input: { body } })));
+}
+/**
+ * Modelo falso que faz uma chamada de ferramenta por etapa, na ordem dada, e depois
+ * encerra. Guarda o que o SDK lhe devolveu, um resultado por chamada de ferramenta (o
+ * prompt de cada etapa repete os resultados anteriores).
+ */
+function modeloQueChama(chamadas: readonly Chamada[]) {
   const estado = { etapas: 0, checkpoints: 0, resultados: new Map<string, string>() };
   const doGenerate = async (opts: { prompt?: unknown }) => {
     const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
@@ -116,8 +145,8 @@ function modeloQueRegeneraAsTres(textos: readonly string[] = [A, B, C]) {
       };
     }
     estado.etapas += 1;
-    const body = textos[estado.etapas - 1];
-    if (body === undefined) {
+    const chamada = chamadas[estado.etapas - 1];
+    if (chamada === undefined) {
       return {
         content: [{ type: "text" as const, text: "ok" }],
         finishReason: { unified: "stop" as const, raw: undefined },
@@ -130,8 +159,8 @@ function modeloQueRegeneraAsTres(textos: readonly string[] = [A, B, C]) {
         {
           type: "tool-call" as const,
           toolCallId: `c${estado.etapas}`,
-          toolName: "send_message",
-          input: JSON.stringify({ body }),
+          toolName: chamada.tool,
+          input: JSON.stringify(chamada.input),
         },
       ],
       finishReason: { unified: "tool-calls" as const, raw: undefined },
@@ -170,6 +199,9 @@ function montaHandler(doGenerate: unknown) {
     },
     log: m.createLogger(),
     registry: m.createFakeRegistry(doGenerate as never),
+    // (Rodada 6) A cópia da foto do catálogo para a conversa é rede (Storage): aqui,
+    // "copiou". O destino é o que `prepararFotosDoProduto` calcula — ver `FOTOS`.
+    copiarFoto: async () => true,
     channel: () =>
       ({
         channel: "ledger-real",
@@ -179,12 +211,19 @@ function montaHandler(doGenerate: unknown) {
           jobId: string;
           seq: number;
           body: string;
+          media?: { storagePath: string; mime: string };
+          template?: object;
         }) => {
+          const envio: Envio = {
+            body: i.body,
+            ...(i.media ? { media: i.media } : {}),
+            ...(i.template ? { template: i.template } : {}),
+          };
           const outcome = await m.ledger.sendWithLedger(
             store,
-            { tenantId: i.tenantId, leadId: i.leadId, jobId: i.jobId, seq: i.seq, body: i.body },
+            { tenantId: i.tenantId, leadId: i.leadId, jobId: i.jobId, seq: i.seq, ...envio },
             async (key, messageId) => {
-              entregues.push({ body: i.body, key });
+              entregues.push({ ...envio, key });
               // A retomada de um recibo pendente reavalia a mensagem que o CRM já tem
               // (`messageId` é o id dela): o CRM falso a marca enviada, como o real
               // faria quando a sessão volta.
@@ -211,21 +250,27 @@ function montaHandler(doGenerate: unknown) {
   });
 }
 
+/** A conversa e a conexão do job: a do WAHA (padrão) ou a do canal oficial (template). */
+type Alvo = { conversa: string; sessao: string; mensagem: string };
+const WAHA: Alvo = { conversa: CONV, sessao: SESSION, mensagem: MSG };
+const META: Alvo = { conversa: CONV_META, sessao: SESSION_META, mensagem: MSG_META };
+
 async function rodaTurno(
   handler: ReturnType<typeof montaHandler>,
   evento: string,
   /** O que a execução ANTERIOR deixou no ledger deste job, gravado antes de o handler rodar. */
   antes: (jobId: string) => Promise<void>,
+  alvo: Alvo = WAHA,
 ): Promise<{ erro: Error | null; jobId: string }> {
   await pool.query("update job_queue set status = 'done' where status = 'pending'");
   const { job } = await m.queue.enqueueJob(pool, ORG, {
     kind: "inbound_turn",
     leadId: CONTACT,
     payload: {
-      conversation_id: CONV,
+      conversation_id: alvo.conversa,
       contact_id: CONTACT,
-      channel_session_id: SESSION,
-      inbound_message_id: MSG,
+      channel_session_id: alvo.sessao,
+      inbound_message_id: alvo.mensagem,
       crm_event_id: evento,
     },
     maxAttempts: 2,
@@ -244,23 +289,54 @@ async function rodaTurno(
 }
 
 /** Um recibo como a execução anterior o deixou. Devolve a chave (id do recibo). */
-async function recibo(jobId: string, seq: number, status: string, body: string): Promise<string> {
+async function recibo(
+  jobId: string,
+  seq: number,
+  status: string,
+  envio: string | Envio,
+): Promise<string> {
+  const conteudo = typeof envio === "string" ? { body: envio } : envio;
   const { rows } = await pool.query<{ id: string }>(
     `insert into send_ledger (organization_id, contact_id, job_id, seq, body_hash, status)
      values ($1,$2,$3,$4,$5,$6) returning id`,
-    [ORG, CONTACT, jobId, seq, m.ledger.hashDoConteudo({ body }), status],
+    [ORG, CONTACT, jobId, seq, m.ledger.hashDoConteudo(conteudo), status],
   );
   return rows[0]!.id;
 }
 
-/** A mensagem que o CRM gravou para um recibo e ainda segura (`queued`): o canal a entrega quando a sessão voltar. */
-async function mensagemNaFila(chave: string, body: string): Promise<string> {
+/**
+ * A mensagem que o CRM gravou para um recibo e ainda segura (`queued`): o canal a
+ * entrega quando a sessão voltar. Texto, foto (sem legenda = `body` nulo, como o
+ * handler grava) ou template, como `corpoDoEnvio` os manda ao handler.
+ */
+async function mensagemNaFila(
+  chave: string,
+  envio: string | Envio,
+  alvo: Alvo = WAHA,
+): Promise<string> {
+  const conteudo = typeof envio === "string" ? { body: envio } : envio;
   const id = randomUUID();
+  const tipo = conteudo.template ? "template" : conteudo.media ? "image" : "text";
+  const t = conteudo.template as { name?: string; language?: string } | undefined;
   await pool.query(
     `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
-       type, direction, status, body, sent_via, metadata)
-     values ($1,$2,$3,$4,$5,'text','outbound','queued',$6,'ai',$7::jsonb)`,
-    [id, ORG, CONV, SESSION, CONTACT, body, JSON.stringify({ idempotency_key: chave })],
+       type, direction, status, body, media_storage_path, media_mime, template_name, template_language,
+       sent_via, metadata)
+     values ($1,$2,$3,$4,$5,$6,'outbound','queued',$7,$8,$9,$10,$11,'ai',$12::jsonb)`,
+    [
+      id,
+      ORG,
+      alvo.conversa,
+      alvo.sessao,
+      CONTACT,
+      tipo,
+      conteudo.body === "" && conteudo.media ? null : conteudo.body,
+      conteudo.media?.storagePath ?? null,
+      conteudo.media?.mime ?? null,
+      t?.name ?? null,
+      t?.language ?? null,
+      JSON.stringify({ idempotency_key: chave }),
+    ],
   );
   return id;
 }
@@ -303,6 +379,41 @@ beforeAll(async () => {
      values ($1,$2,$3,$4,$5,'text','inbound','delivered','oi, me conta do plano?','external_device',$6)
      on conflict (id) do nothing`,
     [MSG, ORG, CONV, SESSION, CONTACT, MENSAGEM_DO_CLIENTE_EM],
+  );
+  // (Rodada 6) O produto com três fotos — caminhos na forma exata que a rota gera
+  // (`fotoPertenceAoProduto`): `<org>/<produto>/<uuid>.jpg`.
+  await pool.query(
+    `insert into catalog_products (id, organization_id, codigo, nome, preco_cents, fotos)
+     values ($1,$2,$3,'Moto de teste',1000000,$4::text[]) on conflict (id) do nothing`,
+    [PRODUTO, ORG, CODIGO_DO_PRODUTO, ARQUIVOS.map((a) => `${ORG}/${PRODUTO}/${a}`)],
+  );
+  // (Rodada 6) A conexão do canal oficial e a conversa dela, para o template.
+  await pool.query(
+    `insert into channel_sessions (id, organization_id, provider, meta_phone_number_id,
+                                   meta_waba_id, status, webhook_secret_encrypted)
+     values ($1,$2,'meta_cloud','111','333','WORKING','\\x00'::bytea)
+     on conflict (id) do nothing`,
+    [SESSION_META, ORG],
+  );
+  await pool.query(
+    `insert into conversations (id, organization_id, contact_id, channel_session_id, status, is_group, last_inbound_at)
+     values ($1,$2,$3,$4,'open',false,$5) on conflict (id) do nothing`,
+    [CONV_META, ORG, CONTACT, SESSION_META, MENSAGEM_DO_CLIENTE_EM],
+  );
+  await pool.query(
+    `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+       type, direction, status, body, sent_via, sent_at)
+     values ($1,$2,$3,$4,$5,'text','inbound','delivered','oi, me conta do plano?','external_device',$6)
+     on conflict (id) do nothing`,
+    [MSG_META, ORG, CONV_META, SESSION_META, CONTACT, MENSAGEM_DO_CLIENTE_EM],
+  );
+  await pool.query(
+    `insert into meta_templates (organization_id, waba_id, name, language, status, category,
+                                 components, parameter_format, contract_hash)
+     values ($1,'333',$2,$3,'APPROVED','MARKETING',
+       '[{"type":"BODY","text":"Oi {{1}}, tudo certo?"}]'::jsonb,'POSITIONAL','h-aprovado')
+     on conflict (organization_id, waba_id, name, language) do update set status = 'APPROVED'`,
+    [ORG, TEMPLATE.name, TEMPLATE.language],
   );
   await pool.query(
     `with v as (
@@ -451,6 +562,150 @@ describe("turno completo — a re-execução com falha na posição 1 e sucesso 
     // O modelo pediu as quatro: A, B e C voltaram como enviadas; D, como teto cheio.
     expect(modelo.estado.etapas).toBe(5);
     expect(modelo.estado.checkpoints).toBe(1);
+    const resultados = [...modelo.estado.resultados.values()];
+    expect(resultados).toHaveLength(4);
+    expect(resultados[0]).toMatch(/"status":"enviada"/);
+    expect(resultados[1]).toMatch(/"status":"enviada"/);
+    expect(resultados[2]).toMatch(/"status":"enviada"/);
+    expect(resultados[3]).toMatch(/max_sends_per_turn/);
+    expect(resultados.join("\n")).not.toMatch(/envio_falhou/);
+  });
+});
+
+describe("(rodada 6) as pendências PREENCHEM o teto (achado 1 da quinta revisão)", () => {
+  it("foto 1 aceita (com a legenda), fotos 2 e 3 `queued` sem legenda (teto 3): a re-execução retoma as duas pela mesma chave, nada novo sai, a 4ª é recusada e o job conclui", async () => {
+    const modelo = modeloQueChama([
+      { tool: "send_message", input: { body: A, produto_codigo: CODIGO_DO_PRODUTO } },
+      { tool: "send_message", input: { body: D } },
+    ]);
+    let chave2 = "";
+    let chave3 = "";
+    let mensagem2 = "";
+    let mensagem3 = "";
+    const { erro, jobId } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000009",
+      async (id) => {
+        await recibo(id, 1, "accepted", { body: A, media: FOTOS[0]! });
+        chave2 = await recibo(id, 2, "queued", { body: "", media: FOTOS[1]! });
+        mensagem2 = await mensagemNaFila(chave2, { body: "", media: FOTOS[1]! });
+        chave3 = await recibo(id, 3, "queued", { body: "", media: FOTOS[2]! });
+        mensagem3 = await mensagemNaFila(chave3, { body: "", media: FOTOS[2]! });
+      },
+    );
+    expect(erro).toBeNull();
+
+    // O CRM foi acionado SÓ para reavaliar as duas fotos que já tinha, pela chave de
+    // cada recibo. Antes: nada — `send_message` recusava por teto antes do ledger, e
+    // as duas fotos (sem corpo, que o vigia pula) ficavam presas para sempre.
+    expect(entregues).toEqual([
+      { body: "", media: FOTOS[1], key: chave2 },
+      { body: "", media: FOTOS[2], key: chave3 },
+    ]);
+
+    // No ledger: as três aceitas, nas suas posições, com as mensagens que o CRM já tinha.
+    const { rows } = await pool.query<{
+      seq: number;
+      status: string;
+      crm_message_id: string | null;
+    }>(
+      "select seq, status, crm_message_id from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(rows.map((r) => [Number(r.seq), r.status])).toEqual([
+      [1, "accepted"],
+      [2, "accepted"],
+      [3, "accepted"],
+    ]);
+    expect(rows[1]!.crm_message_id).toBe(mensagem2);
+    expect(rows[2]!.crm_message_id).toBe(mensagem3);
+
+    // O cliente tem as duas fotos, enviadas uma vez cada; nenhuma mensagem nova.
+    const { rows: mensagens } = await pool.query<{
+      type: string;
+      body: string | null;
+      status: string;
+    }>(
+      "select type, body, status from messages where organization_id = $1 and direction = 'outbound' order by created_at",
+      [ORG],
+    );
+    expect(mensagens).toEqual([
+      { type: "image", body: null, status: "sent" },
+      { type: "image", body: null, status: "sent" },
+    ]);
+
+    // Ao modelo: a resposta saiu (duas fotos retomadas); D, nova, recusada por teto —
+    // nunca como falha de envio.
+    expect(modelo.estado.etapas).toBe(3);
+    expect(modelo.estado.checkpoints).toBe(1);
+    const resultados = [...modelo.estado.resultados.values()];
+    expect(resultados).toHaveLength(2);
+    expect(resultados[0]).toMatch(/"status":"enviada"/);
+    expect(resultados[0]).toMatch(/"fotos_enviadas":3/);
+    expect(resultados[0]).not.toMatch(/aviso/);
+    expect(resultados[1]).toMatch(/max_sends_per_turn/);
+    expect(resultados.join("\n")).not.toMatch(/envio_falhou/);
+  });
+
+  it("A e B aceitas e o template `queued` (teto 3), no canal oficial: A e B voltam como já enviadas, o template é retomado pela mesma chave, um template com outros valores é recusado", async () => {
+    const modelo = modeloQueChama([
+      { tool: "send_message", input: { body: A } },
+      { tool: "send_message", input: { body: B } },
+      {
+        tool: "send_template",
+        input: {
+          template_name: TEMPLATE.name,
+          language: TEMPLATE.language,
+          values: TEMPLATE.values,
+        },
+      },
+      {
+        tool: "send_template",
+        input: {
+          template_name: TEMPLATE.name,
+          language: TEMPLATE.language,
+          values: { "1": "Outro" },
+        },
+      },
+    ]);
+    let chaveDoTemplate = "";
+    let mensagemDoTemplate = "";
+    const { erro, jobId } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000010",
+      async (id) => {
+        await recibo(id, 1, "accepted", A);
+        await recibo(id, 2, "accepted", B);
+        chaveDoTemplate = await recibo(id, 3, "queued", { body: RENDERIZADO, template: TEMPLATE });
+        mensagemDoTemplate = await mensagemNaFila(
+          chaveDoTemplate,
+          { body: RENDERIZADO, template: TEMPLATE },
+          META,
+        );
+      },
+      META,
+    );
+    expect(erro).toBeNull();
+
+    // Só o template foi ao CRM — reavaliado, pela chave do recibo pendente. A e B já
+    // estavam aceitas (voltaram `already_sent`); o template novo nem chegou ao canal.
+    expect(entregues).toEqual([{ body: RENDERIZADO, template: TEMPLATE, key: chaveDoTemplate }]);
+    const { rows } = await pool.query<{
+      seq: number;
+      status: string;
+      crm_message_id: string | null;
+    }>(
+      "select seq, status, crm_message_id from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(rows.map((r) => [Number(r.seq), r.status])).toEqual([
+      [1, "accepted"],
+      [2, "accepted"],
+      [3, "accepted"],
+    ]);
+    expect(rows[2]!.crm_message_id).toBe(mensagemDoTemplate);
+
+    expect(modelo.estado.etapas).toBe(5);
     const resultados = [...modelo.estado.resultados.values()];
     expect(resultados).toHaveLength(4);
     expect(resultados[0]).toMatch(/"status":"enviada"/);

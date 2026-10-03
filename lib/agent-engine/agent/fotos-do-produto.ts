@@ -109,6 +109,13 @@ export async function prepararFotosDoProduto(
  * antes de tudo, não contava o texto que sai à parte quando passa do teto de
  * legenda (uma ou mais bolhas): com teto 3, um produto de 3 fotos e descrição
  * longa mandava 4 mensagens. Sem `restantes`, nenhum teto (quem chama decide).
+ *
+ * (C01) `jaRegistrada` é a sonda do ledger, como a de `sendInBubbles`: a foto que
+ * já tem recibo neste job (aceita, ou pendente que o canal segura) não é mensagem
+ * nova — ela passa mesmo sem vaga no teto, porque sair é retomar a mesma chave,
+ * não gastar uma. Sem vaga, a foto NOVA fica de fora e a varredura continua, para
+ * a conhecida que vem depois dela. Sem `jaRegistrada`, o comportamento de sempre:
+ * a vaga manda, e a primeira foto que não cabe encerra o envio.
  */
 export async function enviarComFotos<T extends BubbleOutcome>(
   body: string,
@@ -119,16 +126,19 @@ export async function enviarComFotos<T extends BubbleOutcome>(
     sleep: (ms: number) => Promise<void>;
     jitter: () => number;
     restantes?: () => number;
+    jaRegistrada?: (foto: FotoParaEnvio, legenda: string) => Promise<boolean>;
   },
 ): Promise<T> {
   const cabeMaisUma = () => (opts.restantes?.() ?? Number.POSITIVE_INFINITY) > 0;
+  const conhecida = async (foto: FotoParaEnvio, legenda: string): Promise<boolean> =>
+    opts.jaRegistrada !== undefined && (await opts.jaRegistrada(foto, legenda));
   const [capa, ...demais] = fotos;
   if (!capa || !cabeMaisUma()) return opts.enviarTexto(body);
   const legendaCabe = body.length <= LIMITE_DA_LEGENDA;
   let ultimo = legendaCabe ? await opts.enviarFoto(capa, body) : await opts.enviarTexto(body);
   for (const foto of legendaCabe ? demais : fotos) {
     if (!OK_KINDS.has(ultimo.kind)) return ultimo;
-    if (!cabeMaisUma()) return ultimo;
+    if (!cabeMaisUma() && !(await conhecida(foto, ''))) continue;
     await opts.sleep(opts.jitter());
     ultimo = await opts.enviarFoto(foto, '');
   }

@@ -76,7 +76,9 @@ import { buildNativeMediaParts } from './media-parts';
 import {
   copiarFotoNoStorage,
   enviarComFotos,
+  LIMITE_DA_LEGENDA,
   prepararFotosDoProduto,
+  type CopiarFoto,
   type FotoParaEnvio,
 } from './fotos-do-produto';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
@@ -190,7 +192,7 @@ import { isStatusSendable } from '../../channels/meta/template-binding';
 import { capabilitiesOf } from '@/lib/channels/capabilities';
 import { renderTemplateBody } from '@/lib/channels/meta/render-template';
 import { acenderDigitando, esperarComoHumano } from './atraso-humano';
-import { instrucaoDeBolhas, sendInBubbles, splitForSend } from './split-message';
+import { instrucaoDeBolhas, OK_KINDS, sendInBubbles, splitForSend } from './split-message';
 import type { DisclosureMode } from '../guardrails/disclosure/template';
 import { decidePromise } from '../guardrails/promise/engine';
 import { loadPromiseTable } from '../guardrails/promise/table';
@@ -1434,6 +1436,11 @@ export interface InboundTurnDeps {
    * anti-ban observável no artefato de trace de forma determinística.
    */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * (C01) A cópia da foto do catálogo para a pasta da conversa — injetável só para
+   * teste (a real, `copiarFotoNoStorage`, fala com o Storage). Default = a real.
+   */
+  copiarFoto?: CopiarFoto;
   /**
    * O Jev no turno — na camada anti-manipulação e no roteador de intenção.
    * Injetável só para teste (chave e `fetch` dublês). Default = a chave da
@@ -2800,6 +2807,11 @@ async function executarTurnoDoAgente(
     contadas.add(resultado.idempotencyKey);
     return true;
   };
+  // (C01, rodada 6) As chaves pendentes da recuperação que ESTA execução ainda não
+  // retomou. Enquanto houver uma, o teto cheio não recusa o envio de cara: a
+  // ferramenta pergunta ao ledger se o conteúdo é retomada e só recusa o que for
+  // novo (ver `recusaPorTeto`). Esvaziada, o teto cheio volta a recusar sem consulta.
+  const porRetomar = new Set<string>(estadoInicial.pendentes);
   // (C01) As URLs que a base da empresa devolveu NESTE turno (resultado de
   // `crm_query_external_data`). O gate de vocabulário interno libera a ocorrência
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
@@ -2841,6 +2853,8 @@ async function executarTurnoDoAgente(
     const resultado = await liveChannel().send({ ...envio, seq: posicao });
     if (resultado.kind === 'already_sent') posicao -= 1;
     else if (contaNoTeto(resultado)) seq += 1;
+    // (C01, rodada 6) A pendência da recuperação que esta chave retomou sai da lista.
+    if (resultado.kind !== 'unavailable') porRetomar.delete(resultado.idempotencyKey);
     return resultado;
   };
   /** (C01) O veto que a passagem ao humano devolve às ferramentas de envio (ensino da trava). */
@@ -2891,6 +2905,87 @@ async function executarTurnoDoAgente(
   // incluídas), nunca em veto de gate. Checar `seq` antes de tentar o próximo envio
   // barra o modelo sem gastar uma chamada de before-send à toa.
   const maxSendsPerTurn = deps.knobs.maxSendsPerTurn ?? DEFAULT_MAX_SENDS_PER_TURN;
+  // (C01, rodada 6) O teto vale para intenção NOVA. Com ele cheio, a ferramenta de
+  // envio recusa de cara — a menos que a recuperação tenha contado pendências que esta
+  // execução ainda não retomou (`porRetomar`): então ela segue até saber se o conteúdo
+  // já tem recibo neste job (`conhecido`) e só recusa o que for novo. Antes, a
+  // pré-checagem recusava antes de consultar o ledger: com teto 3, 1 foto aceita e 2
+  // fotos `queued` (`enviadas = 3`), as duas pendentes ficavam sem retomada para
+  // sempre — e o vigia da sessão não as pega, porque foto sem legenda é `body` nulo,
+  // que ele pula (achado 1 da quinta revisão adversarial).
+  const tetoCheio = (): boolean => seq >= maxSendsPerTurn;
+  const recusaPorTeto = () => ({
+    ok: false as const,
+    error: {
+      code: 'max_sends_per_turn' as const,
+      message:
+        `você já enviou ${seq} mensagens neste turno (teto: ${maxSendsPerTurn}). ` +
+        'NÃO envie mais nada agora — encerre o turno e espere a resposta do lead.',
+    },
+  });
+  /** (C01) Uma mensagem física do envio: texto puro, ou foto com (ou sem) legenda. */
+  type MensagemPlanejada = { body: string; media?: FotoParaEnvio };
+  /** (C01) Este conteúdo já tem recibo neste job (aceito, ou pendente a retomar)? O preview não tem job. */
+  const conhecido = (envio: MensagemPlanejada & { template?: object }): Promise<boolean> =>
+    preview ? Promise.resolve(false) : conteudoRegistradoNoJob(pool, { tenantId, jobId: liveJob().id, ...envio });
+  /**
+   * (C01, rodada 6) O plano do `send_message` com o teto cheio: as mensagens físicas
+   * que `enviarComFotos` + `sendInBubbles` produziriam — a legenda na capa e as demais
+   * fotos sem legenda; ou, quando o texto passa do teto de legenda, as bolhas do texto
+   * e todas as fotos sem legenda —, separadas entre as que o ledger já conhece (saem:
+   * retomada ou confirmação, pela mesma chave) e as novas (ficam de fora; o modelo é
+   * avisado). As bolhas são as naturais: a conhecida mantém a divisão com que saiu.
+   */
+  const planejarRetomada = async (
+    texto: string,
+    fotos: readonly FotoParaEnvio[],
+  ): Promise<{ conhecidas: MensagemPlanejada[]; novas: number }> => {
+    const naturais = splitForSend(texto, agentConfig?.splitMessages ?? false, agentConfig?.splitMaxChars ?? 600);
+    const bolhas: MensagemPlanejada[] = (naturais.length === 0 ? [texto] : naturais).map((body) => ({ body }));
+    const [capa, ...demais] = fotos;
+    const plano: MensagemPlanejada[] =
+      capa === undefined
+        ? bolhas
+        : texto.length <= LIMITE_DA_LEGENDA
+          ? [{ body: texto, media: capa }, ...demais.map((media) => ({ body: '', media }))]
+          : [...bolhas, ...fotos.map((media) => ({ body: '', media }))];
+    const conhecidas: MensagemPlanejada[] = [];
+    let novas = 0;
+    for (const mensagem of plano) {
+      if (await conhecido(mensagem)) conhecidas.push(mensagem);
+      else novas += 1;
+    }
+    return { conhecidas, novas };
+  };
+  /**
+   * (C01, rodada 6) O `send` do `send_message` com o teto cheio: manda só as mensagens
+   * que o ledger já conhece — a retomada das pendentes e a confirmação das aceitas,
+   * pela mesma chave —, na ordem, com o jitter anti-ban entre elas, e para no primeiro
+   * desfecho que não é de sucesso. O que seria novo fica de fora, e o modelo é avisado
+   * no resultado. `enviarComFotos` e `sendInBubbles` não servem aqui: sem vaga, mandam
+   * o texto como bolha nova.
+   */
+  const enviarSoAsConhecidas = async (
+    conhecidas: readonly MensagemPlanejada[],
+    o: {
+      enviar: (corpo: string, media?: FotoParaEnvio) => Promise<ChannelSendResult>;
+      sleep: (ms: number) => Promise<void>;
+      jitter: () => number;
+    },
+  ): Promise<ChannelSendResult> => {
+    let ultimo: ChannelSendResult | undefined;
+    for (const [i, mensagem] of conhecidas.entries()) {
+      if (i > 0) await o.sleep(o.jitter());
+      ultimo = await o.enviar(mensagem.body, mensagem.media);
+      if (!OK_KINDS.has(ultimo.kind)) return ultimo;
+    }
+    // A pré-checagem só entra aqui com ao menos uma conhecida.
+    if (ultimo === undefined) throw new Error('retomada sem mensagem conhecida');
+    return ultimo;
+  };
+  const avisoDaRetomada = (novas: number): string =>
+    `${novas} parte(s) nova(s) desta resposta NÃO saíram: o teto de mensagens do turno (${maxSendsPerTurn}) já estava cheio ` +
+    'e só o que já estava a caminho do cliente foi retomado. NÃO envie mais nada agora — encerre o turno e espere a resposta do lead.';
   // F3-11: estágio que o MODELO confirmou via update_lead_state neste turno (a máquina
   // F2-10 é a única porta). Comparado com a sugestão do classificador no fim → divergência.
   let confirmedStage: LeadStage | null = null;
@@ -3134,17 +3229,8 @@ async function executarTurnoDoAgente(
         // depois da frase de espera chegaria ao cliente contrariando o encerramento
         // (o texto do template não passa pelo gate de vocabulário, de propósito).
         if (passadoAoHumano) return recusaPorPassagemAoHumano();
-        if (seq >= maxSendsPerTurn) {
-          return {
-            ok: false,
-            error: {
-              code: 'max_sends_per_turn',
-              message:
-                `você já enviou ${seq} mensagens neste turno (teto: ${maxSendsPerTurn}). ` +
-                'NÃO envie mais nada agora — encerre o turno e espere a resposta do lead.',
-            },
-          };
-        }
+        // (C01, rodada 6) Teto cheio sem pendência por retomar: recusa de cara, como sempre.
+        if (tetoCheio() && porRetomar.size === 0) return recusaPorTeto();
         // O texto RENDERIZADO vai como `body` da cadeia: os gates de promessa,
         // spinning e disclosure avaliam exatamente o que o contato vai ler. Sem
         // isso, "usar template" seria a forma de escapar dos guardrails de conteúdo.
@@ -3200,6 +3286,15 @@ async function executarTurnoDoAgente(
           language,
           parameterFormat: linha.parameter_format,
         });
+        // (C01, rodada 6) Teto cheio: só a retomada de um template já registrado neste
+        // job passa (mesmo nome, idioma e valores — a identidade do ledger). Template
+        // novo é intenção nova: recusa.
+        if (
+          tetoCheio() &&
+          !(await conhecido({ body: rendered, template: { name: template_name, language, values } }))
+        ) {
+          return recusaPorTeto();
+        }
 
         // (C01) `cadeiaDeEnvio`, não `runBeforeSend`: a passagem ao humano é reconferida
         // no ponto comum, sob a serialização (achado 3 da segunda revisão adversarial).
@@ -3336,7 +3431,11 @@ async function executarTurnoDoAgente(
           });
         }
         if (passadoAoHumano) return recusaPorPassagemAoHumano();
-        if (seq >= maxSendsPerTurn) {
+        // (C01, rodada 6) Teto cheio sem pendência por retomar: recusa de cara, como
+        // sempre. Com pendência, segue até o plano do envio (depois das fotos), que
+        // decide pelo ledger o que é retomada e o que é novo. O erro fica escrito aqui
+        // (é o de `recusaPorTeto`): os testes do autor leem o código dele neste corpo.
+        if (tetoCheio() && porRetomar.size === 0) {
           return {
             ok: false,
             error: {
@@ -3389,7 +3488,7 @@ async function executarTurnoDoAgente(
         // depois da passagem ao humano.
         let enviandoFraseDeEspera = false;
         if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
-          const preparadas = await prepararFotosDoProduto(pool, copiarFotoNoStorage(runLog), {
+          const preparadas = await prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog), {
             tenantId,
             conversationId: input.conversationId,
             codigo: produto_codigo,
@@ -3400,6 +3499,12 @@ async function executarTurnoDoAgente(
           fotosDoProduto = preparadas.fotos;
           fotosQueFaltaram = preparadas.tinha - preparadas.fotos.length;
         }
+        // (C01, rodada 6) Teto cheio com pendência por retomar: o plano das mensagens
+        // físicas deste envio, separadas entre as que o ledger já conhece e as novas.
+        // Nenhuma conhecida = intenção nova: recusa por teto, como sempre. Alguma
+        // conhecida: a cadeia roda e o `send` manda SÓ elas (ver `enviarSoAsConhecidas`).
+        const retomada = tetoCheio() ? await planejarRetomada(body, fotosDoProduto) : null;
+        if (retomada !== null && retomada.conhecidas.length === 0) return recusaPorTeto();
         // F4-04: sinaliza (independente do gate F4-01/F4-08) se ESTA candidata é uma
         // promessa fora de tabela — usado só para correlacionar com o jailbreak no fim do
         // turno. A detecção é determinística (decidePromise); sem tabela do tenant = no-op.
@@ -3564,6 +3669,8 @@ async function executarTurnoDoAgente(
                   },
                   { fraseDeEspera: enviandoFraseDeEspera },
                 );
+              // (C01) Teto cheio: só o conhecido sai (ver `enviarSoAsConhecidas`).
+              if (retomada !== null) return enviarSoAsConhecidas(retomada.conhecidas, { enviar, sleep, jitter });
               // Cada foto é uma mensagem física: só vão as que cabem no que resta do teto
               // do turno (a checagem de `max_sends_per_turn` acima roda uma vez, antes).
               // O resto é medido ANTES DE CADA FOTO, depois do texto: o texto acima do
@@ -3572,6 +3679,7 @@ async function executarTurnoDoAgente(
                 sleep,
                 jitter,
                 restantes: () => maxSendsPerTurn - seq,
+                ...(preview ? {} : { jaRegistrada: (foto, legenda) => conhecido({ body: legenda, media: foto }) }),
                 enviarFoto: (foto, legenda) => enviar(legenda, foto),
                 enviarTexto: (texto) =>
                   sendInBubbles(texto, {
@@ -3822,24 +3930,39 @@ async function executarTurnoDoAgente(
           }
           switch (outcome.kind) {
             case 'sent':
-            case 'already_sent':
+            case 'already_sent': {
+              const avisos = [
+                ...(fotosQueFaltaram > 0
+                  ? [
+                      `${fotosQueFaltaram} foto(s) do produto não puderam ser enviadas; o texto foi. Não diga ao cliente que mandou essas fotos.`,
+                    ]
+                  : []),
+                // (C01, rodada 6) O que ficou de fora na retomada com o teto cheio.
+                ...(retomada !== null && retomada.novas > 0 ? [avisoDaRetomada(retomada.novas)] : []),
+              ];
               return {
                 ok: true,
                 status: 'enviada',
                 message_id: outcome.messageId,
-                ...(produto_codigo !== undefined ? { fotos_enviadas: fotosDoProduto.length } : {}),
-                ...(fotosQueFaltaram > 0
+                ...(produto_codigo !== undefined
                   ? {
-                      aviso: `${fotosQueFaltaram} foto(s) do produto não puderam ser enviadas; o texto foi. Não diga ao cliente que mandou essas fotos.`,
+                      // Na retomada, só as fotos que o ledger conhecia saíram.
+                      fotos_enviadas:
+                        retomada !== null
+                          ? retomada.conhecidas.filter((m) => m.media !== undefined).length
+                          : fotosDoProduto.length,
                     }
                   : {}),
+                ...(avisos.length > 0 ? { aviso: avisos.join(' ') } : {}),
               };
+            }
             case 'queued':
               return {
                 ok: true,
                 status: 'aceita_aguardando_canal',
                 message:
                   'o canal aceitou a mensagem e vai enviá-la quando a sessão voltar — não reenvie.',
+                ...(retomada !== null && retomada.novas > 0 ? { aviso: avisoDaRetomada(retomada.novas) } : {}),
               };
             case 'blocked':
               return {

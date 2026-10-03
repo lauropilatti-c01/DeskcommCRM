@@ -347,7 +347,14 @@ describe("(C01) a ligação no turno", () => {
   it("tudo o que mede 'quantas mensagens o cliente recebeu' lê a contagem, não a posição", () => {
     // Teto nas duas ferramentas de envio, "já falei neste turno" (resposta obsoleta e
     // aviso da escalação), o que resta para bolhas e fotos, e a pergunta do roteiro.
-    expect(FONTE.match(/if \(seq >= maxSendsPerTurn\) \{/g)).toHaveLength(2);
+    // (rodada 6) O teto é lido por `tetoCheio` (a contagem), e a pré-checagem das duas
+    // ferramentas só recusa de cara sem pendência por retomar
+    // (ver `c01-pendencias-com-teto-cheio`).
+    expect(FONTE.match(/const tetoCheio = \(\): boolean => seq >= maxSendsPerTurn;/g)).toHaveLength(
+      1,
+    );
+    expect(FONTE.match(/if \(tetoCheio\(\) && porRetomar\.size === 0\)/g)).toHaveLength(2);
+    expect(FONTE).not.toMatch(/if \(seq >= maxSendsPerTurn\) \{/);
     expect(FONTE.match(/seq === 0/g)).toHaveLength(2);
     expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(3);
     expect(FONTE).toMatch(
