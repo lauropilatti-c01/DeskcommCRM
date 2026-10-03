@@ -81,18 +81,34 @@ const HUMAN_HANDOFF_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
+ * (C01, rodada 7) Os mesmos padrões com a flag `g`, para percorrer TODAS as ocorrências
+ * (`matchAll` exige a flag). Os originais ficam como estão para quem os lê.
+ */
+const HUMAN_HANDOFF_PATTERNS_GLOBAIS: readonly RegExp[] = HUMAN_HANDOFF_PATTERNS.map(
+  (re) => new RegExp(re.source, `${re.flags}g`),
+);
+
+/**
  * True se a mensagem do lead é um pedido explícito de atendimento humano (determinístico).
  *
  * (C01) Pedido logo depois de uma negação de vontade ("não quero falar com
  * atendente") não é pedido — ver `negacao-de-pedido.ts`. "não consigo falar com
  * atendente" continua sendo: é pedido de ajuda, não recusa.
+ *
+ * (C01, rodada 7) Vale QUALQUER ocorrência não negada, não só a primeira: "não quero
+ * falar com atendente virtual. quero falar com uma pessoa." é pedido — a primeira
+ * ocorrência é negada, a segunda não. Só a primeira era olhada (`exec`), e o lead que
+ * pediu uma pessoa ficava com o bot (achado 4 da sexta revisão adversarial). É a mesma
+ * regra de `matchesHandoffKeyword`.
  */
 export function detectHumanHandoffRequest(message: string): boolean {
   if (message.trim() === '') return false;
   const normalized = normalize(message);
-  return HUMAN_HANDOFF_PATTERNS.some((re) => {
-    const m = re.exec(normalized);
-    return m !== null && !negadoLogoAntes(normalized, m.index);
+  return HUMAN_HANDOFF_PATTERNS_GLOBAIS.some((re) => {
+    for (const m of normalized.matchAll(re)) {
+      if (!negadoLogoAntes(normalized, m.index)) return true;
+    }
+    return false;
   });
 }
 
