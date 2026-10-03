@@ -183,7 +183,7 @@ describe("(C01) a ligação no fail-safe, pelo código", () => {
     expect(desfecho).toBeGreaterThan(frase);
     expect(retorno).toBeGreaterThan(desfecho);
     expect(passagem).toMatch(
-      /await performHumanHandoff\(\s*pool,\s*\{ tenantId, leadId, conversationId: input\.conversationId \},/,
+      /performHumanHandoff\(\s*pool,\s*\{ tenantId, leadId, conversationId: input\.conversationId \},/,
     );
     // A frase sai antes porque `force_human` arma o `stopGate` (ordem do autor nos
     // outros gatilhos): nenhuma passagem entre `openCase` e a frase.
@@ -201,11 +201,15 @@ describe("(C01) a ligação no fail-safe, pelo código", () => {
     expect(passagem).not.toMatch(/passagem:/);
   });
 
-  it("falha na passagem não some: `noteRunError` derruba o job (retry) e o modelo é mandado encerrar do mesmo jeito", () => {
-    expect(passagem).toMatch(/try \{\s*await performHumanHandoff\(/);
+  it("falha na passagem não some: uma nova tentativa imediata e, falhando de novo, `noteRunError` — o modelo é mandado encerrar do mesmo jeito", () => {
+    // (Rodada 6) A passagem é at-least-once com `force_human` primeiro: o retry do job
+    // não a refaz. Por isso a nova tentativa fica aqui, em `gravarPassagemComNovaTentativa`
+    // (teste próprio: `c01-passagem-com-nova-tentativa`), e não num `try` solto.
     expect(passagem).toMatch(
-      /\} catch \(err\) \{[\s\S]*?noteRunError\(err instanceof Error \? err : new Error\(String\(err\)\)\);/,
+      /await gravarPassagemComNovaTentativa\(\s*\(\) =>\s*performHumanHandoff\(/,
     );
+    expect(passagem).toMatch(/\{ log: runLog, noteRunError \},\s*\);/);
+    expect(passagem).not.toMatch(/try \{\s*await performHumanHandoff\(/);
   });
 
   it("o que já havia continua: caso aberto antes, etapa de passagem em best-effort, `passadoAoHumano` na closure", () => {

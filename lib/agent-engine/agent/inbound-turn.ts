@@ -636,6 +636,64 @@ export function avisoAoLeadPelaFraseDeEspera(espera: BeforeSendResult): Desfecho
   }
 }
 
+/** O que `gravarPassagemComNovaTentativa` conseguiu. */
+export type DesfechoDaGravacaoDaPassagem = 'gravada' | 'gravada_na_segunda' | 'falhou';
+
+/**
+ * (C01, rodada 6) Grava a passagem ao humano do fail-safe com UMA nova tentativa
+ * imediata quando a primeira falha — e diz a verdade sobre o que fica quando as duas
+ * falham.
+ *
+ * `performHumanHandoff` é at-least-once com escritas separadas, e `force_human` é a
+ * PRIMEIRA de propósito (fail-closed: o lead sai do automático antes de qualquer outra
+ * coisa). Uma falha entre as escritas deixa a passagem INCOMPLETA — `force_human`
+ * gravado sem o silêncio da conversa, os crons cancelados ou o aviso na Central — e o
+ * retry do job NÃO a refaz: `isLeadInHandoff` lê `force_human` no início do turno e a
+ * re-execução é pulada antes de chegar aqui. O retry só refaz a passagem quando nem
+ * `force_human` chegou a ser gravado. É propriedade herdada de todos os gatilhos do
+ * autor (palavra-chave, opt-out, orçamento, a ferramenta `request_human_handoff`);
+ * neste caminho o caso `guardrail_autofallback`, aberto antes da frase de espera, é o
+ * registro que uma pessoa lê — por isso "ninguém avisado" não é o cenário daqui.
+ * Limite documentado em `C01.md` (achado 2 da quinta revisão adversarial).
+ *
+ * A nova tentativa é barata e segura: a ação é idempotente pelo contrato do autor
+ * (re-executar no mesmo episódio é no-op semântico). Falhando de novo, o erro não some
+ * (`noteRunError`), e o log diz o que pode ter ficado pela metade.
+ */
+export async function gravarPassagemComNovaTentativa(
+  gravar: () => Promise<void>,
+  efeitos: {
+    noteRunError: (err: Error) => void;
+    log: {
+      warn(msg: string, fields?: Record<string, unknown>): void;
+      error(msg: string, fields?: Record<string, unknown>): void;
+    };
+  },
+): Promise<DesfechoDaGravacaoDaPassagem> {
+  const detalhe = (err: unknown) => (err instanceof Error ? err.message.slice(0, 200) : 'erro desconhecido');
+  try {
+    await gravar();
+    return 'gravada';
+  } catch (primeiraFalha) {
+    efeitos.log.warn('fail-safe de vocabulário interno: a passagem ao humano falhou — nova tentativa imediata', {
+      error: detalhe(primeiraFalha),
+    });
+  }
+  try {
+    await gravar();
+    return 'gravada_na_segunda';
+  } catch (err) {
+    efeitos.log.error(
+      'fail-safe de vocabulário interno: a passagem ao humano falhou duas vezes e pode ter ficado incompleta ' +
+        '(force_human gravado sem o silêncio da conversa, os crons cancelados ou o aviso na Central); ' +
+        'o retry do job não a refaz — o caso aberto é o registro para a equipe',
+      { error: detalhe(err) },
+    );
+    efeitos.noteRunError(err instanceof Error ? err : new Error(String(err)));
+    return 'falhou';
+  }
+}
+
 /**
  * (C01, rodada 5) O motivo da passagem gravado em `conversations.last_handoff_reason` e
  * no corpo do aviso da Central (`Motivo: …`). Frase legível, não código: sem a linha
@@ -3899,27 +3957,27 @@ async function executarTurnoDoAgente(
             // branch. O caso `guardrail_autofallback` é o registro: carrega o texto
             // vetado, que é o que a pessoa precisa ler.
             //
-            // Idempotente (re-executar é no-op semântico). Se falhar, o erro não some:
-            // `noteRunError` derruba o job e o retry refaz tudo — como na ferramenta
-            // `request_human_handoff`.
-            try {
-              await performHumanHandoff(
-                pool,
-                { tenantId, leadId, conversationId: input.conversationId },
-                {
-                  reason: MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
-                  conversationSummary: buildHandoffSummary(previous),
-                  inboxTitle: TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
-                  avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
-                  log: runLog,
-                },
-              );
-            } catch (err) {
-              runLog.error('fail-safe de vocabulário interno: a passagem ao humano não foi gravada — job re-tentado', {
-                error: err instanceof Error ? err.message.slice(0, 200) : 'erro desconhecido',
-              });
-              noteRunError(err instanceof Error ? err : new Error(String(err)));
-            }
+            // Idempotente (re-executar é no-op semântico), mas at-least-once com escritas
+            // separadas e `force_human` primeiro: uma falha no meio deixa a passagem
+            // incompleta, e o retry do job NÃO a refaz (`isLeadInHandoff` pula o turno).
+            // Por isso uma nova tentativa imediata aqui; falhando de novo, o erro não
+            // some (`noteRunError`) e o caso aberto acima é o registro. Ver
+            // `gravarPassagemComNovaTentativa` (achado 2 da quinta revisão adversarial).
+            await gravarPassagemComNovaTentativa(
+              () =>
+                performHumanHandoff(
+                  pool,
+                  { tenantId, leadId, conversationId: input.conversationId },
+                  {
+                    reason: MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
+                    conversationSummary: buildHandoffSummary(previous),
+                    inboxTitle: TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
+                    avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
+                    log: runLog,
+                  },
+                ),
+              { log: runLog, noteRunError },
+            );
             return {
               ok: false,
               error: {

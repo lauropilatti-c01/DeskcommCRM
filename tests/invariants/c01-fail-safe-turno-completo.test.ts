@@ -30,7 +30,14 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *   - rodada 5, achado 2 (quarta revisão): o fail-safe PERSISTE a passagem
  *     (`performHumanHandoff`). Num pipeline sem etapa de passagem, a próxima mensagem
  *     do cliente e o retry do job não voltam ao modelo — e, quando a frase de espera
- *     não saiu, a Central lê que o cliente NÃO foi avisado.
+ *     não saiu, a Central lê que o cliente NÃO foi avisado;
+ *   - rodada 6, achado 2 (quinta revisão): `performHumanHandoff` é at-least-once com
+ *     escritas separadas e `force_human` primeiro. A gravação ganha UMA nova tentativa
+ *     imediata (`gravarPassagemComNovaTentativa`): a 1ª escrita falhando uma vez, a
+ *     passagem sai inteira e o job conclui. Falhando as duas vezes no meio, a passagem
+ *     fica INCOMPLETA (`force_human` sem o silêncio da conversa nem o aviso na Central),
+ *     o job falha e o retry seria pulado em `isLeadInHandoff`: é o limite herdado,
+ *     documentado — o caso aberto antes é o registro que uma pessoa lê.
  *
  * Canal Cloud API (`meta_cloud`) de propósito: é o único em que a ferramenta
  * `send_template` existe. A mensagem do cliente tem 5 minutos — a janela de 24 h
@@ -411,6 +418,33 @@ async function estadoDaPassagem() {
   };
 }
 
+/**
+ * (Rodada 6) O banco do handler que FALHA as primeiras `vezes` consultas cujo texto
+ * contém `trecho` (a falha de rede ou de banco entre as escritas da passagem, tornada
+ * determinística) e depois deixa passar. A fila continua no `pool` de verdade.
+ */
+function bancoQueFalha(trecho: string, vezes: number): { banco: pg.Pool; falhas: () => number } {
+  let falhas = 0;
+  const banco = new Proxy(pool, {
+    get(alvo, prop) {
+      if (prop === "query") {
+        return async (...args: unknown[]) => {
+          if (typeof args[0] === "string" && args[0].includes(trecho) && falhas < vezes) {
+            falhas += 1;
+            throw new Error(`banco indisponível nesta escrita (teste, falha ${falhas})`);
+          }
+          return (alvo.query as (...a: unknown[]) => unknown)(...args);
+        };
+      }
+      const valor = Reflect.get(alvo, prop, alvo) as unknown;
+      return typeof valor === "function"
+        ? (valor as (...a: unknown[]) => unknown).bind(alvo)
+        : valor;
+    },
+  }) as pg.Pool;
+  return { banco, falhas: () => falhas };
+}
+
 /** A mensagem seguinte do cliente, gravada DEPOIS do fail-safe (é a inbound mais nova da conversa). */
 async function clienteEscreveDeNovo(): Promise<void> {
   await pool.query(
@@ -661,5 +695,73 @@ describe("turno completo — o fail-safe de vocabulário interno (achados 2 e 3 
     );
     expect(casos).toHaveLength(1);
     expect(casos[0]!.source).toBe("guardrail_autofallback");
+  });
+});
+
+describe("(rodada 6) a gravação da passagem com uma nova tentativa imediata (achado 2 da quinta revisão)", () => {
+  it("a 1ª escrita (`force_human`) falha uma vez: a nova tentativa grava a passagem inteira, o job conclui sem erro e a Central tem o aviso", async () => {
+    const { banco, falhas } = bancoQueFalha("update contacts set force_human = true", 1);
+    const modelo = modeloQueVazaEDepoisTentaTemplate();
+    const erro = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "dddddddd-0000-4000-8000-000000000020",
+      banco,
+    );
+    expect(erro).toBeNull();
+    expect(falhas()).toBe(1);
+
+    // O cliente recebeu a frase de espera, uma vez; nenhum texto vazado.
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0]!.body).toContain(m.turno.FRASE_DE_ESPERA_PADRAO);
+
+    // A passagem está inteira, como se nada tivesse falhado.
+    const passagem = await estadoDaPassagem();
+    expect(passagem.forceHuman).toBe(true);
+    expect(passagem.silenciada).toBe(true);
+    expect(passagem.emHandoff).toBe(true);
+    expect(passagem.motivo).toBe(m.turno.MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO);
+    expect(passagem.central).toHaveLength(1);
+    expect(passagem.central[0]!.title).toBe(m.turno.TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO);
+    expect(passagem.central[0]!.body).toMatch(/JÁ FOI avisado/);
+
+    // O modelo foi mandado encerrar, como sempre; o turno fechou com checkpoint.
+    expect(modelo.estado.etapas).toBe(VAZAMENTOS.length);
+    expect(modelo.estado.checkpoints).toBe(1);
+    expect(modelo.estado.resultados.join("\n")).toMatch(/internal_vocabulary_leak_handoff/);
+  });
+
+  it("a 2ª escrita (a conversa) falha nas duas tentativas: `force_human` fica gravado sem o silêncio nem o aviso, o job falha, o caso é o registro — e o retry seria pulado (limite herdado, documentado)", async () => {
+    // `last_handoff_reason = $4` só existe no UPDATE da conversa de `performHumanHandoff`.
+    const { banco, falhas } = bancoQueFalha("last_handoff_reason = $4", 2);
+    const modelo = modeloQueVazaEDepoisTentaTemplate();
+    const erro = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "dddddddd-0000-4000-8000-000000000021",
+      banco,
+    );
+    // O erro não some: o job falha com a segunda falha (não há terceira tentativa).
+    expect(erro?.message).toMatch(/banco indisponível nesta escrita \(teste, falha 2\)/);
+    expect(falhas()).toBe(2);
+
+    // O cliente recebeu a frase de espera; uma pessoa foi acionada pelo caso, aberto antes.
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0]!.body).toContain(m.turno.FRASE_DE_ESPERA_PADRAO);
+    const { rows: casos } = await pool.query<{ source: string }>(
+      "select source from agent_cases where organization_id = $1 and conversation_id = $2",
+      [ORG, CONV],
+    );
+    expect(casos).toHaveLength(1);
+    expect(casos[0]!.source).toBe("guardrail_autofallback");
+
+    // O que fica: a passagem INCOMPLETA — a 1ª escrita pegou (o lead está fora do
+    // automático), as seguintes não. É exatamente o que a propriedade do autor deixa;
+    // `isLeadInHandoff` já é verdadeiro, então a re-execução deste job não a refaria.
+    const passagem = await estadoDaPassagem();
+    expect(passagem.forceHuman).toBe(true);
+    expect(passagem.silenciada).toBe(false);
+    expect(passagem.motivo).toBeNull();
+    expect(passagem.central).toHaveLength(0);
+    expect(passagem.emHandoff).toBe(true);
+    expect(await m.isLeadInHandoff(pool, ORG, CONTACT)).toBe(true);
   });
 });
