@@ -22,6 +22,13 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * ledger, nada saía, nada falhava, e o job concluía com A sem entrega para sempre.
  * Agora a contagem é de entregas (2): A sai, na posição 4; B e C, já entregues,
  * não saem de novo.
+ *
+ * (Rodada 5) O cenário do achado 1 da QUARTA revisão: A aceita, B pendente (o CRM
+ * segura a mensagem, `queued`) e C ainda não criada. A recuperação conta B como
+ * enviada; a re-execução retoma o recibo de B pela mesma chave e o canal devolve
+ * `sent` — antes isso contava DE NOVO, o teto fechava em 3 com duas mensagens e C era
+ * omitida com o envio devolvendo sucesso. Agora as três saem, nenhuma duplicada, e o
+ * teto continua valendo para a quarta.
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -51,6 +58,7 @@ const TETO = 3;
 const A = "Oi! Vi que você perguntou sobre o plano.";
 const B = "Ele inclui o material e o acesso à plataforma.";
 const C = "Quer que eu te mande o link para começar?";
+const D = "Posso te ajudar com mais alguma coisa?";
 
 type Modules = {
   turno: typeof InboundTurn;
@@ -80,7 +88,7 @@ const USO = {
  * lhe devolveu, um resultado por chamada de ferramenta (o prompt de cada etapa repete
  * os resultados anteriores).
  */
-function modeloQueRegeneraAsTres() {
+function modeloQueRegeneraAsTres(textos: readonly string[] = [A, B, C]) {
   const estado = { etapas: 0, checkpoints: 0, resultados: new Map<string, string>() };
   const doGenerate = async (opts: { prompt?: unknown }) => {
     const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
@@ -108,7 +116,6 @@ function modeloQueRegeneraAsTres() {
       };
     }
     estado.etapas += 1;
-    const textos = [A, B, C];
     const body = textos[estado.etapas - 1];
     if (body === undefined) {
       return {
@@ -176,9 +183,16 @@ function montaHandler(doGenerate: unknown) {
           const outcome = await m.ledger.sendWithLedger(
             store,
             { tenantId: i.tenantId, leadId: i.leadId, jobId: i.jobId, seq: i.seq, body: i.body },
-            async (key) => {
+            async (key, messageId) => {
               entregues.push({ body: i.body, key });
-              return { id: randomUUID(), status: "sent" };
+              // A retomada de um recibo pendente reavalia a mensagem que o CRM já tem
+              // (`messageId` é o id dela): o CRM falso a marca enviada, como o real
+              // faria quando a sessão volta.
+              await pool.query(
+                "update messages set status = 'sent' where organization_id = $1 and id = $2",
+                [ORG, messageId],
+              );
+              return { id: messageId, status: "sent" };
             },
           );
           if (outcome.kind === "blocked") return outcome;
@@ -229,13 +243,26 @@ async function rodaTurno(
   }
 }
 
-/** Um recibo como a execução anterior o deixou. */
-async function recibo(jobId: string, seq: number, status: string, body: string): Promise<void> {
-  await pool.query(
+/** Um recibo como a execução anterior o deixou. Devolve a chave (id do recibo). */
+async function recibo(jobId: string, seq: number, status: string, body: string): Promise<string> {
+  const { rows } = await pool.query<{ id: string }>(
     `insert into send_ledger (organization_id, contact_id, job_id, seq, body_hash, status)
-     values ($1,$2,$3,$4,$5,$6)`,
+     values ($1,$2,$3,$4,$5,$6) returning id`,
     [ORG, CONTACT, jobId, seq, m.ledger.hashDoConteudo({ body }), status],
   );
+  return rows[0]!.id;
+}
+
+/** A mensagem que o CRM gravou para um recibo e ainda segura (`queued`): o canal a entrega quando a sessão voltar. */
+async function mensagemNaFila(chave: string, body: string): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+       type, direction, status, body, sent_via, metadata)
+     values ($1,$2,$3,$4,$5,'text','outbound','queued',$6,'ai',$7::jsonb)`,
+    [id, ORG, CONV, SESSION, CONTACT, body, JSON.stringify({ idempotency_key: chave })],
+  );
+  return id;
 }
 
 beforeAll(async () => {
@@ -291,6 +318,12 @@ beforeAll(async () => {
 beforeEach(async () => {
   entregues = [];
   await pool.query("delete from send_ledger where organization_id = $1", [ORG]);
+  await pool.query("delete from messages where organization_id = $1 and direction = 'outbound'", [
+    ORG,
+  ]);
+  // A janela do gate de spinning é por NÚMERO e atravessa os casos: sem limpá-la, o A
+  // do terceiro caso casa com os A dos dois anteriores e volta `mass_identical`.
+  await pool.query("delete from outbound_copies where organization_id = $1", [ORG]);
 });
 
 describe("turno completo — a re-execução com falha na posição 1 e sucesso nas 2 e 3 (achado 1 da terceira revisão)", () => {
@@ -366,5 +399,64 @@ describe("turno completo — a re-execução com falha na posição 1 e sucesso 
       [2, "accepted"],
       [3, "accepted"],
     ]);
+  });
+
+  it("(rodada 5) A aceita, B pendente (o CRM segura a mensagem), C ainda não criada (teto 3): as três saem, nenhuma omitida nem duplicada, e a 4ª é recusada por teto", async () => {
+    const modelo = modeloQueRegeneraAsTres([A, B, C, D]);
+    let chaveDeB = "";
+    let mensagemDeB = "";
+    const { erro, jobId } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000008",
+      async (id) => {
+        await recibo(id, 1, "accepted", A);
+        chaveDeB = await recibo(id, 2, "queued", B);
+        mensagemDeB = await mensagemNaFila(chaveDeB, B);
+      },
+    );
+    expect(erro).toBeNull();
+
+    // O CRM foi acionado duas vezes: para reavaliar B (a MESMA chave do recibo
+    // pendente — a mensagem que ele já tinha) e para C, nova. A já estava entregue.
+    // Antes: só B — a retomada contava de novo, o teto fechava em 3 e C era omitida.
+    expect(entregues).toEqual([
+      { body: B, key: chaveDeB },
+      { body: C, key: expect.any(String) },
+    ]);
+    expect(entregues[1]!.key).not.toBe(chaveDeB);
+
+    // No ledger: B aceita na SUA posição (2), com a mensagem que o CRM já tinha; C na 3.
+    const { rows } = await pool.query<{
+      seq: number;
+      status: string;
+      crm_message_id: string | null;
+    }>(
+      "select seq, status, crm_message_id from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(rows.map((r) => [Number(r.seq), r.status])).toEqual([
+      [1, "accepted"],
+      [2, "accepted"],
+      [3, "accepted"],
+    ]);
+    expect(rows[1]!.crm_message_id).toBe(mensagemDeB);
+
+    // O cliente tem três mensagens deste job, uma vez cada.
+    const { rows: mensagens } = await pool.query<{ body: string; status: string }>(
+      "select body, status from messages where organization_id = $1 and direction = 'outbound' order by created_at",
+      [ORG],
+    );
+    expect(mensagens).toEqual([{ body: B, status: "sent" }]);
+
+    // O modelo pediu as quatro: A, B e C voltaram como enviadas; D, como teto cheio.
+    expect(modelo.estado.etapas).toBe(5);
+    expect(modelo.estado.checkpoints).toBe(1);
+    const resultados = [...modelo.estado.resultados.values()];
+    expect(resultados).toHaveLength(4);
+    expect(resultados[0]).toMatch(/"status":"enviada"/);
+    expect(resultados[1]).toMatch(/"status":"enviada"/);
+    expect(resultados[2]).toMatch(/"status":"enviada"/);
+    expect(resultados[3]).toMatch(/max_sends_per_turn/);
+    expect(resultados.join("\n")).not.toMatch(/envio_falhou/);
   });
 });

@@ -2716,10 +2716,25 @@ async function executarTurnoDoAgente(
   // o ledger: a primeira mensagem ficava sem entrega (achado 1 da terceira revisão
   // adversarial). O preview não tem job: parte do zero.
   const estadoInicial = preview
-    ? { posicao: 0, enviadas: 0 }
+    ? { posicao: 0, enviadas: 0, pendentes: [] }
     : await estadoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
   let posicao = estadoInicial.posicao;
   let seq = estadoInicial.enviadas;
+  // (C01) As chaves já contadas em `seq`. Começa pelos recibos pendentes que a
+  // recuperação contou (o canal os segura e vai entregar). Quando a re-execução
+  // retoma um deles pela mesma chave (`findPendente`) e o canal devolve `sent` ou
+  // `queued`, é a MESMA mensagem: não conta de novo. Contava, e com teto 3, foto 1
+  // aceita e foto 2 pendente, a re-execução chegava a 3 com duas mensagens e omitia
+  // a foto 3 devolvendo sucesso (achado 1 da quarta revisão adversarial). O mesmo
+  // vale dentro da execução: uma chave conta uma vez; `unavailable` não tem chave e
+  // conta como sempre contou.
+  const contadas = new Set<string>(estadoInicial.pendentes);
+  const contaNoTeto = (resultado: ChannelSendResult): boolean => {
+    if (resultado.kind === 'unavailable') return true;
+    if (contadas.has(resultado.idempotencyKey)) return false;
+    contadas.add(resultado.idempotencyKey);
+    return true;
+  };
   // (C01) As URLs que a base da empresa devolveu NESTE turno (resultado de
   // `crm_query_external_data`). O gate de vocabulário interno libera a ocorrência
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
@@ -2743,8 +2758,8 @@ async function executarTurnoDoAgente(
   // ledger pode acomodar o conteúdo noutra: já aceito, pendente retomado, colisão);
   // `seq` conta o que de fato saiu. `already_sent` é o ledger dizendo que ESTE
   // conteúdo já saiu numa execução anterior do job: não é mensagem física nova, não
-  // ocupa posição e não conta no teto do turno. Qualquer outro desfecho conta — como
-  // sempre contou — e o teto continua medindo o que o lead recebeu neste turno.
+  // ocupa posição e não conta no teto do turno. Qualquer outro desfecho conta — uma
+  // vez por chave (`contaNoTeto`) — e o teto continua medindo o que o lead recebeu.
   //
   // (C01) E é aqui, no ponto comum imediatamente anterior ao envio físico — já sob
   // a serialização do número (a cadeia chama `send` dentro da transação com o
@@ -2760,7 +2775,7 @@ async function executarTurnoDoAgente(
     posicao += 1;
     const resultado = await liveChannel().send({ ...envio, seq: posicao });
     if (resultado.kind === 'already_sent') posicao -= 1;
-    else seq += 1;
+    else if (contaNoTeto(resultado)) seq += 1;
     return resultado;
   };
   /**

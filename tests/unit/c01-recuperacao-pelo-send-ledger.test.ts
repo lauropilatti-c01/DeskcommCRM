@@ -385,9 +385,9 @@ describe("(C01) recuperação pelo send_ledger — o caso C54 inteiro", () => {
     const turno = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
     // (C01, rodada 4) posição e contagem são dois números: `posicao` vai ao ledger como
     // `seq` do recibo; `seq` (a contagem do teto) só cresce quando algo de fato sai.
-    expect(turno).toMatch(/const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0 \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/);
+    expect(turno).toMatch(/const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0, pendentes: \[\] \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/);
     expect(turno).toMatch(/let posicao = estadoInicial\.posicao;\s*let seq = estadoInicial\.enviadas;/);
-    expect(turno).toMatch(/posicao \+= 1;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: posicao \}\);\s*if \(resultado\.kind === 'already_sent'\) posicao -= 1;\s*else seq \+= 1;/);
+    expect(turno).toMatch(/posicao \+= 1;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: posicao \}\);\s*if \(resultado\.kind === 'already_sent'\) posicao -= 1;\s*else if \(contaNoTeto\(resultado\)\) seq \+= 1;/);
     // Posição e contagem só avançam dentro de `enviarPeloCanal`: nenhum outro `posicao += 1`
     // ou `seq += 1`, nenhum outro `.send(`.
     expect(turno.match(/posicao \+= 1/g)).toHaveLength(1);

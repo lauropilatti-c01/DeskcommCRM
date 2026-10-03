@@ -352,13 +352,19 @@ export async function reconcileAcceptedSend(
  *   davam "3 enviadas", as ferramentas de envio recusavam por teto antes de consultar
  *   o ledger, e a primeira mensagem ficava sem entrega para sempre (achado 1 da
  *   terceira revisão adversarial).
+ * - `pendentes`: as CHAVES (id do recibo = idempotency key) dos que entraram em
+ *   `enviadas` como "o canal segura". Quando a re-execução retoma um deles pela mesma
+ *   chave (`sendWithLedger`, ramo pendente) e o canal devolve `sent` ou `queued`, é a
+ *   MESMA mensagem já contada: o turno não a conta de novo. Contava, e com teto 3,
+ *   foto 1 aceita e foto 2 pendente, a re-execução chegava a 3 com duas mensagens e
+ *   omitia a foto 3 devolvendo sucesso (achado 1 da quarta revisão adversarial).
  *
- * `{ posicao: 0, enviadas: 0 }` em job sem recibo.
+ * `{ posicao: 0, enviadas: 0, pendentes: [] }` em job sem recibo.
  */
 export async function estadoInicialDoJob(
   db: Queryable,
   input: { tenantId: string; jobId: string },
-): Promise<{ posicao: number; enviadas: number }> {
+): Promise<{ posicao: number; enviadas: number; pendentes: string[] }> {
   const store = pgSendLedger(db);
   const { rows } = await db.query<{ seq: number | string; status: SendLedgerStatus }>(
     "select seq,status from send_ledger where organization_id=$1 and job_id=$2 order by seq",
@@ -366,30 +372,33 @@ export async function estadoInicialDoJob(
   );
   let posicao = 0;
   let enviadas = 0;
+  const pendentes: string[] = [];
   for (const row of rows) {
     const seq = Number(row.seq);
-    let aceita = row.status === "accepted";
-    let aCaminho = false;
-    if (row.status === "requested" || row.status === "queued") {
-      const recibo = await store.find({ ...input, leadId: null, seq, body: "" });
-      const mensagem = recibo ? await store.message(input.tenantId, recibo.id) : null;
-      if (recibo && mensagem && ["sent", "delivered", "read"].includes(mensagem.status)) {
-        await store.update(input.tenantId, recibo.id, "accepted", mensagem.id, null);
-        aceita = true;
-      } else if (mensagem && mensagem.status !== "failed") {
-        // O CRM tem a mensagem (queued/sending): o canal a entrega quando a sessão
-        // voltar. Conta como enviada; a posição fica com quem a ocupa.
-        aCaminho = true;
-      }
-    }
-    if (aceita) {
+    if (row.status === "accepted") {
       enviadas += 1;
       if (seq > posicao) posicao = seq;
-    } else if (aCaminho) {
+      continue;
+    }
+    if (row.status !== "requested" && row.status !== "queued") continue;
+    const recibo = await store.find({ ...input, leadId: null, seq, body: "" });
+    const mensagem = recibo ? await store.message(input.tenantId, recibo.id) : null;
+    // Sem mensagem gravada o envio nunca chegou ao CRM: não conta, e a posição fica
+    // reaproveitável pelos ramos de colisão.
+    if (!recibo || !mensagem) continue;
+    if (["sent", "delivered", "read"].includes(mensagem.status)) {
+      await store.update(input.tenantId, recibo.id, "accepted", mensagem.id, null);
       enviadas += 1;
+      if (seq > posicao) posicao = seq;
+    } else if (mensagem.status !== "failed") {
+      // O CRM tem a mensagem (queued/sending): o canal a entrega quando a sessão
+      // voltar. Conta como enviada; a posição fica com quem a ocupa; a chave fica
+      // anotada para a retomada não contar de novo.
+      enviadas += 1;
+      pendentes.push(recibo.id);
     }
   }
-  return { posicao, enviadas };
+  return { posicao, enviadas, pendentes };
 }
 /** (C01) Só a posição de `estadoInicialDoJob` (quem precisa dos dois números usa aquela). */
 export async function posicaoInicialDoJob(

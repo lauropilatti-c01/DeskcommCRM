@@ -224,6 +224,7 @@ describe("(C01) `estadoInicialDoJob`: posição e entregas são dois números", 
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 3,
       enviadas: 2,
+      pendentes: [],
     });
     // A posição continua a de sempre.
     expect(await posicaoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toBe(3);
@@ -237,6 +238,7 @@ describe("(C01) `estadoInicialDoJob`: posição e entregas são dois números", 
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 3,
       enviadas: 2,
+      pendentes: [],
     });
     expect(banco.ledger.find((l) => l.id === saiu.id)).toMatchObject({ status: "accepted" });
     expect(banco.ledger.find((l) => l.id === perdido.id)).toMatchObject({ status: "requested" });
@@ -244,12 +246,14 @@ describe("(C01) `estadoInicialDoJob`: posição e entregas são dois números", 
 
   it("o que o canal segura conta como enviada, mas não ocupa a posição: 'queued', e 'requested' com mensagem na fila do CRM", async () => {
     const banco = bancoFalso();
-    banco.recibo(1, "queued", A, "queued");
+    const naFila = banco.recibo(1, "queued", A, "queued");
     banco.recibo(2, "accepted", B, "sent");
-    banco.recibo(3, "requested", C, "queued");
+    const saindo = banco.recibo(3, "requested", C, "queued");
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 2,
       enviadas: 3,
+      // (rodada 5) As chaves do que o canal segura, para a retomada não contar de novo.
+      pendentes: [naFila.id, saindo.id],
     });
   });
 
@@ -260,13 +264,14 @@ describe("(C01) `estadoInicialDoJob`: posição e entregas são dois números", 
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 0,
       enviadas: 0,
+      pendentes: [],
     });
     expect(
       await estadoInicialDoJob(banco.db, {
         tenantId: ORG,
         jobId: "55555555-5555-4555-8555-555555555555",
       }),
-    ).toEqual({ posicao: 0, enviadas: 0 });
+    ).toEqual({ posicao: 0, enviadas: 0, pendentes: [] });
   });
 });
 
@@ -278,7 +283,7 @@ describe("(C01) a re-execução com falha na posição 1 e sucesso nas 2 e 3 (te
     banco.recibo(3, "accepted", C, "sent");
 
     const { estado, saidas } = await banco.reexecucao([A, B, C]);
-    expect(estado).toEqual({ posicao: 3, enviadas: 2 });
+    expect(estado).toEqual({ posicao: 3, enviadas: 2, pendentes: [] });
     // A saiu; depois dela o teto (3) está cheio — B e C nem precisam do ledger.
     expect(saidas).toEqual(["sent", "recusado:max_sends_per_turn", "recusado:max_sends_per_turn"]);
     expect(banco.handler.mock.calls.map((c) => c[2])).toEqual([A]);
@@ -326,13 +331,14 @@ describe("(C01) a ligação no turno", () => {
 
   it("o turno parte dos dois números e só `enviarPeloCanal` os move: a posição vai ao ledger, a contagem cresce quando algo sai", () => {
     expect(FONTE).toMatch(
-      /const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0 \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/,
+      /const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0, pendentes: \[\] \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/,
     );
     expect(FONTE).toMatch(
       /let posicao = estadoInicial\.posicao;\s*let seq = estadoInicial\.enviadas;/,
     );
     expect(FONTE).toMatch(
-      /posicao \+= 1;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: posicao \}\);\s*if \(resultado\.kind === 'already_sent'\) posicao -= 1;\s*else seq \+= 1;/,
+      // (rodada 5) A contagem é por chave: `contaNoTeto` (ver `c01-recibo-retomado-conta-uma-vez`).
+      /posicao \+= 1;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: posicao \}\);\s*if \(resultado\.kind === 'already_sent'\) posicao -= 1;\s*else if \(contaNoTeto\(resultado\)\) seq \+= 1;/,
     );
     expect(FONTE.match(/posicao \+= 1/g)).toHaveLength(1);
     expect(FONTE.match(/seq \+= 1/g)).toHaveLength(1);
