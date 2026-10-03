@@ -56,7 +56,7 @@ import { WahaChannelAdapter } from '../edge/channel/waha-adapter';
 // egress de canal — o envio em si vai pelo adapter (ChannelAdapter). Ver F2-25.
 import { applySendOutcome } from '../edge/crm/send-message';
 // (C01) A posição inicial do turno vem do ledger: re-execução continua de onde parou.
-import { conteudoRegistradoNoJob, estadoInicialDoJob } from '../edge/crm/send-ledger';
+import { conteudoRegistradoNoJob, estadoInicialDoJob, posicaoFalhadaFoiOcupada } from '../edge/crm/send-ledger';
 import {
   LlmBudgetExceededError,
   runModelCall,
@@ -2848,10 +2848,19 @@ async function executarTurnoDoAgente(
   // o ledger: a primeira mensagem ficava sem entrega (achado 1 da terceira revisão
   // adversarial). O preview não tem job: parte do zero.
   const estadoInicial = preview
-    ? { posicao: 0, enviadas: 0, pendentes: [] }
+    ? { posicao: 0, enviadas: 0, pendentes: [], falhadas: [] }
     : await estadoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
   let posicao = estadoInicial.posicao;
   let seq = estadoInicial.enviadas;
+  // (C01, rodada 7) As posições que a execução anterior deixou com recibo 'failed',
+  // por ordem. Cada envio FÍSICO desta execução recebe a primeira delas como dica de
+  // posição, em vez de `posicao + 1`, e o ledger a rotaciona como sempre rotacionou
+  // o 'failed' no replay por posição; ocupada, sai da lista. Sem isto a mensagem
+  // regenerada nascia noutra posição e o 'failed' ficava no job para sempre: o
+  // follow-up por IA, que exige todos os recibos aceitos, nunca concluía o passo
+  // (achado 2 da sexta revisão adversarial). O conteúdo já conhecido (`already_sent`,
+  // retomada de pendente) não ocupa a posição: ela espera o próximo envio novo.
+  const falhadas = [...estadoInicial.falhadas];
   // (C01) As chaves já contadas em `seq`. Começa pelos recibos pendentes que a
   // recuperação contou (o canal os segura e vai entregar). Quando a re-execução
   // retoma um deles pela mesma chave (`findPendente`) e o canal devolve `sent` ou
@@ -2909,10 +2918,18 @@ async function executarTurnoDoAgente(
     opcoes?: { fraseDeEspera?: boolean },
   ): Promise<ChannelSendResult> => {
     if (passadoAoHumano && opcoes?.fraseDeEspera !== true) throw new EnvioAposPassagemAoHumano();
-    posicao += 1;
-    const resultado = await liveChannel().send({ ...envio, seq: posicao });
-    if (resultado.kind === 'already_sent') posicao -= 1;
-    else if (contaNoTeto(resultado)) seq += 1;
+    // (C01, rodada 7) A dica de posição: a primeira falhada da execução anterior, se
+    // houver; senão a próxima depois da maior aceita.
+    const falhada = falhadas[0];
+    const resultado = await liveChannel().send({ ...envio, seq: falhada?.seq ?? posicao + 1 });
+    if (resultado.kind !== 'already_sent') {
+      if (falhada === undefined) posicao += 1;
+      else if (await posicaoFalhadaFoiOcupada(pool, { tenantId, jobId: liveJob().id, ...falhada })) {
+        falhadas.shift();
+        if (falhada.seq > posicao) posicao = falhada.seq;
+      }
+      if (contaNoTeto(resultado)) seq += 1;
+    }
     // (C01, rodada 6) A pendência da recuperação que esta chave retomou sai da lista.
     if (resultado.kind !== 'unavailable') porRetomar.delete(resultado.idempotencyKey);
     return resultado;

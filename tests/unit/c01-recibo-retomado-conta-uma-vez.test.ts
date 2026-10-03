@@ -309,22 +309,26 @@ const chaves = (saidas: SendOutcome[]) =>
   saidas.map((s) => ("idempotencyKey" in s ? s.idempotencyKey : null));
 
 describe("(C01) `estadoInicialDoJob` devolve as chaves dos pendentes que contou", () => {
-  it("'queued' com mensagem na fila e 'requested' com mensagem 'sending': contam e saem em `pendentes`; aceito, reconciliado, perdido e falhado não", async () => {
+  it("'queued' com mensagem na fila e 'requested' com mensagem 'sending': contam e saem em `pendentes`; aceito, reconciliado, perdido e falhado não — e o falhado (rodada 7) vira 'failed' e sai em `falhadas`", async () => {
     const banco = bancoFalso();
     banco.recibo(1, "accepted", { body: A }, "sent");
     const naFila = banco.recibo(2, "queued", { body: B }, "queued");
     const reconciliado = banco.recibo(3, "requested", { body: C }, "delivered");
     const saindo = banco.recibo(4, "requested", { body: D }, "sending");
     banco.recibo(5, "requested", { body: T }, null);
-    banco.recibo(6, "requested", { body: `${T}!` }, "failed");
+    const falhado = banco.recibo(6, "requested", { body: `${T}!` }, "failed");
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 3,
       enviadas: 4,
       pendentes: [naFila.id, saindo.id],
+      // (rodada 7) O pendente cuja mensagem o CRM marcou `failed` é reconciliado como
+      // 'failed' e a posição fica a reaproveitar (achado 2 da sexta revisão).
+      falhadas: [{ seq: 6, chave: falhado.id }],
     });
     expect(banco.ledger.find((l) => l.id === reconciliado.id)).toMatchObject({
       status: "accepted",
     });
+    expect(banco.ledger.find((l) => l.id === falhado.id)).toMatchObject({ status: "failed" });
   });
 
   it("job sem recibo, ou só com aceitos: `pendentes` vazio", async () => {
@@ -333,12 +337,14 @@ describe("(C01) `estadoInicialDoJob` devolve as chaves dos pendentes que contou"
       posicao: 0,
       enviadas: 0,
       pendentes: [],
+      falhadas: [],
     });
     banco.recibo(1, "accepted", { body: A }, "sent");
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 1,
       enviadas: 1,
       pendentes: [],
+      falhadas: [],
     });
   });
 });
@@ -352,7 +358,7 @@ describe("(C01) o cenário do Codex: foto 1 aceita, foto 2 pendente, foto 3 aind
     const pendente = banco.recibo(2, "queued", { body: "", media: FOTOS[1]! }, "queued");
 
     const t = await banco.turno();
-    expect(t.estado).toEqual({ posicao: 1, enviadas: 2, pendentes: [pendente.id] });
+    expect(t.estado).toEqual({ posicao: 1, enviadas: 2, pendentes: [pendente.id], falhadas: [] });
 
     // O modelo regenera a mesma resposta: texto + as três fotos.
     expect(await t.sendMessage(T, FOTOS)).toBe("sent");
@@ -437,7 +443,7 @@ describe("(C01) o mesmo com bolhas de texto, e com o canal que continua segurand
   it("sem pendente nenhum, nada muda: cada desfecho novo conta uma vez, como sempre", async () => {
     const banco = bancoFalso();
     const t = await banco.turno();
-    expect(t.estado).toEqual({ posicao: 0, enviadas: 0, pendentes: [] });
+    expect(t.estado).toEqual({ posicao: 0, enviadas: 0, pendentes: [], falhadas: [] });
     expect(await t.sendMessage(`${A}\n\n${B}\n\n${C}\n\n${D}`)).toBe("sent");
     // Teto 3: quatro bolhas novas viram três mensagens (a última leva D junto).
     expect(banco.messages.map((m) => m.envio.body)).toEqual([A, B, `${C}\n\n${D}`]);
@@ -451,14 +457,14 @@ describe("(C01) a ligação no turno", () => {
 
   it("o turno parte das chaves já contadas e só incrementa `seq` para uma chave nova (ou sem chave: `unavailable`)", () => {
     expect(FONTE).toMatch(
-      /const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0, pendentes: \[\] \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/,
+      /const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0, pendentes: \[\], falhadas: \[\] \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/,
     );
     expect(FONTE).toMatch(/const contadas = new Set<string>\(estadoInicial\.pendentes\);/);
     expect(FONTE).toMatch(
       /const contaNoTeto = \(resultado: ChannelSendResult\): boolean => \{\s*if \(resultado\.kind === 'unavailable'\) return true;\s*if \(contadas\.has\(resultado\.idempotencyKey\)\) return false;\s*contadas\.add\(resultado\.idempotencyKey\);\s*return true;\s*\};/,
     );
     expect(FONTE).toMatch(
-      /posicao \+= 1;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: posicao \}\);\s*if \(resultado\.kind === 'already_sent'\) posicao -= 1;\s*else if \(contaNoTeto\(resultado\)\) seq \+= 1;/,
+      /const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
     );
     expect(FONTE.match(/seq \+= 1/g)).toHaveLength(1);
   });

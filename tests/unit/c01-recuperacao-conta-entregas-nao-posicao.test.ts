@@ -26,6 +26,7 @@ import {
   estadoInicialDoJob,
   hashDoConteudo,
   pgSendLedger,
+  posicaoFalhadaFoiOcupada,
   posicaoInicialDoJob,
   sendWithLedger,
 } from "@/lib/agent-engine/edge/crm/send-ledger";
@@ -187,11 +188,14 @@ function bancoFalso() {
    * A re-execução do turno, como `inbound-turn.ts` agora faz: parte de
    * `estadoInicialDoJob`, recusa por teto quando `seq >= TETO` (ANTES de qualquer
    * consulta ao ledger, como as ferramentas), leva `posicao` ao ledger e conta em
-   * `seq` o que de fato saiu. Devolve o que cada envio deu.
+   * `seq` o que de fato saiu. (Rodada 7) A dica de posição é a primeira falhada da
+   * execução anterior, enquanto houver; ocupada, sai da lista. Devolve o que cada
+   * envio deu.
    */
   const reexecucao = async (textos: string[], contarPelaPosicao = false) => {
     const estado = await estadoInicialDoJob(db, { tenantId: ORG, jobId: JOB });
     let { posicao, enviadas: seq } = estado;
+    const falhadas = [...estado.falhadas];
     // O defeito, documentado: a contagem partindo da maior posição aceita.
     if (contarPelaPosicao) seq = posicao;
     const saidas: string[] = [];
@@ -200,14 +204,20 @@ function bancoFalso() {
         saidas.push("recusado:max_sends_per_turn");
         continue;
       }
-      posicao += 1;
+      const falhada = falhadas[0];
       const r = await sendWithLedger(
         store,
-        { tenantId: ORG, leadId: LEAD, jobId: JOB, seq: posicao, body },
+        { tenantId: ORG, leadId: LEAD, jobId: JOB, seq: falhada?.seq ?? posicao + 1, body },
         (key, id) => handler(key, id, body),
       );
-      if (r.kind === "already_sent") posicao -= 1;
-      else seq += 1;
+      if (r.kind !== "already_sent") {
+        if (falhada === undefined) posicao += 1;
+        else if (await posicaoFalhadaFoiOcupada(db, { tenantId: ORG, jobId: JOB, ...falhada })) {
+          falhadas.shift();
+          if (falhada.seq > posicao) posicao = falhada.seq;
+        }
+        seq += 1;
+      }
       saidas.push(r.kind);
     }
     return { estado, saidas };
@@ -218,13 +228,16 @@ function bancoFalso() {
 describe("(C01) `estadoInicialDoJob`: posição e entregas são dois números", () => {
   it("posição 1 'failed', 2 e 3 aceitas: posição 3, DUAS enviadas (o número antigo dizia 3)", async () => {
     const banco = bancoFalso();
-    banco.recibo(1, "failed", A, "failed");
+    const falhado = banco.recibo(1, "failed", A, "failed");
     banco.recibo(2, "accepted", B, "sent");
     banco.recibo(3, "accepted", C, "sent");
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 3,
       enviadas: 2,
       pendentes: [],
+      // (rodada 7) A posição falhada, com a chave do recibo: o turno a dá como dica ao
+      // próximo envio físico (achado 2 da sexta revisão).
+      falhadas: [{ seq: 1, chave: falhado.id }],
     });
     // A posição continua a de sempre.
     expect(await posicaoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toBe(3);
@@ -239,6 +252,7 @@ describe("(C01) `estadoInicialDoJob`: posição e entregas são dois números", 
       posicao: 3,
       enviadas: 2,
       pendentes: [],
+      falhadas: [],
     });
     expect(banco.ledger.find((l) => l.id === saiu.id)).toMatchObject({ status: "accepted" });
     expect(banco.ledger.find((l) => l.id === perdido.id)).toMatchObject({ status: "requested" });
@@ -254,44 +268,53 @@ describe("(C01) `estadoInicialDoJob`: posição e entregas são dois números", 
       enviadas: 3,
       // (rodada 5) As chaves do que o canal segura, para a retomada não contar de novo.
       pendentes: [naFila.id, saindo.id],
+      falhadas: [],
     });
   });
 
-  it("mensagem gravada como 'failed' não conta; job sem recibo é { 0, 0 }", async () => {
+  it("mensagem gravada como 'failed' não conta — e (rodada 7) o recibo pendente dela vira 'failed', posição a reaproveitar; job sem recibo é { 0, 0 }", async () => {
     const banco = bancoFalso();
-    banco.recibo(1, "requested", A, "failed");
+    const falhado = banco.recibo(1, "requested", A, "failed");
     banco.recibo(2, "vetoed", B, null);
     expect(await estadoInicialDoJob(banco.db, { tenantId: ORG, jobId: JOB })).toEqual({
       posicao: 0,
       enviadas: 0,
       pendentes: [],
+      falhadas: [{ seq: 1, chave: falhado.id }],
     });
+    expect(banco.ledger.find((l) => l.id === falhado.id)).toMatchObject({ status: "failed" });
     expect(
       await estadoInicialDoJob(banco.db, {
         tenantId: ORG,
         jobId: "55555555-5555-4555-8555-555555555555",
       }),
-    ).toEqual({ posicao: 0, enviadas: 0, pendentes: [] });
+    ).toEqual({ posicao: 0, enviadas: 0, pendentes: [], falhadas: [] });
   });
 });
 
 describe("(C01) a re-execução com falha na posição 1 e sucesso nas 2 e 3 (teto 3)", () => {
-  it("posição 1 'failed': a re-execução manda A (posição 4) — não é recusada por teto; B e C, já entregues, não saem de novo", async () => {
+  it("posição 1 'failed': a re-execução manda A — não é recusada por teto; B e C, já entregues, não saem de novo. (Rodada 7) A toma a posição 1, rotacionada: nenhum 'failed' fica no job", async () => {
     const banco = bancoFalso();
     banco.recibo(1, "failed", A, "failed");
     banco.recibo(2, "accepted", B, "sent");
     banco.recibo(3, "accepted", C, "sent");
 
     const { estado, saidas } = await banco.reexecucao([A, B, C]);
-    expect(estado).toEqual({ posicao: 3, enviadas: 2, pendentes: [] });
+    expect(estado).toEqual({
+      posicao: 3,
+      enviadas: 2,
+      pendentes: [],
+      falhadas: [{ seq: 1, chave: expect.any(String) }],
+    });
     // A saiu; depois dela o teto (3) está cheio — B e C nem precisam do ledger.
     expect(saidas).toEqual(["sent", "recusado:max_sends_per_turn", "recusado:max_sends_per_turn"]);
     expect(banco.handler.mock.calls.map((c) => c[2])).toEqual([A]);
+    // Até a rodada 6, A nascia na posição 4 e o 'failed' ficava na 1 para sempre
+    // (achado 2 da sexta revisão: o follow-up por IA nunca concluía o passo).
     expect(banco.ledger.map((l) => [l.seq, l.status])).toEqual([
-      [1, "failed"],
+      [1, "accepted"],
       [2, "accepted"],
       [3, "accepted"],
-      [4, "accepted"],
     ]);
   });
 
@@ -331,14 +354,14 @@ describe("(C01) a ligação no turno", () => {
 
   it("o turno parte dos dois números e só `enviarPeloCanal` os move: a posição vai ao ledger, a contagem cresce quando algo sai", () => {
     expect(FONTE).toMatch(
-      /const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0, pendentes: \[\] \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/,
+      /const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0, pendentes: \[\], falhadas: \[\] \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/,
     );
     expect(FONTE).toMatch(
       /let posicao = estadoInicial\.posicao;\s*let seq = estadoInicial\.enviadas;/,
     );
     expect(FONTE).toMatch(
       // (rodada 5) A contagem é por chave: `contaNoTeto` (ver `c01-recibo-retomado-conta-uma-vez`).
-      /posicao \+= 1;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: posicao \}\);\s*if \(resultado\.kind === 'already_sent'\) posicao -= 1;\s*else if \(contaNoTeto\(resultado\)\) seq \+= 1;/,
+      /const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
     );
     expect(FONTE.match(/posicao \+= 1/g)).toHaveLength(1);
     expect(FONTE.match(/seq \+= 1/g)).toHaveLength(1);

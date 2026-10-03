@@ -445,7 +445,7 @@ describe("(C01) o cenário do Codex: 1 foto aceita (com a legenda), 2 fotos `que
     const { k2, k3 } = cenario(banco);
     const t = await banco.turno();
     // A recuperação conta as três: o teto está cheio ANTES do primeiro envio.
-    expect(t.estado).toEqual({ posicao: 1, enviadas: 3, pendentes: [k2, k3] });
+    expect(t.estado).toEqual({ posicao: 1, enviadas: 3, pendentes: [k2, k3], falhadas: [] });
 
     // O modelo regenera a mesma resposta: texto + as três fotos.
     expect(await t.sendMessage(T, TRES)).toEqual({ status: "sent" });
@@ -557,7 +557,7 @@ describe("(C01) o mesmo para o template pendente e para as bolhas de texto", () 
     banco.recibo(2, "accepted", { body: B }, "sent");
     const k = banco.recibo(3, "queued", { body: RENDERIZADO, template: TEMPLATE }, "queued").id;
     const t = await banco.turno();
-    expect(t.estado).toEqual({ posicao: 2, enviadas: 3, pendentes: [k] });
+    expect(t.estado).toEqual({ posicao: 2, enviadas: 3, pendentes: [k], falhadas: [] });
 
     // O template com OUTROS valores é intenção nova: recusado, sem tocar o canal.
     const outro = { ...TEMPLATE, values: { "1": "Outro" } };
@@ -611,7 +611,7 @@ describe("(C01) o mesmo para o template pendente e para as bolhas de texto", () 
   it("sem pendente nenhum, nada muda: o teto cheio recusa de cara, e o que cabe sai como sempre", async () => {
     const banco = bancoFalso();
     const t = await banco.turno();
-    expect(t.estado).toEqual({ posicao: 0, enviadas: 0, pendentes: [] });
+    expect(t.estado).toEqual({ posicao: 0, enviadas: 0, pendentes: [], falhadas: [] });
     expect(await t.sendMessage(T, TRES)).toEqual({ status: "sent" });
     expect(banco.messages).toHaveLength(3);
     expect(t.seq()).toBe(TETO);
@@ -705,7 +705,7 @@ describe("(C01) a ligação no turno, no envio com fotos e no ledger", () => {
   it("o turno guarda as pendências por retomar e as risca no ponto comum do envio", () => {
     expect(TURNO).toMatch(/const porRetomar = new Set<string>\(estadoInicial\.pendentes\);/);
     expect(TURNO).toMatch(
-      /else if \(contaNoTeto\(resultado\)\) seq \+= 1;[\s\S]{0,200}?if \(resultado\.kind !== 'unavailable'\) porRetomar\.delete\(resultado\.idempotencyKey\);/,
+      /if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}[\s\S]{0,200}?if \(resultado\.kind !== 'unavailable'\) porRetomar\.delete\(resultado\.idempotencyKey\);/,
     );
   });
 

@@ -226,6 +226,6 @@ describe("(C01) a ligação no turno", () => {
     expect(FONTE).toMatch(
       /const conhecido = \(envio: MensagemPlanejada & \{ template\?: object; identidade\?: string \}\): Promise<boolean> =>\s*preview \? Promise\.resolve\(false\) : conteudoRegistradoNoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.envio \}\);/,
     );
-    expect(FONTE).toMatch(/import \{ conteudoRegistradoNoJob, estadoInicialDoJob \} from '\.\.\/edge\/crm\/send-ledger';/);
+    expect(FONTE).toMatch(/import \{ conteudoRegistradoNoJob, estadoInicialDoJob, posicaoFalhadaFoiOcupada \} from '\.\.\/edge\/crm\/send-ledger';/);
   });
 });

@@ -379,13 +379,32 @@ export async function reconcileAcceptedSend(
  *   MESMA mensagem já contada: o turno não a conta de novo. Contava, e com teto 3,
  *   foto 1 aceita e foto 2 pendente, a re-execução chegava a 3 com duas mensagens e
  *   omitia a foto 3 devolvendo sucesso (achado 1 da quarta revisão adversarial).
+ * - `falhadas` (rodada 7): as posições cujo recibo a execução anterior deixou
+ *   'failed' (o CRM marcou a mensagem falhada), com a chave de cada um, por ordem. O
+ *   autor sempre tratou 'failed' como "retry = tentativa lógica nova": no replay por
+ *   posição, a re-execução caía na posição falhada e a rotacionava (`ocuparPosicao`).
+ *   Com a recuperação por conteúdo, a posição continuava da maior aceita e o recibo
+ *   falhado nunca mais era visitado: a mensagem regenerada nascia noutra posição, o
+ *   'failed' ficava no job para sempre, e o follow-up por IA — que exige todos os
+ *   recibos aceitos (`resultadoDoEnvioDoFollowup`) — nunca concluía o passo, com o
+ *   cliente tendo recebido tudo (achado 2 da sexta revisão adversarial). O turno dá
+ *   essas posições, uma a uma, como dica aos próximos envios FÍSICOS da execução
+ *   (`enviarPeloCanal`); o ledger as rotaciona como sempre rotacionou. O recibo
+ *   pendente cuja mensagem o CRM marcou `failed` (a sessão caiu com ela na fila) é
+ *   reconciliado aqui como 'failed' — a mesma reconciliação que já acontece para a
+ *   mensagem entregue — e entra na lista; antes ficava pendente para sempre.
  *
- * `{ posicao: 0, enviadas: 0, pendentes: [] }` em job sem recibo.
+ * `{ posicao: 0, enviadas: 0, pendentes: [], falhadas: [] }` em job sem recibo.
  */
 export async function estadoInicialDoJob(
   db: Queryable,
   input: { tenantId: string; jobId: string },
-): Promise<{ posicao: number; enviadas: number; pendentes: string[] }> {
+): Promise<{
+  posicao: number;
+  enviadas: number;
+  pendentes: string[];
+  falhadas: Array<{ seq: number; chave: string }>;
+}> {
   const store = pgSendLedger(db);
   const { rows } = await db.query<{ seq: number | string; status: SendLedgerStatus }>(
     "select seq,status from send_ledger where organization_id=$1 and job_id=$2 order by seq",
@@ -394,11 +413,17 @@ export async function estadoInicialDoJob(
   let posicao = 0;
   let enviadas = 0;
   const pendentes: string[] = [];
+  const falhadas: Array<{ seq: number; chave: string }> = [];
   for (const row of rows) {
     const seq = Number(row.seq);
     if (row.status === "accepted") {
       enviadas += 1;
       if (seq > posicao) posicao = seq;
+      continue;
+    }
+    if (row.status === "failed") {
+      const recibo = await store.find({ ...input, leadId: null, seq, body: "" });
+      if (recibo) falhadas.push({ seq, chave: recibo.id });
       continue;
     }
     if (row.status !== "requested" && row.status !== "queued") continue;
@@ -417,9 +442,28 @@ export async function estadoInicialDoJob(
       // anotada para a retomada não contar de novo.
       enviadas += 1;
       pendentes.push(recibo.id);
+    } else {
+      // (C01, rodada 7) O CRM marcou a mensagem falhada depois de o recibo ficar
+      // pendente: o recibo vira 'failed' e a posição fica a reaproveitar.
+      await store.update(input.tenantId, recibo.id, "failed", mensagem.id, "handler marcou a mensagem como failed");
+      falhadas.push({ seq, chave: recibo.id });
     }
   }
-  return { posicao, enviadas, pendentes };
+  return { posicao, enviadas, pendentes, falhadas };
+}
+/**
+ * (C01, rodada 7) A posição falhada que o turno deu como dica a um envio foi OCUPADA
+ * por ele? Sim quando o recibo que a ocupava não é mais o mesmo (o ledger a rotacionou
+ * para o novo conteúdo — a chave mudou — ou a posição sumiu). Não quando o envio foi
+ * reconhecido noutro lugar (`already_sent`, retomada de um pendente) ou nem chegou ao
+ * ledger: a posição continua aberta para o próximo envio físico da execução.
+ */
+export async function posicaoFalhadaFoiOcupada(
+  db: Queryable,
+  input: { tenantId: string; jobId: string; seq: number; chave: string },
+): Promise<boolean> {
+  const recibo = await pgSendLedger(db).find({ ...input, leadId: null, body: "" });
+  return recibo === null || recibo.id !== input.chave;
 }
 /** (C01) Só a posição de `estadoInicialDoJob` (quem precisa dos dois números usa aquela). */
 export async function posicaoInicialDoJob(

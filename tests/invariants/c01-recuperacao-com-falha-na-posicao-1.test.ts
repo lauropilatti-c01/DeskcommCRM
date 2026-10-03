@@ -20,8 +20,9 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * regenera A, B e C. Antes, a execução partia de "3 enviadas" (a maior posição aceita),
  * as duas ferramentas de envio recusavam por `max_sends_per_turn` antes de consultar o
  * ledger, nada saía, nada falhava, e o job concluía com A sem entrega para sempre.
- * Agora a contagem é de entregas (2): A sai, na posição 4; B e C, já entregues,
- * não saem de novo.
+ * Agora a contagem é de entregas (2): A sai; B e C, já entregues, não saem de novo.
+ * (Rodada 7) A sai NA POSIÇÃO 1, a do recibo falhado, rotacionada — não na 4: o
+ * 'failed' não fica no job (achado 2 da sexta revisão).
  *
  * (Rodada 5) O cenário do achado 1 da QUARTA revisão: A aceita, B pendente (o CRM
  * segura a mensagem, `queued`) e C ainda não criada. A recuperação conta B como
@@ -498,7 +499,7 @@ beforeEach(async () => {
 });
 
 describe("turno completo — a re-execução com falha na posição 1 e sucesso nas 2 e 3 (achado 1 da terceira revisão)", () => {
-  it("posição 1 'failed', 2 e 3 aceitas (teto 3): a re-execução entrega A na posição 4; B e C não saem de novo; o job conclui", async () => {
+  it("posição 1 'failed', 2 e 3 aceitas (teto 3): a re-execução entrega A — na posição 1, rotacionada (rodada 7); B e C não saem de novo; o job conclui", async () => {
     const modelo = modeloQueRegeneraAsTres();
     const { erro, jobId } = await rodaTurno(
       montaHandler(modelo.doGenerate),
@@ -516,18 +517,19 @@ describe("turno completo — a re-execução com falha na posição 1 e sucesso 
     // concluía do mesmo jeito, com A perdida.
     expect(entregues.map((e) => e.body)).toEqual([A]);
 
-    // No ledger: A aceita na posição 4; as posições antigas como estavam.
+    // No ledger: A aceita na posição 1, a do recibo falhado, rotacionada (rodada 7:
+    // até então A nascia na posição 4 e o 'failed' ficava na 1 para sempre — o
+    // follow-up por IA, que exige todos os recibos aceitos, nunca concluía o passo).
     const { rows } = await pool.query<{ seq: number; status: string; body_hash: string }>(
       "select seq, status, body_hash from send_ledger where organization_id = $1 and job_id = $2 order by seq",
       [ORG, jobId],
     );
     expect(rows.map((r) => [Number(r.seq), r.status])).toEqual([
-      [1, "failed"],
+      [1, "accepted"],
       [2, "accepted"],
       [3, "accepted"],
-      [4, "accepted"],
     ]);
-    expect(rows[3]!.body_hash).toBe(m.ledger.hashDoConteudo({ body: A }));
+    expect(rows[0]!.body_hash).toBe(m.ledger.hashDoConteudo({ body: A }));
 
     // O modelo pediu as três; depois de A o teto (3) está cheio e as outras duas
     // voltaram como `max_sends_per_turn` — nunca como falha de envio.
