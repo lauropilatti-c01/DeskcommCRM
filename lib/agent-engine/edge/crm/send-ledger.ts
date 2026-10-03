@@ -12,8 +12,31 @@ export type SendOutcome =
       crmMessageId: string | null;
     }
   | { kind: "blocked"; idempotencyKey: string };
-type Intent = { tenantId: string; leadId: string | null; jobId: string; seq: number; body: string };
-type Row = { id: string; status: SendLedgerStatus; crm_message_id: string | null };
+type Intent = {
+  tenantId: string;
+  leadId: string | null;
+  jobId: string;
+  seq: number;
+  body: string;
+  /**
+   * (C01) Presentes = não é texto puro (template renderizado, foto com legenda).
+   * A deduplicação por conteúdo só vale para texto: duas fotos com a mesma
+   * legenda (ou legenda vazia) são duas mensagens, não uma repetida.
+   */
+  template?: object;
+  media?: object;
+};
+type Row = {
+  id: string;
+  status: SendLedgerStatus;
+  crm_message_id: string | null;
+  /**
+   * (C01) As lojas reais devolvem os dois; dublês antigos não. Sem `body_hash`
+   * a posição ocupada é tratada como antes: mesmo conteúdo.
+   */
+  body_hash?: string | null;
+  seq?: number | string;
+};
 interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
   find(input: Intent): Promise<Row | null>;
@@ -26,6 +49,33 @@ interface LedgerStore {
     id: string | null,
     error: string | null,
   ): Promise<void>;
+  /** (C01) Recibo ACEITO deste job com o mesmo conteúdo, em qualquer posição. */
+  findAccepted?(input: Intent, hash: string): Promise<Row | null>;
+  /** (C01) A primeira posição livre do job (maior ocupada + 1). */
+  nextSeq?(input: Intent): Promise<number>;
+}
+/** (C01) Quantas vezes procurar posição livre antes de desistir (corrida entre execuções). */
+const TENTATIVAS_DE_POSICAO = 5;
+const ehTextoPuro = (input: Intent) => input.template === undefined && input.media === undefined;
+/**
+ * (C01) Conteúdo novo numa posição ocupada vai para a primeira posição livre.
+ * Nunca é descartado como `already_sent`: o recibo da posição é de OUTRA mensagem.
+ */
+async function criarNaProximaPosicao(
+  store: LedgerStore & Required<Pick<LedgerStore, "nextSeq">>,
+  input: Intent,
+  hash: string,
+): Promise<string> {
+  for (let tentativa = 0; tentativa < TENTATIVAS_DE_POSICAO; tentativa++) {
+    const seq = await store.nextSeq(input);
+    try {
+      return await store.create({ ...input, seq }, hash);
+    } catch (error) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "23505"))
+        throw error;
+    }
+  }
+  throw new Error("send_ledger_sem_posicao_livre");
 }
 /** Inline e daemon compartilham identidade (job,seq), reconciliação e mensagem.
  * Página/worker perdido não cria uma segunda intenção. queued é reavaliado pelo
@@ -36,6 +86,14 @@ export async function sendWithLedger(
   send: (key: string, messageId: string) => Promise<{ id: string; status: string }>,
 ): Promise<SendOutcome> {
   const hash = createHash("sha256").update(input.body).digest("hex");
+  // (C01) Recuperação pelo CONTEÚDO (caso C54): a re-execução do mesmo job
+  // (reaper, retry) gera as bolhas de novo, em posições novas. O que o canal já
+  // aceitou com este exato texto não sai duas vezes, qualquer que seja a posição.
+  if (ehTextoPuro(input) && store.findAccepted) {
+    const aceito = await store.findAccepted(input, hash);
+    if (aceito)
+      return { kind: "already_sent", idempotencyKey: aceito.id, crmMessageId: aceito.crm_message_id };
+  }
   let key: string;
   try {
     key = await store.create(input, hash);
@@ -45,10 +103,31 @@ export async function sendWithLedger(
     const prior = await store.find(input);
     if (!prior) throw new Error("send_ledger_missing");
     key = prior.id;
-    if (prior.status === "accepted")
-      return { kind: "already_sent", idempotencyKey: key, crmMessageId: prior.crm_message_id };
-    if (prior.status === "vetoed") return { kind: "blocked", idempotencyKey: key };
-    if (prior.status === "failed") key = await store.rotate(input, hash);
+    // (C01) Posição ocupada por OUTRO conteúdo é mensagem nova, não repetição:
+    // antes virava `already_sent` e o texto novo sumia sem ninguém ver (C54).
+    // A posição é reaproveitada (rotate, como `failed` sempre foi) quando o seu
+    // recibo nunca chegou ao canal; se chegou (aceito, vetado, em voo), o texto
+    // novo vai para a primeira posição livre.
+    const outroConteudo = prior.body_hash != null && prior.body_hash !== hash;
+    if (outroConteudo && store.nextSeq) {
+      const reaproveitavel =
+        prior.status === "failed" ||
+        (prior.status !== "accepted" &&
+          prior.status !== "vetoed" &&
+          (await store.message(input.tenantId, prior.id)) === null);
+      key = reaproveitavel
+        ? await store.rotate(input, hash)
+        : await criarNaProximaPosicao(
+            store as LedgerStore & Required<Pick<LedgerStore, "nextSeq">>,
+            input,
+            hash,
+          );
+    } else {
+      if (prior.status === "accepted")
+        return { kind: "already_sent", idempotencyKey: key, crmMessageId: prior.crm_message_id };
+      if (prior.status === "vetoed") return { kind: "blocked", idempotencyKey: key };
+      if (prior.status === "failed") key = await store.rotate(input, hash);
+    }
   }
   const existing = await store.message(input.tenantId, key);
   let message = existing;
@@ -93,6 +172,33 @@ export async function reconcileAcceptedSend(
   await store.update(input.tenantId, prior.id, "accepted", message.id, null);
   return true;
 }
+/**
+ * (C01) De onde a execução parte: a maior posição ACEITA do job, depois de
+ * reconciliar os recibos que ficaram em 'requested'/'queued' (crash entre o envio
+ * e a gravação). Até aqui `seq` recomeçava em 0 a cada execução, e a primeira
+ * bolha nova da re-execução caía na posição da primeira antiga (C54). Posições
+ * com 'failed' ou 'vetoed' acima da aceita seguem reaproveitáveis pelos ramos de
+ * colisão. 0 em job sem envio aceito.
+ */
+export async function posicaoInicialDoJob(
+  db: Queryable,
+  input: { tenantId: string; jobId: string },
+): Promise<number> {
+  const { rows } = await db.query<{ seq: number | string; status: SendLedgerStatus }>(
+    "select seq,status from send_ledger where organization_id=$1 and job_id=$2 order by seq",
+    [input.tenantId, input.jobId],
+  );
+  let maior = 0;
+  for (const row of rows) {
+    const seq = Number(row.seq);
+    const aceito =
+      row.status === "accepted" ||
+      ((row.status === "requested" || row.status === "queued") &&
+        (await reconcileAcceptedSend(db, { ...input, seq })));
+    if (aceito && seq > maior) maior = seq;
+  }
+  return maior;
+}
 export function pgSendLedger(db: Queryable): LedgerStore {
   return {
     async create(i, hash) {
@@ -131,6 +237,20 @@ export function pgSendLedger(db: Queryable): LedgerStore {
         [org, key, status, id, error],
       );
     },
+    async findAccepted(i, hash) {
+      const { rows } = await db.query<Row>(
+        "select * from send_ledger where organization_id=$1 and job_id=$2 and status='accepted' and body_hash=$3 order by seq limit 1",
+        [i.tenantId, i.jobId, hash],
+      );
+      return rows[0] ?? null;
+    },
+    async nextSeq(i) {
+      const { rows } = await db.query<{ seq: number | string }>(
+        "select coalesce(max(seq),0)+1 as seq from send_ledger where organization_id=$1 and job_id=$2",
+        [i.tenantId, i.jobId],
+      );
+      return Number(rows[0]?.seq ?? 1);
+    },
   };
 }
 export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
@@ -153,7 +273,7 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
     async find(i) {
       const { data, error } = await db
         .from("send_ledger")
-        .select("id,status,crm_message_id")
+        .select("id,status,crm_message_id,body_hash,seq")
         .eq("organization_id", i.tenantId)
         .eq("job_id", i.jobId)
         .eq("seq", i.seq)
@@ -203,6 +323,32 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
         .eq("organization_id", org)
         .eq("id", key);
       if (error) throw error;
+    },
+    async findAccepted(i, hash) {
+      const { data, error } = await db
+        .from("send_ledger")
+        .select("id,status,crm_message_id,body_hash,seq")
+        .eq("organization_id", i.tenantId)
+        .eq("job_id", i.jobId)
+        .eq("status", "accepted")
+        .eq("body_hash", hash)
+        .order("seq")
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data as Row | null;
+    },
+    async nextSeq(i) {
+      const { data, error } = await db
+        .from("send_ledger")
+        .select("seq")
+        .eq("organization_id", i.tenantId)
+        .eq("job_id", i.jobId)
+        .order("seq", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return Number((data as { seq?: number | string } | null)?.seq ?? 0) + 1;
     },
   };
 }

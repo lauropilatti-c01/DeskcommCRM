@@ -55,6 +55,8 @@ import { WahaChannelAdapter } from '../edge/channel/waha-adapter';
 // applySendOutcome é disposição de FILA (cancel/reschedule + cache de opt-out), não
 // egress de canal — o envio em si vai pelo adapter (ChannelAdapter). Ver F2-25.
 import { applySendOutcome } from '../edge/crm/send-message';
+// (C01) A posição inicial do turno vem do ledger: re-execução continua de onde parou.
+import { posicaoInicialDoJob } from '../edge/crm/send-ledger';
 import {
   LlmBudgetExceededError,
   runModelCall,
@@ -2557,7 +2559,24 @@ async function executarTurnoDoAgente(
   }
 
   // Estado do RUN — vive só neste closure (isolamento por construção, acc 3).
-  let seq = 0;
+  //
+  // (C01) A posição continua de onde o canal já aceitou. A cada execução do
+  // mesmo job (reaper, retry) `seq` recomeçava em 0: a primeira bolha nova caía
+  // na posição da primeira antiga e era descartada como `already_sent` (C54).
+  // O ledger reconcilia os recibos pendentes e devolve a maior posição aceita.
+  let seq = preview ? 0 : await posicaoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
+  // (C01) O único caminho de `seq` ao canal. `already_sent` é o ledger dizendo
+  // que ESTE texto já saiu numa execução anterior do job: não é mensagem física
+  // nova, não ocupa posição e não conta no teto do turno — por isso devolve a
+  // posição. O teto continua contando o que o lead de fato recebeu neste turno.
+  const enviarPeloCanal = async (
+    envio: Omit<Parameters<ChannelAdapter['send']>[0], 'seq'>,
+  ): Promise<ChannelSendResult> => {
+    seq += 1;
+    const resultado = await liveChannel().send({ ...envio, seq });
+    if (resultado.kind === 'already_sent') seq -= 1;
+    return resultado;
+  };
   // O que o modelo de fato mandou neste turno (depois da cadeia). A trava "a
   // pergunta saiu?" do roteiro de atendimento lê daqui.
   const corposEnviados: string[] = [];
@@ -2895,20 +2914,17 @@ async function executarTurnoDoAgente(
           now: clock(),
           sleep: deps.sleep,
           lgpd,
-          send: (finalBody: string) => {
-            seq += 1;
-            return liveChannel().send({
+          send: (finalBody: string) =>
+            enviarPeloCanal({
               tenantId,
               leadId,
               jobId: liveJob().id,
               jobClaim: claimOfJob(liveJob()),
               agentOperation,
-              seq,
               conversationId: input.conversationId,
               body: finalBody,
               template: { name: template_name, language, values },
-            });
-          },
+            }),
         });
 
         if (chain.status === 'vetoed') {
@@ -3218,20 +3234,17 @@ async function executarTurnoDoAgente(
               const enviar = (
                 corpo: string,
                 media?: FotoParaEnvio,
-              ): Promise<ChannelSendResult> => {
-                seq += 1;
-                return liveChannel().send({
+              ): Promise<ChannelSendResult> =>
+                enviarPeloCanal({
                   tenantId,
                   leadId,
                   jobId: liveJob().id,
                   jobClaim: claimOfJob(liveJob()),
                   agentOperation,
-                  seq,
                   conversationId: input.conversationId,
                   body: corpo,
                   ...(media ? { media } : {}),
                 });
-              };
               // Cada foto é uma mensagem física: só vão as que cabem no que resta do teto
               // do turno (a checagem de `max_sends_per_turn` acima roda uma vez, antes).
               // O resto é medido ANTES DE CADA FOTO, depois do texto: o texto acima do
@@ -4324,19 +4337,16 @@ async function executarTurnoDoAgente(
               ...(deps.knobs.disclosureMode !== undefined
                 ? { disclosureMode: deps.knobs.disclosureMode }
                 : {}),
-              send: (finalBody: string) => {
-                seq += 1;
-                return liveChannel().send({
+              send: (finalBody: string) =>
+                enviarPeloCanal({
                   tenantId,
                   leadId,
                   jobId: liveJob().id,
                   jobClaim: claimOfJob(liveJob()),
                   agentOperation,
-                  seq,
                   conversationId: input.conversationId,
                   body: finalBody,
-                });
-              },
+                }),
             });
             return chain.status !== 'vetoed' && (chain.outcome.kind === 'sent' || chain.outcome.kind === 'already_sent');
           },
