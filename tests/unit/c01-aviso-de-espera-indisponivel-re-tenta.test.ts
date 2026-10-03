@@ -119,6 +119,15 @@ describe("(C01) a ligação no fail-safe e o fim do turno", () => {
     expect(failSafe).not.toMatch(/espera\.status === 'vetoed'/);
   });
 
+  it("o `blocker` do caso, escrito ANTES da frase sair, não afirma que o cliente a recebeu", () => {
+    const titulo = FONTE.indexOf("title: 'Resposta travada pela revisão automática'");
+    expect(titulo).toBeGreaterThan(-1);
+    expect(titulo).toBeLessThan(i); // o caso vem antes da frase
+    const blocker = FONTE.slice(FONTE.indexOf("blocker:", titulo), FONTE.indexOf("source: 'guardrail_autofallback'", titulo));
+    expect(blocker).not.toMatch(/recebeu/);
+    expect(blocker).toMatch(/O sistema manda uma frase de espera ' \+\s*'ao cliente \(a entrega aparece na conversa\)/);
+  });
+
   it("o fim do turno honra o registro: `runError` derruba o job (retry pela fila) e `failed` em `outcomes` também", () => {
     expect(FONTE).toMatch(/if \(runError !== null\) \{\s*throw runError;/);
     expect(FONTE).toMatch(/if \(outcomes\.some\(\(o\) => o\.kind === 'failed'\)\) \{[\s\S]*?throw new Error\(/);

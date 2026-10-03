@@ -3506,10 +3506,13 @@ async function executarTurnoDoAgente(
                 // O texto que o modelo tentou mandar: é o que a pessoa precisa ver para
                 // responder no lugar dele.
                 summary: body,
+                // (C01) O caso é aberto ANTES da frase de espera (sem pessoa acionada a frase
+                // não sai), então este texto não pode afirmar que o cliente a recebeu: o
+                // desfecho vem depois (`desfechoDaFraseDeEspera`) e pode ser pendente.
                 blocker:
                   `Aberto automaticamente: a IA tentou ${internalVocabularyVetoCount} vezes responder com ` +
-                  'vocabulário interno do sistema e a mensagem não saiu. O cliente recebeu uma frase de espera; ' +
-                  'uma pessoa precisa responder.',
+                  'vocabulário interno do sistema e a mensagem não saiu. O sistema manda uma frase de espera ' +
+                  'ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
                 source: 'guardrail_autofallback',
                 contextSnapshot: buildCaseContextSnapshot(),
               },
