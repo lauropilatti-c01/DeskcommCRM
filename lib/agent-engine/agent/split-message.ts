@@ -241,9 +241,12 @@ export function splitForSend(
  * (C01) O teto de bolhas aplicado SÓ às bolhas novas. `registradas[i]` diz se a
  * bolha i já tem recibo no job (ela não é mensagem física nova: sai como
  * `already_sent` ou retoma o recibo pendente). Quando as novas passam de
- * `restantes`, tudo a partir da última nova que cabe vira uma bolha só, na ordem —
+ * `restantes`, as novas a partir da última que cabe viram uma bolha só, na ordem —
  * a mesma regra de `splitForSend`, que é o caso particular em que nenhuma bolha é
- * conhecida. Pura.
+ * conhecida. As conhecidas ficam como estão, cada uma uma unidade, no lugar em
+ * que estavam: emendá-las ao texto novo criava uma bolha de conteúdo inédito para
+ * o ledger, e o que já tinha chegado ao cliente saía de novo dentro dela (achado 3
+ * da terceira revisão adversarial). Pura.
  */
 export function aplicarTetoAsNovas(
   bolhas: readonly string[],
@@ -252,13 +255,25 @@ export function aplicarTetoAsNovas(
 ): string[] {
   const novas = bolhas.filter((_, i) => !registradas[i]).length;
   if (novas <= restantes || restantes < 1) return [...bolhas];
+  const saida: string[] = [];
   let vistas = 0;
+  // Índice, em `saida`, da última bolha nova que cabe: as novas seguintes se emendam a ela.
+  let emenda = -1;
   for (let i = 0; i < bolhas.length; i++) {
-    if (registradas[i]) continue;
+    const bolha = bolhas[i]!;
+    if (registradas[i]) {
+      saida.push(bolha);
+      continue;
+    }
     vistas += 1;
-    if (vistas === restantes) return [...bolhas.slice(0, i), bolhas.slice(i).join("\n\n")];
+    if (vistas <= restantes) {
+      if (vistas === restantes) emenda = saida.length;
+      saida.push(bolha);
+      continue;
+    }
+    saida[emenda] = `${saida[emenda]}\n\n${bolha}`;
   }
-  return [...bolhas];
+  return saida;
 }
 
 export async function sendInBubbles<T extends BubbleOutcome>(
