@@ -12,9 +12,10 @@
  *      a re-execução repetia as bolhas que o canal já tinha entregado.
  *
  * Com a correção: a execução parte da maior posição ACEITA do job
- * (`posicaoInicialDoJob`, reconciliando recibos pendentes); texto já aceito no
- * job volta `already_sent` em qualquer posição (dedup por conteúdo, só texto
- * puro); posição ocupada por outro conteúdo vai para a primeira posição livre.
+ * (`posicaoInicialDoJob`, reconciliando recibos pendentes); conteúdo já aceito no
+ * job volta `already_sent` em qualquer posição (dedup por conteúdo; foto e
+ * template entram com a sua identidade, ver `c01-retry-nao-reenvia-foto-nem-
+ * template`); posição ocupada por outro conteúdo vai para a primeira posição livre.
  *
  * O primeiro teste reproduz o C54 inteiro, com fila, lease e banco falsos: a 1ª
  * execução manda 2 bolhas e perde o lease; o reaper devolve o job; a 2ª produz
@@ -279,7 +280,7 @@ describe("(C01) recuperação pelo send_ledger — o caso C54 inteiro", () => {
     });
   });
 
-  it("dedup por conteúdo só vale para texto puro: foto com a mesma legenda é outra mensagem", async () => {
+  it("duas fotos com a mesma legenda e caminhos diferentes são duas mensagens; texto igual ao já aceito não sai de novo", async () => {
     const banco = bancoFalso();
     await withServiceJob(banco.db, jobDe("w1", banco.claimInicial), async () => {
       const store = pgSendLedger(banco.db);

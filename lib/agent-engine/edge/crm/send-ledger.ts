@@ -20,8 +20,10 @@ type Intent = {
   body: string;
   /**
    * (C01) Presentes = não é texto puro (template renderizado, foto com legenda).
-   * A deduplicação por conteúdo só vale para texto: duas fotos com a mesma
-   * legenda (ou legenda vazia) são duas mensagens, não uma repetida.
+   * Entram na identidade do conteúdo (`hashDoConteudo`): duas fotos com a mesma
+   * legenda (ou legenda vazia) e caminhos diferentes são duas mensagens; a MESMA
+   * foto, ou o MESMO template com os mesmos valores, gerados de novo pela
+   * re-execução do job, são repetição e não saem duas vezes.
    */
   template?: object;
   media?: object;
@@ -56,7 +58,35 @@ interface LedgerStore {
 }
 /** (C01) Quantas vezes procurar posição livre antes de desistir (corrida entre execuções). */
 const TENTATIVAS_DE_POSICAO = 5;
-const ehTextoPuro = (input: Intent) => input.template === undefined && input.media === undefined;
+/** (C01) JSON com as chaves em ordem, em toda profundidade: a mesma mídia ou os mesmos valores dão o mesmo texto. */
+function canonico(valor: unknown): string {
+  if (Array.isArray(valor)) return `[${valor.map(canonico).join(",")}]`;
+  if (valor !== null && typeof valor === "object") {
+    const o = valor as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonico(o[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(valor) ?? "null";
+}
+/**
+ * (C01) A identidade do CONTEÚDO de um envio, gravada em `body_hash` e usada para
+ * reconhecer, em qualquer posição do job, o que o canal já aceitou.
+ *
+ * Texto puro: o hash do texto, como sempre (os recibos já gravados continuam
+ * válidos). Foto e template: a mídia (caminho e tipo) ou o template (nome, idioma
+ * e valores) entram no hash, com um prefixo que os separa do texto. Sem isso a
+ * re-execução de um job (reaper, retry) mandava de novo a foto e o template que o
+ * canal já tinha aceitado — a deduplicação só via texto — e uma foto com a
+ * legenda X colidia com o texto X (achado 1 da revisão adversarial, 03/10/2026).
+ */
+export function hashDoConteudo(input: Pick<Intent, "body" | "template" | "media">): string {
+  const h = createHash("sha256");
+  if (input.template !== undefined) h.update("template\u0000").update(canonico(input.template)).update("\u0000");
+  if (input.media !== undefined) h.update("media\u0000").update(canonico(input.media)).update("\u0000");
+  return h.update(input.body).digest("hex");
+}
 /**
  * (C01) Conteúdo novo numa posição ocupada vai para a primeira posição livre.
  * Nunca é descartado como `already_sent`: o recibo da posição é de OUTRA mensagem.
@@ -85,11 +115,12 @@ export async function sendWithLedger(
   input: Intent,
   send: (key: string, messageId: string) => Promise<{ id: string; status: string }>,
 ): Promise<SendOutcome> {
-  const hash = createHash("sha256").update(input.body).digest("hex");
+  const hash = hashDoConteudo(input);
   // (C01) Recuperação pelo CONTEÚDO (caso C54): a re-execução do mesmo job
   // (reaper, retry) gera as bolhas de novo, em posições novas. O que o canal já
-  // aceitou com este exato texto não sai duas vezes, qualquer que seja a posição.
-  if (ehTextoPuro(input) && store.findAccepted) {
+  // aceitou com este exato conteúdo — texto, foto ou template — não sai duas
+  // vezes, qualquer que seja a posição.
+  if (store.findAccepted) {
     const aceito = await store.findAccepted(input, hash);
     if (aceito)
       return { kind: "already_sent", idempotencyKey: aceito.id, crmMessageId: aceito.crm_message_id };
