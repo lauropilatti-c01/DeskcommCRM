@@ -27,6 +27,16 @@ type Intent = {
    */
   template?: object;
   media?: object;
+  /**
+   * (C01) A identidade do TEXTO, quando difere do corpo entregue: o corpo antes das
+   * emendas da cadeia de envio (o texto do modelo). Entra no hash em lugar de `body`.
+   * A apresentação automática (`disclosureGate`, modo `inject`) emenda a 1ª mensagem ao
+   * lead, e só ela: na re-execução do job, com o envio já aceito, a emenda não acontece
+   * e o corpo entregue é outro — o hash do corpo entregue não reconhecia o recibo, a
+   * posição avançava e a resposta saía de novo (achado 3 da quinta revisão adversarial).
+   * Ausente = o próprio `body`, como sempre.
+   */
+  identidade?: string;
 };
 type Row = {
   id: string;
@@ -104,11 +114,15 @@ function canonico(valor: unknown): string {
  * canal já tinha aceitado — a deduplicação só via texto — e uma foto com a
  * legenda X colidia com o texto X (achado 1 da revisão adversarial, 03/10/2026).
  */
-export function hashDoConteudo(input: Pick<Intent, "body" | "template" | "media">): string {
+export function hashDoConteudo(
+  input: Pick<Intent, "body" | "template" | "media" | "identidade">,
+): string {
   const h = createHash("sha256");
   if (input.template !== undefined) h.update("template\u0000").update(canonico(input.template)).update("\u0000");
   if (input.media !== undefined) h.update("media\u0000").update(canonico(input.media)).update("\u0000");
-  return h.update(input.body).digest("hex");
+  // (C01) O texto que identifica o envio é o de antes das emendas da cadeia, quando
+  // quem monta o envio o informa (`identidade`); senão, o corpo entregue, como sempre.
+  return h.update(input.identidade ?? input.body).digest("hex");
 }
 /**
  * (C01) O hash que a versão do autor gravava para TODO envio: só o texto. Para texto
@@ -320,7 +334,7 @@ export async function sendWithLedger(
  */
 export async function conteudoRegistradoNoJob(
   db: Queryable,
-  input: { tenantId: string; jobId: string } & Pick<Intent, "body" | "media" | "template">,
+  input: { tenantId: string; jobId: string } & Pick<Intent, "body" | "media" | "template" | "identidade">,
 ): Promise<boolean> {
   const store = pgSendLedger(db);
   const hash = hashDoConteudo(input);

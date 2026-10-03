@@ -186,6 +186,8 @@ import {
   runBeforeSend,
   type BeforeSendResult,
 } from '../guardrails/before-send';
+// (C01) A mesma régua da cadeia para a identidade do envio no ledger (ver `identidadeDoEnvio`).
+import { aplicarAjustesDeEstilo, lerAjustesDeEstiloDaOrg } from '../guardrails/ajustes-de-estilo-da-org';
 // (C01) O aviso de última tentativa do fail-safe de vocabulário interno.
 import { AVISO_DE_ULTIMA_TENTATIVA } from '../guardrails/vazamento-interno';
 import { isStatusSendable } from '../../channels/meta/template-binding';
@@ -2926,8 +2928,33 @@ async function executarTurnoDoAgente(
   /** (C01) Uma mensagem física do envio: texto puro, ou foto com (ou sem) legenda. */
   type MensagemPlanejada = { body: string; media?: FotoParaEnvio };
   /** (C01) Este conteúdo já tem recibo neste job (aceito, ou pendente a retomar)? O preview não tem job. */
-  const conhecido = (envio: MensagemPlanejada & { template?: object }): Promise<boolean> =>
+  const conhecido = (envio: MensagemPlanejada & { template?: object; identidade?: string }): Promise<boolean> =>
     preview ? Promise.resolve(false) : conteudoRegistradoNoJob(pool, { tenantId, jobId: liveJob().id, ...envio });
+  // (C01, rodada 6) O corpo com que a cadeia de envio COMEÇA é o texto do modelo com os
+  // ajustes de estilo da organização (`runBeforeSend` os aplica antes dos gates, pelas
+  // mesmas duas funções, fora de transação). Lidos uma vez por turno: é a régua da
+  // identidade do envio no ledger (`identidadeDoEnvio`, `planejarRetomada`).
+  const ajustesDeEstilo = (await lerAjustesDeEstiloDaOrg(pool, tenantId)).ajustes;
+  const comoACadeiaComeca = (textoDoModelo: string): string => aplicarAjustesDeEstilo(textoDoModelo, ajustesDeEstilo);
+  /**
+   * (C01, rodada 6) A identidade de UMA mensagem física no ledger: o texto entregue SEM
+   * a emenda da cadeia. A apresentação automática (`disclosureGate`, modo `inject`)
+   * emenda a 1ª mensagem ao lead na frente do corpo, separada por linha em branco — e a
+   * emenda depende de um estado que o próprio envio muda (haver envio aceito): na
+   * re-execução do job, com o envio aceito, ela não acontece, o corpo entregue é outro,
+   * e o hash do corpo entregue não reconhecia o recibo; a posição avançava e a resposta
+   * saía de novo (achado 3 da quinta revisão adversarial). A emenda é o que `finalBody`
+   * tem a mais que o corpo com que a cadeia começou (`antes`): fatiada em bolhas, vira
+   * bolha própria (fica como está — não é texto do modelo, e a re-execução não a
+   * regenera) ou abre a bolha única do teto e a legenda da foto, de onde sai. Sem
+   * emenda, nada a declarar: a identidade é o corpo entregue, como sempre.
+   */
+  const identidadeDoEnvio = (corpo: string, finalBody: string, antes: string): { identidade?: string } => {
+    if (finalBody === antes || !finalBody.endsWith(antes)) return {};
+    const emenda = finalBody.slice(0, finalBody.length - antes.length);
+    if (!corpo.startsWith(emenda) || corpo.length === emenda.length) return {};
+    return { identidade: corpo.slice(emenda.length) };
+  };
   /**
    * (C01, rodada 6) O plano do `send_message` com o teto cheio: as mensagens físicas
    * que `enviarComFotos` + `sendInBubbles` produziriam — a legenda na capa e as demais
@@ -2937,9 +2964,12 @@ async function executarTurnoDoAgente(
    * avisado). As bolhas são as naturais: a conhecida mantém a divisão com que saiu.
    */
   const planejarRetomada = async (
-    texto: string,
+    textoDoModelo: string,
     fotos: readonly FotoParaEnvio[],
   ): Promise<{ conhecidas: MensagemPlanejada[]; novas: number }> => {
+    // A identidade no ledger é o texto com que a cadeia começa (ajustes de estilo da
+    // organização; a emenda da apresentação fica de fora): a mesma régua aqui.
+    const texto = comoACadeiaComeca(textoDoModelo);
     const naturais = splitForSend(texto, agentConfig?.splitMessages ?? false, agentConfig?.splitMaxChars ?? 600);
     const bolhas: MensagemPlanejada[] = (naturais.length === 0 ? [texto] : naturais).map((body) => ({ body }));
     const [capa, ...demais] = fotos;
@@ -3327,6 +3357,9 @@ async function executarTurnoDoAgente(
                 conversationId: input.conversationId,
                 body: finalBody,
                 template: { name: template_name, language, values },
+                // (C01) A identidade sem a emenda da cadeia (ver `identidadeDoEnvio`). O
+                // template não passa pelos ajustes de estilo: a cadeia começa do renderizado.
+                ...identidadeDoEnvio(finalBody, finalBody, rendered),
               }),
           }),
         );
@@ -3487,6 +3520,9 @@ async function executarTurnoDoAgente(
         // espera: é o ÚNICO envio que passa pela reconferência de `enviarPeloCanal`
         // depois da passagem ao humano.
         let enviandoFraseDeEspera = false;
+        // (C01, rodada 6) O texto entregue à cadeia neste envio — o do modelo, ou a frase
+        // de espera do fail-safe: é dele que a identidade no ledger parte (`identidadeDoEnvio`).
+        let corpoDaCadeia: string = body;
         if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
           const preparadas = await prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog), {
             tenantId,
@@ -3666,10 +3702,10 @@ async function executarTurnoDoAgente(
                     conversationId: input.conversationId,
                     body: corpo,
                     ...(media ? { media } : {}),
+                    ...identidadeDoEnvio(corpo, finalBody, comoACadeiaComeca(corpoDaCadeia)),
                   },
                   { fraseDeEspera: enviandoFraseDeEspera },
                 );
-              // (C01) Teto cheio: só o conhecido sai (ver `enviarSoAsConhecidas`).
               if (retomada !== null) return enviarSoAsConhecidas(retomada.conhecidas, { enviar, sleep, jitter });
               // Cada foto é uma mensagem física: só vão as que cabem no que resta do teto
               // do turno (a checagem de `max_sends_per_turn` acima roda uma vez, antes).
@@ -3695,8 +3731,9 @@ async function executarTurnoDoAgente(
                     ...(preview
                       ? {}
                       : {
+                          // A mesma identidade com que a bolha vai ao ledger (`identidadeDoEnvio`).
                           jaRegistrada: (bolha: string) =>
-                            conteudoRegistradoNoJob(pool, { tenantId, jobId: liveJob().id, body: bolha }),
+                            conhecido({ body: bolha, ...identidadeDoEnvio(bolha, finalBody, comoACadeiaComeca(corpoDaCadeia)) }),
                         }),
                     sleep,
                     jitter,
@@ -3828,9 +3865,10 @@ async function executarTurnoDoAgente(
             // fotos que a mensagem vetada pedia (a mensagem vetada não sai mais).
             fotosDoProduto = [];
             enviandoFraseDeEspera = true;
+            corpoDaCadeia = deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO;
             const espera = await runBeforeSend({
               ...beforeSendArgs,
-              body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+              body: corpoDaCadeia,
               hasOpenCase: true,
               openedCaseThisTurn: true,
               enforceSpinning: false,

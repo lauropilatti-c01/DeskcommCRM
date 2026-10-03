@@ -217,8 +217,14 @@ describe("(C01) a ligação no turno", () => {
     expect(i).toBeGreaterThan(-1);
     const bloco = FONTE.slice(i, FONTE.indexOf("send: (bubble) => enviar(bubble)", i));
     expect(bloco).toMatch(/maxBubbles: Math\.max\(1, maxSendsPerTurn - seq\)/);
+    // (Rodada 6) A sonda passa por `conhecido` (que é `conteudoRegistradoNoJob` no job
+    // vivo) e declara a mesma identidade com que a bolha vai ao ledger — o texto sem a
+    // emenda da apresentação (`identidadeDoEnvio`).
     expect(bloco).toMatch(
-      /\.\.\.\(preview\s*\?\s*\{\}\s*:\s*\{\s*jaRegistrada: \(bolha: string\) =>\s*conteudoRegistradoNoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id, body: bolha \}\),/,
+      /\.\.\.\(preview\s*\?\s*\{\}\s*:\s*\{\s*(?:\/\/[^\n]*\n\s*)*jaRegistrada: \(bolha: string\) =>\s*conhecido\(\{ body: bolha, \.\.\.identidadeDoEnvio\(bolha, finalBody, comoACadeiaComeca\(corpoDaCadeia\)\) \}\),/,
+    );
+    expect(FONTE).toMatch(
+      /const conhecido = \(envio: MensagemPlanejada & \{ template\?: object; identidade\?: string \}\): Promise<boolean> =>\s*preview \? Promise\.resolve\(false\) : conteudoRegistradoNoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.envio \}\);/,
     );
     expect(FONTE).toMatch(/import \{ conteudoRegistradoNoJob, estadoInicialDoJob \} from '\.\.\/edge\/crm\/send-ledger';/);
   });

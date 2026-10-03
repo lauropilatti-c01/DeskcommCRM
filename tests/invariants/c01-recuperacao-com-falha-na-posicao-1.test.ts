@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
 import type * as InboundTurn from "@/lib/agent-engine/agent/inbound-turn";
@@ -37,6 +37,15 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * teto vale só para intenção nova: as duas pendentes são retomadas pela mesma chave,
  * nada novo sai, e a 4ª mensagem é recusada. O mesmo com um template pendente — e com
  * as duas mensagens de texto já aceitas que o modelo regenera antes dele.
+ *
+ * (Rodada 6, 2) O cenário do achado 3 da QUINTA revisão, com a cadeia de envio DE
+ * VERDADE: a organização tem template de apresentação e a 1ª mensagem ao lead sai
+ * emendada (`disclosureGate`, modo `inject`). O job cai depois do envio aceito e antes
+ * do checkpoint (o modelo falha ao fechar); a fila o re-executa e o modelo regenera o
+ * mesmo texto — agora sem emenda, porque já há envio aceito. Antes, o hash do ledger
+ * era do corpo entregue e não casava: a resposta saía de novo. Agora a identidade é o
+ * texto antes da emenda, e a re-execução reconhece o recibo. Aqui o turno roda DUAS
+ * vezes de fato (a 1ª falha, a 2ª é a re-execução do mesmo job pela fila).
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -74,6 +83,8 @@ const FOTOS = ARQUIVOS.map((arquivo) => ({
 }));
 const TEMPLATE = { name: "retomada", language: "pt_BR", values: { "1": "Lead" } };
 const RENDERIZADO = "Oi Lead, tudo certo?";
+/** (Rodada 6, 2) O template de apresentação da organização, emendado na 1ª mensagem ao lead. */
+const APRESENTACAO = "Olá! Eu sou a assistente virtual da Recuperação.";
 const AGORA = new Date("2026-07-30T15:00:00Z");
 const MENSAGEM_DO_CLIENTE_EM = "2026-07-30T14:55:00Z";
 const TETO = 3;
@@ -117,7 +128,7 @@ function modeloQueRegeneraAsTres(textos: readonly string[] = [A, B, C]) {
  * encerra. Guarda o que o SDK lhe devolveu, um resultado por chamada de ferramenta (o
  * prompt de cada etapa repete os resultados anteriores).
  */
-function modeloQueChama(chamadas: readonly Chamada[]) {
+function modeloQueChama(chamadas: readonly Chamada[], opcoes: { caiNoCheckpoint?: boolean } = {}) {
   const estado = { etapas: 0, checkpoints: 0, resultados: new Map<string, string>() };
   const doGenerate = async (opts: { prompt?: unknown }) => {
     const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
@@ -137,6 +148,9 @@ function modeloQueChama(chamadas: readonly Chamada[]) {
       );
     if (pedeCheckpoint) {
       estado.checkpoints += 1;
+      // (Rodada 6, 2) O modelo cai ao fechar o turno: o envio já saiu, o checkpoint
+      // não existe, o job falha e a fila o re-executa.
+      if (opcoes.caiNoCheckpoint) throw new Error("modelo caiu antes do checkpoint (teste)");
       return {
         content: [{ type: "text" as const, text: CHECKPOINT }],
         finishReason: { unified: "stop" as const, raw: undefined },
@@ -213,6 +227,7 @@ function montaHandler(doGenerate: unknown) {
           body: string;
           media?: { storagePath: string; mime: string };
           template?: object;
+          identidade?: string;
         }) => {
           const envio: Envio = {
             body: i.body,
@@ -221,7 +236,16 @@ function montaHandler(doGenerate: unknown) {
           };
           const outcome = await m.ledger.sendWithLedger(
             store,
-            { tenantId: i.tenantId, leadId: i.leadId, jobId: i.jobId, seq: i.seq, ...envio },
+            {
+              tenantId: i.tenantId,
+              leadId: i.leadId,
+              jobId: i.jobId,
+              seq: i.seq,
+              ...envio,
+              // (Rodada 6, 2) A identidade do envio, quando o turno a declara: o adapter
+              // real a repassa inteira ao `sendTurnMessage`, que a entrega ao ledger.
+              ...(i.identidade !== undefined ? { identidade: i.identidade } : {}),
+            },
             async (key, messageId) => {
               entregues.push({ ...envio, key });
               // A retomada de um recibo pendente reavalia a mensagem que o CRM já tem
@@ -285,6 +309,32 @@ async function rodaTurno(
   } catch (err) {
     await m.queue.failJob(pool, claimed!.id, "rec", err);
     return { erro: err as Error, jobId: job.id };
+  }
+}
+
+/**
+ * (Rodada 6, 2) A re-execução do MESMO job pela fila, depois de `rodaTurno` o ter visto
+ * falhar (`failJob` o devolve a `pending` com espera): a espera é zerada, o job é
+ * reclamado e o handler roda de novo — com outro modelo falso, porque o primeiro
+ * guarda o estado da 1ª execução.
+ */
+async function reexecuta(
+  handler: ReturnType<typeof montaHandler>,
+  jobId: string,
+): Promise<{ erro: Error | null }> {
+  await pool.query("update job_queue set status = 'done' where status = 'pending' and id <> $1", [
+    jobId,
+  ]);
+  await pool.query("update job_queue set run_after = now() where id = $1", [jobId]);
+  const [claimed] = await m.queue.claimJobs(pool, { workerId: "rec", maxConcurrency: 1 });
+  expect(claimed?.id).toBe(jobId);
+  try {
+    await handler(claimed!, pool, { workerId: "rec" });
+    await m.queue.completeJob(pool, claimed!.id, "rec");
+    return { erro: null };
+  } catch (err) {
+    await m.queue.failJob(pool, claimed!.id, "rec", err);
+    return { erro: err as Error };
   }
 }
 
@@ -713,5 +763,117 @@ describe("(rodada 6) as pendências PREENCHEM o teto (achado 1 da quinta revisã
     expect(resultados[2]).toMatch(/"status":"enviada"/);
     expect(resultados[3]).toMatch(/max_sends_per_turn/);
     expect(resultados.join("\n")).not.toMatch(/envio_falhou/);
+  });
+});
+
+describe("(rodada 6, 2) a apresentação automática emendada na 1ª mensagem (achado 3 da quinta revisão), com a cadeia de envio real", () => {
+  // A organização publica um template de apresentação só para estes casos: com o
+  // ponteiro no lugar, TODA 1ª mensagem ao lead sai emendada — por isso ele é retirado
+  // depois, para os casos irmãos continuarem sem emenda.
+  beforeEach(async () => {
+    const { rows } = await pool.query<{ id: string }>(
+      "insert into disclosure_template_versions (organization_id, body) values ($1, $2) returning id",
+      [ORG, APRESENTACAO],
+    );
+    await pool.query(
+      `insert into disclosure_template_pointers (organization_id, version_id) values ($1, $2)
+       on conflict (organization_id) do update set version_id = excluded.version_id, updated_at = now()`,
+      [ORG, rows[0]!.id],
+    );
+  });
+  afterEach(async () => {
+    await pool.query("delete from disclosure_template_pointers where organization_id = $1", [ORG]);
+    await pool.query("delete from disclosure_template_versions where organization_id = $1", [ORG]);
+  });
+
+  it("1ª resposta com a apresentação emendada, envio aceito, o modelo cai antes do checkpoint; a re-execução regenera o mesmo texto → `already_sent`, nada duplicado, o job conclui", async () => {
+    const emendado = `${APRESENTACAO}\n\n${A}`;
+    const primeiro = modeloQueChama([{ tool: "send_message", input: { body: A } }], {
+      caiNoCheckpoint: true,
+    });
+    const { erro: erroDaPrimeira, jobId } = await rodaTurno(
+      montaHandler(primeiro.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000011",
+      async () => {},
+    );
+    // A 1ª execução: a resposta saiu COM a apresentação na frente, foi aceita, e o job
+    // caiu ao fechar — está na fila para a 2ª tentativa.
+    expect(erroDaPrimeira?.message).toMatch(/modelo caiu antes do checkpoint/);
+    expect(entregues.map((e) => e.body)).toEqual([emendado]);
+    const depoisDaPrimeira = await pool.query<{ seq: number; status: string }>(
+      "select seq, status from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(depoisDaPrimeira.rows.map((r) => [Number(r.seq), r.status])).toEqual([[1, "accepted"]]);
+    const naFila = await pool.query<{ status: string; attempts: number }>(
+      "select status, attempts from job_queue where id = $1",
+      [jobId],
+    );
+    expect(naFila.rows[0]).toEqual({ status: "pending", attempts: 1 });
+
+    // A re-execução: já há envio aceito ao lead, a cadeia não emenda, o modelo regenera A.
+    const segundo = modeloQueChama([{ tool: "send_message", input: { body: A } }]);
+    const { erro } = await reexecuta(montaHandler(segundo.doGenerate), jobId);
+    expect(erro).toBeNull();
+
+    // O CRM não foi acionado de novo: o cliente recebeu a resposta UMA vez. Antes, a
+    // re-execução mandava A (sem a apresentação) numa posição nova.
+    expect(entregues.map((e) => e.body)).toEqual([emendado]);
+    const { rows } = await pool.query<{ seq: number; status: string; body_hash: string }>(
+      "select seq, status, body_hash from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    // O recibo é do texto do modelo, não do corpo emendado: é o que a re-execução achou.
+    expect(rows.map((r) => [Number(r.seq), r.status, r.body_hash])).toEqual([
+      [1, "accepted", m.ledger.hashDoConteudo({ body: A })],
+    ]);
+
+    // Ao modelo da re-execução: a resposta "saiu" (já estava aceita), o turno fechou.
+    expect(segundo.estado.etapas).toBe(2);
+    expect(segundo.estado.checkpoints).toBe(1);
+    const resultados = [...segundo.estado.resultados.values()];
+    expect(resultados).toHaveLength(1);
+    expect(resultados[0]).toMatch(/"status":"enviada"/);
+    const concluido = await pool.query<{ status: string }>(
+      "select status from job_queue where id = $1",
+      [jobId],
+    );
+    expect(concluido.rows[0]).toEqual({ status: "done" });
+  });
+
+  it("a mesma coisa quando a 1ª execução deixou o recibo pendente (o CRM segurou a mensagem): a re-execução ainda é a 1ª ao lead, emenda de novo e retoma o MESMO recibo", async () => {
+    // A execução anterior: a cadeia emendou, o canal segurou (`queued`), o job caiu. O
+    // recibo tem a identidade do texto do modelo; a mensagem gravada tem o corpo emendado.
+    const emendado = `${APRESENTACAO}\n\n${A}`;
+    let chave = "";
+    let mensagem = "";
+    const modelo = modeloQueChama([{ tool: "send_message", input: { body: A } }]);
+    const { erro, jobId } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000012",
+      async (id) => {
+        chave = await recibo(id, 1, "queued", { body: A });
+        mensagem = await mensagemNaFila(chave, { body: emendado });
+      },
+    );
+    expect(erro).toBeNull();
+    // Reavaliada pela MESMA chave, com o corpo emendado de novo (ainda não há envio aceito).
+    expect(entregues).toEqual([{ body: emendado, key: chave }]);
+    const { rows } = await pool.query<{
+      seq: number;
+      status: string;
+      crm_message_id: string | null;
+    }>(
+      "select seq, status, crm_message_id from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(rows.map((r) => [Number(r.seq), r.status, r.crm_message_id])).toEqual([
+      [1, "accepted", mensagem],
+    ]);
+    const { rows: mensagens } = await pool.query<{ body: string | null; status: string }>(
+      "select body, status from messages where organization_id = $1 and direction = 'outbound'",
+      [ORG],
+    );
+    expect(mensagens).toEqual([{ body: emendado, status: "sent" }]);
   });
 });
