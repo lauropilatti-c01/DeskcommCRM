@@ -17,11 +17,14 @@
 
 import { z } from "zod";
 
+import { JobLeasePerdidoError } from "@/lib/atendimento/fronteira";
 import {
   currentExecutionBoundary,
+  currentExecutionJob,
   guardServiceEffect,
 } from "@/lib/atendimento/fronteira-server";
 
+import { claimOfJob } from "../../queue/claim";
 import type { Queryable } from "../../queue/queue";
 import {
   DECLARACAO_INSTRUCTION,
@@ -108,28 +111,51 @@ export async function insertCheckpoint(
 ): Promise<void> {
   await guardServiceEffect();
   const boundary = currentExecutionBoundary();
-  await db.query(
+  const valores = [
+    input.tenantId,
+    input.leadId,
+    input.jobId,
+    JSON.stringify(input.content.commitments),
+    JSON.stringify(input.content.objections),
+    input.content.next_action,
+    input.content.rolling_summary,
+    // NULL (não `'{}'`) quando o modelo não declarou: a coluna preserva a
+    // distinção "não declarou" × "declarou que não havia nada" que o schema
+    // sustenta em memória. Gravar um objeto vazio aqui jogaria fora, no
+    // Postgres, a informação que o Zod tomou o cuidado de manter.
+    input.content.declaracao === undefined ? null : JSON.stringify(input.content.declaracao),
+    boundary?.conversation_id ?? null,
+    boundary?.service_revision ?? null,
+    boundary?.demanda_id ?? null,
+    boundary?.demanda_revision ?? null,
+  ];
+  // (C01) O checkpoint é a memória que o próximo turno lê primeiro: gravado por
+  // uma execução substituída, ele vira o "mais recente" e apaga o da execução
+  // que de fato respondeu. O `guardServiceEffect` acima já confere o lease, mas
+  // conferir e gravar são dois passos — aqui a posse entra no MESMO statement
+  // (o predicado do `completeJob`), e sem ela nenhuma linha nasce.
+  const job = currentExecutionJob();
+  const claim = job !== null && job.id === input.jobId ? claimOfJob(job) : undefined;
+  if (claim === undefined) {
+    await db.query(
+      `insert into lead_checkpoints (organization_id, contact_id, job_id, commitments, objections, next_action, rolling_summary, declaracao, conversation_id, service_revision, demanda_id, demanda_revision)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      valores,
+    );
+    return;
+  }
+  // Os casts são obrigatórios: em `insert … select`, parâmetro sem tipo vira
+  // text, e text não entra em uuid/jsonb/bigint por atribuição.
+  const gravado = await db.query(
     `insert into lead_checkpoints (organization_id, contact_id, job_id, commitments, objections, next_action, rolling_summary, declaracao, conversation_id, service_revision, demanda_id, demanda_revision)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-    [
-      input.tenantId,
-      input.leadId,
-      input.jobId,
-      JSON.stringify(input.content.commitments),
-      JSON.stringify(input.content.objections),
-      input.content.next_action,
-      input.content.rolling_summary,
-      // NULL (não `'{}'`) quando o modelo não declarou: a coluna preserva a
-      // distinção "não declarou" × "declarou que não havia nada" que o schema
-      // sustenta em memória. Gravar um objeto vazio aqui jogaria fora, no
-      // Postgres, a informação que o Zod tomou o cuidado de manter.
-      input.content.declaracao === undefined ? null : JSON.stringify(input.content.declaracao),
-      boundary?.conversation_id ?? null,
-      boundary?.service_revision ?? null,
-      boundary?.demanda_id ?? null,
-      boundary?.demanda_revision ?? null,
-    ],
+     select $1::uuid, $2::uuid, $3::uuid, $4::jsonb, $5::jsonb, $6::text, $7::text, $8::jsonb, $9::uuid, $10::bigint, $11::uuid, $12::bigint
+      where exists (
+        select 1 from job_queue
+         where id = $13 and status = 'running' and locked_by = $14 and locked_at = $15::timestamptz
+      )`,
+    [...valores, input.jobId, claim.worker_id, claim.acquired_at],
   );
+  if (gravado.rowCount !== 1) throw new JobLeasePerdidoError(input.jobId);
 }
 
 /**

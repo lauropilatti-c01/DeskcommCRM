@@ -29,6 +29,14 @@ export interface PublishedAgentConfig {
   model: string;
   credentialId: string | null;
   maxSteps: number;
+  /**
+   * (C01) `ai_agent_versions.token_budget`: teto de tokens (entrada + saída) do
+   * laço de ferramentas de um turno. A tela sempre o gravou e o runtime nativo
+   * sempre o aplicou; o motor de turno nunca o lia. Entra como condição de parada
+   * do laço (`tetoDeTokensDoTurno` em `runModelCall`), nunca como erro. Opcional
+   * no TIPO para os dublês de teste do autor; o loader sempre o preenche.
+   */
+  tokenBudget?: number;
   historyMessageWindow: number;
   historyTokenWindow: number;
   handoffKeywords: string[];
@@ -107,6 +115,7 @@ interface Row {
   model: string;
   credential_id: string | null;
   max_steps: number;
+  token_budget: number | null;
   history_message_window: number;
   history_token_window: number;
   handoff_keywords: string[] | null;
@@ -139,6 +148,7 @@ const SELECT_AGENT_CONFIG_COLUMNS = `a.operation_mode,a.paused_at,a.operation_re
             v.model,
             v.credential_id,
             v.max_steps,
+            v.token_budget,
             v.history_message_window,
             v.history_token_window,
             v.handoff_keywords,
@@ -195,6 +205,9 @@ function mapAgentConfigRow(r: Row): PublishedAgentConfig {
     model: r.model,
     credentialId: r.credential_id,
     maxSteps: r.max_steps,
+    // `?? 50_000` é o default da coluna e da tela: clone sem o valor nasce com
+    // o mesmo teto que o formulário gravaria.
+    tokenBudget: r.token_budget ?? 50_000,
     historyMessageWindow: r.history_message_window,
     historyTokenWindow: r.history_token_window,
     handoffKeywords: palavrasDePassagem(r.handoff_keywords),

@@ -4229,6 +4229,11 @@ async function executarTurnoDoAgente(
         messages: openingMessages,
         tools,
         maxSteps,
+        // (C01) O `token_budget` da versão publicada corta o laço quando o
+        // acumulado passa do teto — mesma régua que o runtime nativo aplica.
+        ...(agentConfig?.tokenBudget !== undefined
+          ? { tetoDeTokensDoTurno: agentConfig.tokenBudget }
+          : {}),
         // Rascunho: a resposta é o send_message ACEITO; a etapa seguinte só
         // "encerrava". Aceito, e não chamado: o envio vetado pela cadeia
         // before_send volta ao modelo para ele reescrever (o 1º veto ensina).
