@@ -80,6 +80,12 @@ function bancoFalso() {
       const linhas = ledger.filter((l) => l.organization_id === org && l.job_id === jobId && l.status === "accepted" && l.body_hash === hash).sort((a, b) => a.seq - b.seq);
       return { rows: linhas.slice(0, 1), rowCount: Math.min(1, linhas.length) };
     }
+    // (C01, rodada 3) recibo pendente com o mesmo conteúdo (`findPendente`).
+    if (s.startsWith("select * from send_ledger") && s.includes("status in ('requested','queued') and body_hash=$3")) {
+      const [org, jobId, hash] = p as [string, string, string];
+      const linhas = ledger.filter((l) => l.organization_id === org && l.job_id === jobId && (l.status === "requested" || l.status === "queued") && l.body_hash === hash).sort((a, b) => a.seq - b.seq);
+      return { rows: linhas.slice(0, 1), rowCount: Math.min(1, linhas.length) };
+    }
     if (s.startsWith("select coalesce(max(seq),0)+1 as seq from send_ledger")) {
       const [org, jobId] = p as [string, string];
       const seqs = ledger.filter((l) => l.organization_id === org && l.job_id === jobId).map((l) => l.seq);

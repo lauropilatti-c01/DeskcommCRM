@@ -53,6 +53,11 @@ interface LedgerStore {
   ): Promise<void>;
   /** (C01) Recibo ACEITO deste job com o mesmo conteúdo, em qualquer posição. */
   findAccepted?(input: Intent, hash: string): Promise<Row | null>;
+  /**
+   * (C01) Recibo PENDENTE (`requested`/`queued`) deste job com o mesmo conteúdo, em
+   * qualquer posição: identidade a retomar, nunca a duplicar.
+   */
+  findPendente?(input: Intent, hash: string): Promise<Row | null>;
   /** (C01) A primeira posição livre do job (maior ocupada + 1). */
   nextSeq?(input: Intent): Promise<number>;
 }
@@ -107,24 +112,16 @@ async function criarNaProximaPosicao(
   }
   throw new Error("send_ledger_sem_posicao_livre");
 }
-/** Inline e daemon compartilham identidade (job,seq), reconciliação e mensagem.
- * Página/worker perdido não cria uma segunda intenção. queued é reavaliado pelo
- * handler com o MESMO id; somente sent/delivered/read confirmam entrega. */
-export async function sendWithLedger(
+/**
+ * (C01) Cria o recibo na posição pedida ou resolve a colisão com o que já a ocupa
+ * (o bloco que sempre esteve inline em `sendWithLedger`; saiu para uma função
+ * quando a retomada do recibo pendente ganhou o outro ramo).
+ */
+async function ocuparPosicao(
   store: LedgerStore,
   input: Intent,
-  send: (key: string, messageId: string) => Promise<{ id: string; status: string }>,
-): Promise<SendOutcome> {
-  const hash = hashDoConteudo(input);
-  // (C01) Recuperação pelo CONTEÚDO (caso C54): a re-execução do mesmo job
-  // (reaper, retry) gera as bolhas de novo, em posições novas. O que o canal já
-  // aceitou com este exato conteúdo — texto, foto ou template — não sai duas
-  // vezes, qualquer que seja a posição.
-  if (store.findAccepted) {
-    const aceito = await store.findAccepted(input, hash);
-    if (aceito)
-      return { kind: "already_sent", idempotencyKey: aceito.id, crmMessageId: aceito.crm_message_id };
-  }
+  hash: string,
+): Promise<{ kind: "key"; key: string } | { kind: "outcome"; outcome: SendOutcome }> {
   let key: string;
   try {
     key = await store.create(input, hash);
@@ -155,12 +152,56 @@ export async function sendWithLedger(
           );
     } else {
       if (prior.status === "accepted")
-        return { kind: "already_sent", idempotencyKey: key, crmMessageId: prior.crm_message_id };
-      if (prior.status === "vetoed") return { kind: "blocked", idempotencyKey: key };
+        return {
+          kind: "outcome",
+          outcome: { kind: "already_sent", idempotencyKey: key, crmMessageId: prior.crm_message_id },
+        };
+      if (prior.status === "vetoed") return { kind: "outcome", outcome: { kind: "blocked", idempotencyKey: key } };
       if (prior.status === "failed") key = await store.rotate(input, hash);
     }
   }
-  const existing = await store.message(input.tenantId, key);
+  return { kind: "key", key };
+}
+/** Inline e daemon compartilham identidade (job,seq), reconciliação e mensagem.
+ * Página/worker perdido não cria uma segunda intenção. queued é reavaliado pelo
+ * handler com o MESMO id; somente sent/delivered/read confirmam entrega. */
+export async function sendWithLedger(
+  store: LedgerStore,
+  input: Intent,
+  send: (key: string, messageId: string) => Promise<{ id: string; status: string }>,
+): Promise<SendOutcome> {
+  const hash = hashDoConteudo(input);
+  // (C01) Recuperação pelo CONTEÚDO (caso C54): a re-execução do mesmo job
+  // (reaper, retry) gera as bolhas de novo, em posições novas. O que o canal já
+  // aceitou com este exato conteúdo — texto, foto ou template — não sai duas
+  // vezes, qualquer que seja a posição.
+  if (store.findAccepted) {
+    const aceito = await store.findAccepted(input, hash);
+    if (aceito)
+      return { kind: "already_sent", idempotencyKey: aceito.id, crmMessageId: aceito.crm_message_id };
+  }
+  let key: string;
+  let existing: { id: string; status: string } | null | undefined;
+  // (C01) Recibo PENDENTE com o mesmo conteúdo (achado 2 da segunda revisão
+  // adversarial): a identidade é retomada — o envio sai com a MESMA chave e o
+  // handler reavalia a mesma mensagem, como no replay por posição — em vez de
+  // nascer outra posição para um conteúdo que o canal talvez já tenha segurado
+  // (`queued`) e vá entregar: era o cliente recebendo a mesma bolha duas vezes.
+  // Se a mensagem foi entregue nesse meio-tempo, o recibo é reconciliado aqui.
+  const pendente = store.findPendente ? await store.findPendente(input, hash) : null;
+  if (pendente) {
+    key = pendente.id;
+    existing = await store.message(input.tenantId, key);
+    if (existing && ["sent", "delivered", "read"].includes(existing.status)) {
+      await store.update(input.tenantId, key, "accepted", existing.id, null);
+      return { kind: "already_sent", idempotencyKey: key, crmMessageId: existing.id };
+    }
+  } else {
+    const posicao = await ocuparPosicao(store, input, hash);
+    if (posicao.kind !== "key") return posicao.outcome;
+    key = posicao.key;
+    existing = await store.message(input.tenantId, key);
+  }
   let message = existing;
   if (!message || message.status === "queued") {
     try {
@@ -275,6 +316,13 @@ export function pgSendLedger(db: Queryable): LedgerStore {
       );
       return rows[0] ?? null;
     },
+    async findPendente(i, hash) {
+      const { rows } = await db.query<Row>(
+        "select * from send_ledger where organization_id=$1 and job_id=$2 and status in ('requested','queued') and body_hash=$3 order by seq limit 1",
+        [i.tenantId, i.jobId, hash],
+      );
+      return rows[0] ?? null;
+    },
     async nextSeq(i) {
       const { rows } = await db.query<{ seq: number | string }>(
         "select coalesce(max(seq),0)+1 as seq from send_ledger where organization_id=$1 and job_id=$2",
@@ -362,6 +410,20 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
         .eq("organization_id", i.tenantId)
         .eq("job_id", i.jobId)
         .eq("status", "accepted")
+        .eq("body_hash", hash)
+        .order("seq")
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data as Row | null;
+    },
+    async findPendente(i, hash) {
+      const { data, error } = await db
+        .from("send_ledger")
+        .select("id,status,crm_message_id,body_hash,seq")
+        .eq("organization_id", i.tenantId)
+        .eq("job_id", i.jobId)
+        .in("status", ["requested", "queued"])
         .eq("body_hash", hash)
         .order("seq")
         .limit(1)
