@@ -228,6 +228,8 @@ export interface RunModelCallInput {
    * o mesmo que o runtime nativo (`lib/ai/runtime/agent.ts`) já aplica. Passado
    * o teto, o laço para ao fim da etapa corrente (`pararPorTetoDeTokens`); não é
    * erro: o que já saiu para o cliente fica, e o turno fecha com checkpoint.
+   * (C01, rodada 8) O corte volta ao chamador em `corte` (ver `CorteDoLaco`): é
+   * ele quem sabe se alguma mensagem chegou ao lead antes do corte.
    */
   tetoDeTokensDoTurno?: number;
   /**
@@ -282,13 +284,33 @@ export function tokensDasEtapas(etapas: ReadonlyArray<EtapaComUso>): number {
 }
 
 /**
+ * (C01, rodada 8) O corte NOSSO do laço de ferramentas, com os números que o explicam.
+ * Até aqui o corte só aparecia no log: `runModelCall` devolvia o resultado como o de
+ * um laço que acabou sozinho, e o turno, sem saber que a resposta foi cortada antes
+ * de sair, gravava o checkpoint e concluía o job com o lead sem nada (achado 1 da
+ * sétima revisão adversarial — o sintoma da C54, agora com job "ok"). Só o teto de
+ * tokens tem motivo: o prazo das chamadas (`prazoDasChamadas`) aborta a chamada com
+ * exceção, o job falha e a fila re-tenta — não é corte silencioso, e não passa aqui.
+ * O fim por etapas (`stepCountIs(maxSteps)`) é desenho do autor e fica como está.
+ */
+export interface CorteDoLaco {
+  motivo: 'corte_por_teto_de_tokens';
+  teto: number;
+  gastos: number;
+  etapas: number;
+}
+
+/**
  * (C01) Condição de parada do laço pelo `token_budget` da versão: avaliada ao fim
  * de cada etapa, encerra quando o acumulado passa do teto. É corte, não erro — a
  * mesma semântica que o runtime nativo dá ao campo. O aviso sai UMA vez por laço.
+ * (C01, rodada 8) `aoCortar` recebe o corte nessa mesma vez: é como `runModelCall`
+ * o devolve ao chamador.
  */
 export function pararPorTetoDeTokens(
   teto: number,
   log?: Logger,
+  aoCortar?: (corte: CorteDoLaco) => void,
 ): (opcoes: { steps: ReadonlyArray<EtapaComUso> }) => boolean {
   let avisou = false;
   return ({ steps }) => {
@@ -301,6 +323,7 @@ export function pararPorTetoDeTokens(
         gastos,
         etapas: steps.length,
       });
+      aoCortar?.({ motivo: 'corte_por_teto_de_tokens', teto, gastos, etapas: steps.length });
     }
     return true;
   };
@@ -723,6 +746,11 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   // (C01) O sinal da execução (lease perdido, prazo vencido) entra em TODA
   // chamada do turno — inclusive as auxiliares, que não recebem `abortSignal`.
   const abortSignal = combinarSinais(input.abortSignal, sinalDaExecucao());
+  // (C01, rodada 8) Por que o laço acabou, quando o fim foi corte NOSSO (o teto de
+  // tokens da versão). Preenchido pela condição de parada, dentro do `generateText`;
+  // vai ao chamador no retorno. Objeto, e não `let`: a atribuição acontece num
+  // callback, que o fluxo de tipos não acompanha.
+  const corte: { valor: CorteDoLaco | null } = { valor: null };
   let result: Awaited<ReturnType<typeof generateText>>;
   try {
     abortSignal?.throwIfAborted();
@@ -750,7 +778,11 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
               ...(input.pararQuando === undefined ? [] : [input.pararQuando]),
               ...(input.tetoDeTokensDoTurno === undefined
                 ? []
-                : [pararPorTetoDeTokens(input.tetoDeTokensDoTurno, deps.log)]),
+                : [
+                    pararPorTetoDeTokens(input.tetoDeTokensDoTurno, deps.log, (c) => {
+                      corte.valor = c;
+                    }),
+                  ]),
             ],
       temperature,
       topP,
@@ -866,6 +898,13 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     /** De onde veio a escolha — o painel lê isto para explicar cada ponto. */
     origem: decisao.origem,
     avisos: decisao.avisos,
+    /**
+     * (C01, rodada 8) O corte NOSSO do laço, quando houve (`null` quando o laço
+     * acabou sozinho ou pelo teto de etapas do autor). A linha de `llm_calls` fica
+     * 'ok' — a chamada ao provedor foi bem, e o CHECK da coluna só aceita 'ok' e
+     * 'erro' —; o motivo vive aqui, no log e no que o chamador faz com ele.
+     */
+    corte: corte.valor,
   };
 }
 

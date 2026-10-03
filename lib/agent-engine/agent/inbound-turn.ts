@@ -709,6 +709,21 @@ export const MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO =
 export const TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO =
   'Resposta travada pela revisão automática — assumir a conversa';
 
+/**
+ * (C01, rodada 8) O motivo da passagem quando o laço do modelo foi cortado pelo teto de
+ * tokens da versão ANTES de qualquer mensagem ao lead (achado 1 da sétima revisão
+ * adversarial): o mesmo lugar e a mesma régua de `MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO`
+ * — frase legível em `conversations.last_handoff_reason` e na Central, não código.
+ */
+export const MOTIVO_DA_PASSAGEM_POR_CORTE =
+  'A resposta da IA foi cortada por tamanho antes de sair (teto de tokens da versão); uma pessoa precisa responder';
+
+/** (C01, rodada 8) O título do caso aberto pelo corte. */
+export const TITULO_DO_CASO_POR_CORTE = 'Resposta da IA cortada antes de sair';
+
+/** (C01, rodada 8) O título do aviso na Central — o do caso, com a ação de quem lê. */
+export const TITULO_DA_PASSAGEM_POR_CORTE = 'Resposta da IA cortada antes de sair — assumir a conversa';
+
 /** (C01) O que o modelo lê sobre a frase de espera, conforme o desfecho — nunca "o cliente recebeu" sem ter recebido. */
 export const AVISO_AO_MODELO_POR_DESFECHO: Record<DesfechoDaFraseDeEspera, string> = {
   entregue:
@@ -3030,6 +3045,39 @@ async function executarTurnoDoAgente(
     if (!corpo.startsWith(emenda) || corpo.length === emenda.length) return {};
     return { identidade: corpo.slice(emenda.length) };
   };
+  // (C01, rodada 7) O `send` EXCLUSIVO da frase de espera: UMA mensagem, só o
+  // `finalBody` que a cadeia validou — sem o plano da retomada, sem as fotos, sem
+  // nada do corpo do modelo. O `send` do modelo (em `beforeSendArgs`, no
+  // `send_message`) servia também à frase; com o teto cheio e uma pendência conhecida
+  // ele mandava o plano da retomada: a cadeia validava a frase e saía o texto que
+  // acabara de ser vetado, marcado como frase de espera, e a frase não saía (achado 1
+  // da sexta revisão adversarial). A reconferência do ponto comum continua a mesma. A
+  // identidade no ledger parte da frase (`deps.knobs.fraseDeEspera ??
+  // FRASE_DE_ESPERA_PADRAO`, o mesmo `body:` que os fail-safes dão à cadeia), como a de
+  // qualquer mensagem.
+  // (C01, rodada 8) No escopo do turno, e não mais dentro do `send_message`: o
+  // fail-safe do corte, que roda DEPOIS do laço do modelo, manda a frase pelo mesmo
+  // `send`.
+  const enviarFraseDeEspera = (finalBody: string): Promise<ChannelSendResult> => {
+    corposEnviados.push(finalBody);
+    return enviarPeloCanal(
+      {
+        tenantId,
+        leadId,
+        jobId: liveJob().id,
+        jobClaim: claimOfJob(liveJob()),
+        agentOperation,
+        conversationId: input.conversationId,
+        body: finalBody,
+        ...identidadeDoEnvio(
+          finalBody,
+          finalBody,
+          comoACadeiaComeca(deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO),
+        ),
+      },
+      { fraseDeEspera: true },
+    );
+  };
   /**
    * (C01, rodada 6) O plano do `send_message` com o teto cheio: as mensagens físicas
    * que `enviarComFotos` + `sendInBubbles` produziriam — a legenda na capa e as demais
@@ -3600,29 +3648,8 @@ async function executarTurnoDoAgente(
         // identidade no ledger parte (`identidadeDoEnvio`).
         const corpoDaCadeia = (): string =>
           enviandoFraseDeEspera ? (deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO) : body;
-        // (C01, rodada 7) O `send` EXCLUSIVO da frase de espera: UMA mensagem, só o
-        // `finalBody` que a cadeia validou — sem o plano da retomada, sem as fotos, sem
-        // nada do corpo do modelo. O `send` do modelo (em `beforeSendArgs`, abaixo)
-        // servia também à frase; com o teto cheio e uma pendência conhecida ele mandava
-        // o plano da retomada: a cadeia validava a frase e saía o texto que acabara de
-        // ser vetado, marcado como frase de espera, e a frase não saía (achado 1 da
-        // sexta revisão adversarial). A reconferência do ponto comum continua a mesma.
-        const enviarFraseDeEspera = (finalBody: string): Promise<ChannelSendResult> => {
-          corposEnviados.push(finalBody);
-          return enviarPeloCanal(
-            {
-              tenantId,
-              leadId,
-              jobId: liveJob().id,
-              jobClaim: claimOfJob(liveJob()),
-              agentOperation,
-              conversationId: input.conversationId,
-              body: finalBody,
-              ...identidadeDoEnvio(finalBody, finalBody, comoACadeiaComeca(corpoDaCadeia())),
-            },
-            { fraseDeEspera: true },
-          );
-        };
+        // (C01, rodada 7) O `send` da frase de espera é `enviarFraseDeEspera`, no escopo
+        // do turno (rodada 8): só a frase, nunca o plano da retomada deste envio.
         if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
           const preparadas = await prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog), {
             tenantId,
@@ -5002,6 +5029,111 @@ async function executarTurnoDoAgente(
           },
         );
       }
+    }
+
+    // ═══ (C01, rodada 8) O LAÇO FOI CORTADO POR NOSSO TETO ANTES DE QUALQUER MENSAGEM AO LEAD ═══
+    //
+    // O `token_budget` da versão para o laço ao fim da etapa em que o acumulado passa
+    // do teto (`pararPorTetoDeTokens`) — e a primeira etapa pode passar dele só
+    // consultando uma ferramenta (um contexto grande, uma busca na base). Até aqui o
+    // corte não dizia nada ao turno: sem roteiro, o checkpoint era gravado e o worker
+    // concluía o job com zero envios — o lead ficava mudo, sem retry nem
+    // encaminhamento, e o job "ok" (achado 1 da sétima revisão adversarial; é o
+    // sintoma da C54, cuja chamada de 66 mil tokens cairia neste corte). Agora o corte
+    // volta em `turn.corte` e, se NENHUMA mensagem física saiu ao lead neste job (`seq`
+    // conta as desta execução e as recuperadas das anteriores), o turno segue o mesmo
+    // caminho do fail-safe de vocabulário interno: caso aberto para uma pessoa da
+    // equipe, frase de espera pelo `send` exclusivo dela, passagem ao humano GRAVADA.
+    // Com pelo menos um envio feito nada muda: o lead recebeu algo, o corte só encerra
+    // o laço, como sempre, e fica no log. O fim por etapas (`stepCountIs(maxSteps)`) é
+    // desenho do autor e não passa por aqui; o prazo das chamadas aborta com exceção e
+    // o job re-tenta. Preview não tem lead; turno de retaguarda não fala com ele; turno
+    // descartado (#1943) deixa a resposta para o turno da mensagem nova; `runError` já
+    // vai falhar o job, e o retry roda o modelo de novo.
+    if (
+      !preview &&
+      turn.corte !== null &&
+      seq === 0 &&
+      runError === null &&
+      !passadoAoHumano &&
+      !turnoDescartado &&
+      turnoVaiFalarComOLead(liveJob())
+    ) {
+      const corte = turn.corte;
+      runLog.warn(
+        'fail-safe do corte: o laço do modelo foi cortado antes de qualquer mensagem ao lead — caso aberto e frase de espera',
+        { motivo: corte.motivo, teto: corte.teto, gastos: corte.gastos, etapas: corte.etapas },
+      );
+      // O caso ANTES da frase, como no fail-safe de vocabulário interno: sem pessoa
+      // acionada não há frase de espera honesta. Sem caso (e não é "já havia um"), o
+      // job falha e re-tenta pela fila — o cliente não fica mudo, fica atrasado, com rastro.
+      const caso = await openCase(
+        pool,
+        { tenantId, conversationId: input.conversationId, agentId: agentConfig?.agentId ?? null },
+        {
+          title: TITULO_DO_CASO_POR_CORTE,
+          summary:
+            'A IA não chegou a responder: o laço foi cortado pelo teto de tokens da versão ' +
+            `(${corte.gastos} tokens em ${corte.etapas} etapa(s); teto ${corte.teto}). ` +
+            'Nenhuma mensagem saiu ao cliente neste turno.',
+          blocker:
+            'Aberto automaticamente: a resposta da IA foi cortada por tamanho (teto de tokens da versão) ' +
+            'antes de sair, e nenhuma mensagem chegou ao cliente neste turno. O sistema manda uma frase de ' +
+            'espera ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
+          source: 'guardrail_autofallback',
+          contextSnapshot: buildCaseContextSnapshot(),
+        },
+      );
+      if (!caso.ok && caso.error.code !== 'case_already_open') {
+        throw new Error(`fail-safe do corte sem caso: ${caso.error.code}`);
+      }
+      openedCaseThisTurn = true;
+      moverParaHandoffBestEffort('corte_por_teto_de_tokens');
+      passadoAoHumano = true;
+      // A frase passa pela cadeia inteira (pacing, LGPD, stop), menos o spinning — frase
+      // fixa repetida entre leads não é blast —, e sai pelo `send` só dela.
+      const espera = await runBeforeSend({
+        pool,
+        log: runLog,
+        agentOperation,
+        tenantId,
+        leadId,
+        jobId: liveJob().id,
+        channelSessionId: input.channelSessionId,
+        body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+        optedOutThisTurn,
+        resposta: eTurnoDeResposta(liveJob()),
+        crmDailyLimit: null,
+        now: clock(),
+        sleep: deps.sleep,
+        lgpd,
+        casesEnabled: agentConfig?.casesEnabled ?? false,
+        hasOpenCase: true,
+        openedCaseThisTurn: true,
+        enforceSpinning: false,
+        ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
+        send: enviarFraseDeEspera,
+      });
+      // Desfecho por desfecho (`desfechoDaFraseDeEspera`) e a passagem GRAVADA depois da
+      // frase, com uma nova tentativa — as mesmas peças do fail-safe de vocabulário
+      // interno, pelas mesmas razões (achados 2 e 3 das revisões anteriores).
+      const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+      await gravarPassagemComNovaTentativa(
+        () =>
+          performHumanHandoff(
+            pool,
+            { tenantId, leadId, conversationId: input.conversationId },
+            {
+              reason: MOTIVO_DA_PASSAGEM_POR_CORTE,
+              conversationSummary: buildHandoffSummary(previous),
+              inboxTitle: TITULO_DA_PASSAGEM_POR_CORTE,
+              avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
+              log: runLog,
+            },
+          ),
+        { log: runLog, noteRunError },
+      );
+      runLog.info('fail-safe do corte: passagem ao humano gravada', { desfecho_da_frase: desfecho });
     }
 
     if (runError !== null) {

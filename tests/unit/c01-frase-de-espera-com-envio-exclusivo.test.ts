@@ -16,6 +16,11 @@
  * A prova de turno completo (Postgres real, cadeia de verdade) está em
  * `tests/invariants/c01-recuperacao-com-falha-na-posicao-1.test.ts` (rodada 7); aqui
  * fica a ligação pelo código.
+ *
+ * (Rodada 8) O callback subiu do `send_message` para o escopo do TURNO, porque o
+ * fail-safe do corte (achado 1 da sétima revisão) manda a frase DEPOIS do laço do
+ * modelo, fora de qualquer ferramenta — e pelo mesmo `send`. A identidade parte da
+ * frase configurada (o mesmo `body:` que os dois fail-safes dão à cadeia).
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -36,22 +41,27 @@ describe("(C01) o `send` exclusivo da frase de espera", () => {
   const callback = () =>
     trecho(
       "const enviarFraseDeEspera = (finalBody: string): Promise<ChannelSendResult> => {",
-      "if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {",
+      "   * (C01, rodada 6) O plano do `send_message` com o teto cheio",
     );
 
-  it("existe, dentro do `send_message`, e é definido antes dos `beforeSendArgs` (não depende de nada do envio do modelo)", () => {
-    expect(sendMessage).toContain(
-      "const enviarFraseDeEspera = (finalBody: string): Promise<ChannelSendResult> => {",
-    );
-    expect(sendMessage.indexOf("const enviarFraseDeEspera =")).toBeLessThan(
-      sendMessage.indexOf("const beforeSendArgs = {"),
-    );
+  it("existe UMA vez, no escopo do turno (rodada 8), antes das ferramentas — não dentro do `send_message` nem dependente de nada do envio do modelo", () => {
+    expect(
+      FONTE.match(
+        /const enviarFraseDeEspera = \(finalBody: string\): Promise<ChannelSendResult> => \{/g,
+      ),
+    ).toHaveLength(1);
+    const definicao = FONTE.indexOf("const enviarFraseDeEspera =");
+    expect(definicao).toBeGreaterThan(FONTE.indexOf("const identidadeDoEnvio = ("));
+    expect(definicao).toBeLessThan(FONTE.indexOf("const rawTools: ToolSet = {"));
+    expect(sendMessage).not.toContain("const enviarFraseDeEspera =");
+    // O `send_message` continua a usá-lo no fail-safe de vocabulário interno.
+    expect(sendMessage).toContain("send: enviarFraseDeEspera,");
   });
 
-  it("manda SÓ o `finalBody` validado, pelo ponto comum, com a marca da frase fixa — e a identidade do envio como a de qualquer mensagem", () => {
+  it("manda SÓ o `finalBody` validado, pelo ponto comum, com a marca da frase fixa — e a identidade do envio como a de qualquer mensagem (a partir da frase configurada)", () => {
     expect(callback()).toMatch(/corposEnviados\.push\(finalBody\);/);
     expect(callback()).toMatch(
-      /return enviarPeloCanal\(\s*\{\s*tenantId,\s*leadId,\s*jobId: liveJob\(\)\.id,\s*jobClaim: claimOfJob\(liveJob\(\)\),\s*agentOperation,\s*conversationId: input\.conversationId,\s*body: finalBody,\s*\.\.\.identidadeDoEnvio\(finalBody, finalBody, comoACadeiaComeca\(corpoDaCadeia\(\)\)\),\s*\},\s*\{ fraseDeEspera: true \},\s*\);/,
+      /return enviarPeloCanal\(\s*\{\s*tenantId,\s*leadId,\s*jobId: liveJob\(\)\.id,\s*jobClaim: claimOfJob\(liveJob\(\)\),\s*agentOperation,\s*conversationId: input\.conversationId,\s*body: finalBody,\s*\.\.\.identidadeDoEnvio\(\s*finalBody,\s*finalBody,\s*comoACadeiaComeca\(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\),\s*\),\s*\},\s*\{ fraseDeEspera: true \},\s*\);/,
     );
   });
 

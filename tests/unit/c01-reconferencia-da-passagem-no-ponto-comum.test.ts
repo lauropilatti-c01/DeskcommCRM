@@ -81,11 +81,18 @@ describe("(C01) a reconferência no ponto comum e a tradução em veto", () => {
   });
 
   it("toda cadeia de ferramenta roda por `cadeiaDeEnvio`: template, send_message, re-run do caso e pergunta do roteiro; só a frase de espera vai direto", () => {
-    // Cinco chamadas à cadeia no turno: quatro traduzidas por `cadeiaDeEnvio`…
-    expect(FONTE.match(/runBeforeSend\(/g)).toHaveLength(5);
+    // Seis chamadas à cadeia no turno: quatro traduzidas por `cadeiaDeEnvio`…
+    expect(FONTE.match(/runBeforeSend\(/g)).toHaveLength(6);
     expect(FONTE.match(/cadeiaDeEnvio\(\(\) =>\s*runBeforeSend\(/g)).toHaveLength(4);
-    // …e a frase de espera é a ÚNICA direta (marcada imediatamente antes de sair).
-    expect(FONTE.match(/^\s*const espera = await runBeforeSend\(\{/gm)).toHaveLength(1);
+    // …e as duas diretas são a frase de espera — a do fail-safe de vocabulário interno
+    // (marcada imediatamente antes de sair) e, desde a rodada 8, a do fail-safe do
+    // corte, que roda depois do laço do modelo com `passadoAoHumano` já ligado e sai
+    // pelo mesmo `send` exclusivo (que leva a marca).
+    expect(FONTE.match(/^\s*const espera = await runBeforeSend\(\{/gm)).toHaveLength(2);
+    const corte = corpo("turn.corte !== null &&", "const desfecho = desfechoDaFraseDeEspera(");
+    expect(corte).toMatch(
+      /passadoAoHumano = true;[\s\S]*const espera = await runBeforeSend\(\{[\s\S]*send: enviarFraseDeEspera,/,
+    );
     const failSafe = corpo("fotosDoProduto = [];", "const desfecho = desfechoDaFraseDeEspera(");
     expect(failSafe).toMatch(
       /enviandoFraseDeEspera = true;\s*const espera = await runBeforeSend\(\{/,
