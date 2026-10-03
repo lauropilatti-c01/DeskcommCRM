@@ -441,8 +441,13 @@ export interface OpcoesDeDeteccao {
 
 /** O que fica no lugar da URL da base. Não casa com regra nenhuma (sem `_`, sem hex). */
 export const MASCARA_DE_URL_DA_BASE = '[link da base]';
-/** (C01) Só URLs de verdade entram na máscara: nada menor que isto vira "URL". */
-const URL_MINIMA = 'https://a.bc'.length;
+/**
+ * (C01) Só URLs de verdade entram na máscara: nada menor que isto vira "URL". São 12
+ * caracteres: o esquema seguro (8, com `://`) e o menor host possível (4: uma letra,
+ * o ponto e um domínio de topo de duas letras). Número, e não o `.length` de uma URL
+ * de exemplo: `branding.test.ts` lê qualquer string com cara de host no código que embarca.
+ */
+const URL_MINIMA = 12;
 
 /**
  * (C01) Troca cada ocorrência EXATA de uma URL permitida pela máscara. As mais
