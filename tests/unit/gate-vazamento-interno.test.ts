@@ -238,19 +238,23 @@ describe("fiação do gate — armado no agente, desarmado onde o veto seria sil
       .not.toMatch(/enforceInternalVocabulary/);
   });
 
-  it("o fail-safe existe: conta vetos e, ao persistir, libera DESARMANDO só este gate", () => {
-    // O cliente nunca fica sem resposta. E "liberar" é re-rodar a cadeia inteira com
-    // este gate desarmado — nunca chamar o canal por fora (perderia stop/LGPD/pacing).
+  it("o fail-safe existe: conta vetos e, ao persistir, NÃO solta o texto — frase de espera e caso, pela cadeia", () => {
+    // (C01) O cliente nunca fica sem resposta, e o texto vetado nunca chega a ele. A
+    // versão anterior "liberava" re-rodando a cadeia com este gate desarmado; agora o
+    // que sai é a frase de espera, pela cadeia inteira (nunca o canal por fora), e um
+    // caso aciona uma pessoa. Ver `tests/unit/c01-fail-safe-nao-solta-o-vetado.test.ts`.
     const corpo = corpoDoExecute("send_message: tool({", "update_lead_state: tool({");
     expect(corpo).toMatch(/chain\.code === 'internal_vocabulary_leak'/);
     expect(corpo).toMatch(/internalVocabularyVetoCount \+= 1/);
     expect(corpo).toMatch(/internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO/);
-    expect(corpo).toMatch(/runBeforeSend\(\{[\s\S]*?enforceInternalVocabulary: false/);
+    expect(corpo).not.toMatch(/enforceInternalVocabulary: false/);
+    expect(corpo).toMatch(/runBeforeSend\(\{[\s\S]*?body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO/);
+    expect(corpo).toMatch(/source: 'guardrail_autofallback'/);
   });
 
-  it("o teto do fail-safe deixa ao menos UMA chance de reescrita antes de liberar", () => {
-    // 1 significaria "veta e já libera" — o modelo nunca veria o erro instrutivo, e o
-    // gate seria só telemetria. 2 é o mesmo degrau do fail-safe de casos humanos.
+  it("o teto do fail-safe deixa ao menos UMA chance de reescrita antes de agir", () => {
+    // 1 significaria "veta e já age" — o modelo nunca veria o erro instrutivo, e o
+    // gate seria só telemetria. (C01) 3: ensina, ensina avisando que é a última, age.
     expect(MAX_VETOS_DE_VOCABULARIO_INTERNO).toBeGreaterThanOrEqual(2);
   });
 });

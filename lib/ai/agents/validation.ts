@@ -161,7 +161,7 @@ const versionShapeSchema = z
     handoff_keywords: z
       .array(z.string().trim().min(1).max(60))
       .max(20)
-      .default(["falar com humano", "atendente", "pessoa real"]),
+      .default(["falar com humano", "falar com atendente", "pessoa real"]),
     handoff_tool_enabled: z.boolean().default(true),
     proposal_ai_draft_enabled: z.boolean().default(true),
     cases_enabled: z.boolean().default(false),

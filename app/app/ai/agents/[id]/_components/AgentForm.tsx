@@ -278,7 +278,9 @@ export function buildState(args: {
     history_token_window: version?.history_token_window ?? 8_000,
     handoff_keywords: version?.handoff_keywords ?? [
       "falar com humano",
-      "atendente",
+      // (C01) expressão de PEDIDO, não a palavra solta: "trabalho como atendente"
+      // não é pedido de transferência.
+      "falar com atendente",
       "pessoa real",
     ],
     handoff_tool_enabled: version?.handoff_tool_enabled ?? true,

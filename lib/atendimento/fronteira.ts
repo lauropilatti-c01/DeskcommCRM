@@ -17,6 +17,33 @@ export class StaleServiceBoundaryError extends Error {
     this.name = "StaleServiceBoundaryError";
   }
 }
+/**
+ * (C01) A execução perdeu o lease do job: o reaper devolveu o job à fila e outra
+ * execução o pegou (ou vai pegar). É um caso de fronteira obsoleta — herda de
+ * `StaleServiceBoundaryError` para que todo tratamento existente (worker cancela
+ * em vez de re-tentar, handler de envio relança) valha sem ramo novo — mas com
+ * nome e mensagem próprios, porque quem lê o log precisa distinguir "o
+ * atendimento trocou de mãos" de "esta execução foi substituída".
+ */
+export class JobLeasePerdidoError extends StaleServiceBoundaryError {
+  constructor(jobId: string) {
+    super();
+    this.message = `job_lease_perdido:${jobId}`;
+    this.name = "JobLeasePerdidoError";
+  }
+}
+/**
+ * (C01) O prazo das chamadas de modelo da execução venceu: o lease do job está
+ * para acabar e nenhuma chamada nova pode começar. A execução ainda É dona do
+ * lease — por isso NÃO é fronteira obsoleta: o worker devolve o job à fila
+ * (`failJob`) e a execução seguinte recupera pelo `send_ledger`.
+ */
+export class PrazoDaExecucaoVencidoError extends Error {
+  constructor(jobId: string, prazoMs: number) {
+    super(`prazo_da_execucao_vencido:${jobId}:${prazoMs}ms`);
+    this.name = "PrazoDaExecucaoVencidoError";
+  }
+}
 /** `followup_stale` deixou de ser 40001 (serialization_failure): o cliente retentava para sempre. */
 export function isFollowupCasRecusado(error: { code?: string; message?: string } | null | undefined): boolean {
   return error?.code === "40001" || error?.message === "followup_stale";

@@ -65,6 +65,11 @@ export interface SendMessageInput {
   template?: { name: string; language: string; values: Record<string, string> };
   /** Presente = imagem da pasta da conversa em `whatsapp-media`; `body` é a legenda. */
   media?: { storagePath: string; mime: string };
+  /**
+   * (C01) O texto que identifica o envio no ledger quando difere do `body` entregue
+   * (corpo antes das emendas da cadeia). Só o hash o usa; o handler recebe `body`.
+   */
+  identidade?: string;
 }
 
 /**

@@ -473,7 +473,11 @@ export async function startWorker(
         });
         return;
       }
-      await withServiceJob(pool, job, () => handler(job, pool, { workerId }));
+      // (C01) O lease da fila dá o PRAZO das chamadas de modelo da execução: elas
+      // são abortadas antes de o reaper poder devolver o job — ver `prazoDasChamadas`.
+      await withServiceJob(pool, job, () => handler(job, pool, { workerId }), {
+        leaseMs: env.QUEUE_VISIBILITY_TIMEOUT_MS,
+      });
       await completeJob(pool, job.id, workerId, undefined, claimOfJob(job)?.acquired_at);
       log.info("job concluído", { job_id: job.id, kind: job.kind });
       if (esperouPorSaldo(job)) {

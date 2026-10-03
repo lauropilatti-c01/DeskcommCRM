@@ -1,4 +1,4 @@
-import { guardServiceTools } from "@/lib/atendimento/fronteira-server";
+import { guardServiceTools, sinalDaExecucao } from "@/lib/atendimento/fronteira-server";
 /**
  * SEAM ÚNICO de chamada de modelo: TODA chamada de LLM do harness passa por
  * runModelCall — agente, classificadores auxiliares e compaction usam esta MESMA
@@ -222,7 +222,21 @@ export interface RunModelCallInput {
   pararQuando?: () => boolean;
   /** Teto por chamada auxiliar; nunca aumenta o limite configurado pela organização. */
   maxOutputTokens?: number;
-  /** Cancelamento propagado pelo chamador; a falha continua registrada em llm_calls. */
+  /**
+   * (C01) Teto de tokens (entrada + saída, somados pelas etapas) do laço de
+   * ferramentas desta chamada — o `token_budget` da versão publicada do agente,
+   * o mesmo que o runtime nativo (`lib/ai/runtime/agent.ts`) já aplica. Passado
+   * o teto, o laço para ao fim da etapa corrente (`pararPorTetoDeTokens`); não é
+   * erro: o que já saiu para o cliente fica, e o turno fecha com checkpoint.
+   * (C01, rodada 8) O corte volta ao chamador em `corte` (ver `CorteDoLaco`): é
+   * ele quem sabe se alguma mensagem chegou ao lead antes do corte.
+   */
+  tetoDeTokensDoTurno?: number;
+  /**
+   * Cancelamento propagado pelo chamador; a falha continua registrada em llm_calls.
+   * (C01) Soma-se ao sinal da EXECUÇÃO (`sinalDaExecucao`): lease do job perdido
+   * ou prazo das chamadas vencido abortam esta chamada mesmo sem fiação do chamador.
+   */
   abortSignal?: AbortSignal;
   /**
    * Override de provider/credencial vindo da versão PUBLICADA do agente (Fase
@@ -240,6 +254,79 @@ export interface RunModelCallDeps {
    * surpresa em produção.
    */
   agora?: Date;
+}
+
+/**
+ * (C01) Um sinal que aborta quando QUALQUER dos dois abortar; ausentes somem.
+ * `AbortSignal.any` carrega a razão do primeiro que disparou — é ela que o log
+ * da falha mostra (lease perdido × prazo vencido × cancelamento do chamador).
+ */
+export function combinarSinais(
+  ...sinais: ReadonlyArray<AbortSignal | undefined>
+): AbortSignal | undefined {
+  const presentes = sinais.filter((s): s is AbortSignal => s !== undefined);
+  if (presentes.length === 0) return undefined;
+  if (presentes.length === 1) return presentes[0];
+  return AbortSignal.any(presentes);
+}
+
+/** Etapa do laço como o SDK a entrega — só o que a conta de tokens precisa. */
+export interface EtapaComUso {
+  usage?: { inputTokens?: number; outputTokens?: number };
+}
+
+/** (C01) Tokens de entrada + saída somados por todas as etapas até aqui. */
+export function tokensDasEtapas(etapas: ReadonlyArray<EtapaComUso>): number {
+  return etapas.reduce(
+    (total, etapa) => total + (etapa.usage?.inputTokens ?? 0) + (etapa.usage?.outputTokens ?? 0),
+    0,
+  );
+}
+
+/**
+ * (C01, rodada 8) O corte NOSSO do laço de ferramentas, com os números que o explicam.
+ * Até aqui o corte só aparecia no log: `runModelCall` devolvia o resultado como o de
+ * um laço que acabou sozinho, e o turno, sem saber que a resposta foi cortada antes
+ * de sair, gravava o checkpoint e concluía o job com o lead sem nada (achado 1 da
+ * sétima revisão adversarial — o sintoma da C54, agora com job "ok"). Só o teto de
+ * tokens tem motivo: o prazo das chamadas (`prazoDasChamadas`) aborta a chamada com
+ * exceção, o job falha e a fila re-tenta — não é corte silencioso, e não passa aqui.
+ * O fim por etapas (`stepCountIs(maxSteps)`) é desenho do autor e fica como está.
+ */
+export interface CorteDoLaco {
+  motivo: 'corte_por_teto_de_tokens';
+  teto: number;
+  gastos: number;
+  etapas: number;
+}
+
+/**
+ * (C01) Condição de parada do laço pelo `token_budget` da versão: avaliada ao fim
+ * de cada etapa, encerra quando o acumulado passa do teto. É corte, não erro — a
+ * mesma semântica que o runtime nativo dá ao campo. O aviso sai UMA vez por laço.
+ * (C01, rodada 8) `aoCortar` recebe o corte nessa mesma vez: é como `runModelCall`
+ * o devolve ao chamador.
+ */
+export function pararPorTetoDeTokens(
+  teto: number,
+  log?: Logger,
+  aoCortar?: (corte: CorteDoLaco) => void,
+): (opcoes: { steps: ReadonlyArray<EtapaComUso> }) => boolean {
+  let avisou = false;
+  return ({ steps }) => {
+    const gastos = tokensDasEtapas(steps);
+    if (gastos <= teto) return false;
+    if (!avisou) {
+      avisou = true;
+      log?.warn('llm: teto de tokens da versão atingido — laço de ferramentas encerrado', {
+        teto,
+        gastos,
+        etapas: steps.length,
+      });
+      aoCortar?.({ motivo: 'corte_por_teto_de_tokens', teto, gastos, etapas: steps.length });
+    }
+    return true;
+  };
 }
 
 /**
@@ -656,9 +743,17 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   });
 
   const startedAt = Date.now();
+  // (C01) O sinal da execução (lease perdido, prazo vencido) entra em TODA
+  // chamada do turno — inclusive as auxiliares, que não recebem `abortSignal`.
+  const abortSignal = combinarSinais(input.abortSignal, sinalDaExecucao());
+  // (C01, rodada 8) Por que o laço acabou, quando o fim foi corte NOSSO (o teto de
+  // tokens da versão). Preenchido pela condição de parada, dentro do `generateText`;
+  // vai ao chamador no retorno. Objeto, e não `let`: a atribuição acontece num
+  // callback, que o fluxo de tipos não acompanha.
+  const corte: { valor: CorteDoLaco | null } = { valor: null };
   let result: Awaited<ReturnType<typeof generateText>>;
   try {
-    input.abortSignal?.throwIfAborted();
+    abortSignal?.throwIfAborted();
     // `system` aceita SystemModelMessage (com providerOptions de cache) — igual
     // em v6 e v7 (smoke prova que o cacheControl continua virando cache_control).
     result = await generateText({
@@ -671,14 +766,24 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
       model: factory(config.apiKey, model, decisao.baseUrl ?? config.baseUrl ?? undefined),
       system: prefix.system,
       messages: input.messages,
-      abortSignal: input.abortSignal,
+      abortSignal,
       tools: guardServiceTools(prefix.tools),
+      // Sem `maxSteps` o SDK para na 1ª etapa, e as outras condições não têm
+      // laço para encerrar — por isso só entram junto com ele (como antes).
       stopWhen:
         input.maxSteps === undefined
           ? undefined
-          : input.pararQuando === undefined
-            ? stepCountIs(input.maxSteps)
-            : [stepCountIs(input.maxSteps), input.pararQuando],
+          : [
+              stepCountIs(input.maxSteps),
+              ...(input.pararQuando === undefined ? [] : [input.pararQuando]),
+              ...(input.tetoDeTokensDoTurno === undefined
+                ? []
+                : [
+                    pararPorTetoDeTokens(input.tetoDeTokensDoTurno, deps.log, (c) => {
+                      corte.valor = c;
+                    }),
+                  ]),
+            ],
       temperature,
       topP,
       topK,
@@ -793,6 +898,13 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     /** De onde veio a escolha — o painel lê isto para explicar cada ponto. */
     origem: decisao.origem,
     avisos: decisao.avisos,
+    /**
+     * (C01, rodada 8) O corte NOSSO do laço, quando houve (`null` quando o laço
+     * acabou sozinho ou pelo teto de etapas do autor). A linha de `llm_calls` fica
+     * 'ok' — a chamada ao provedor foi bem, e o CHECK da coluna só aceita 'ok' e
+     * 'erro' —; o motivo vive aqui, no log e no que o chamador faz com ele.
+     */
+    corte: corte.valor,
   };
 }
 

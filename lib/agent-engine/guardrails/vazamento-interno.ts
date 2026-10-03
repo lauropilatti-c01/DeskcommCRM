@@ -426,11 +426,53 @@ function achaSnakeCase(texto: string): Achado[] {
  * True se a candidata leva vocabulário interno ao cliente. Determinístico, sem I/O.
  * Vazio/whitespace = false.
  */
-export function detectarVazamentoInterno(body: string): VazamentoInterno {
+/** (C01) Opções do detector. */
+export interface OpcoesDeDeteccao {
+  /**
+   * (C01) URLs que a BASE da empresa devolveu NESTE turno (resultado de
+   * `crm_query_external_data`). A ocorrência EXATA de cada uma é mascarada antes
+   * da varredura, porque o link legítimo de vídeo carrega um UUID
+   * (`?v=<uuid>`) e caía na regra (E2). É RECURSO, não domínio: a mesma URL com
+   * outro identificador, uma URL do mesmo domínio que a base não devolveu, ou um
+   * UUID solto continuam barrados. Fora do turno (sem base) nada é mascarado.
+   */
+  urlsPermitidas?: Iterable<string>;
+}
+
+/** O que fica no lugar da URL da base. Não casa com regra nenhuma (sem `_`, sem hex). */
+export const MASCARA_DE_URL_DA_BASE = '[link da base]';
+/**
+ * (C01) Só URLs de verdade entram na máscara: nada menor que isto vira "URL". São 12
+ * caracteres: o esquema seguro (8, com `://`) e o menor host possível (4: uma letra,
+ * o ponto e um domínio de topo de duas letras). Número, e não o `.length` de uma URL
+ * de exemplo: `branding.test.ts` lê qualquer string com cara de host no código que embarca.
+ */
+const URL_MINIMA = 12;
+
+/**
+ * (C01) Troca cada ocorrência EXATA de uma URL permitida pela máscara. As mais
+ * longas primeiro: uma URL que é prefixo de outra não pode comer o começo dela
+ * e deixar o resto (com o identificador) para a varredura.
+ */
+export function mascararUrlsDaBase(body: string, urls: Iterable<string>): string {
+  const lista = [...new Set(urls)]
+    .filter((u) => typeof u === 'string' && u.length >= URL_MINIMA && /^https?:\/\//i.test(u))
+    .sort((a, b) => b.length - a.length);
+  let texto = body;
+  for (const url of lista) texto = texto.split(url).join(MASCARA_DE_URL_DA_BASE);
+  return texto;
+}
+
+export function detectarVazamentoInterno(
+  body: string,
+  opcoes: OpcoesDeDeteccao = {},
+): VazamentoInterno {
   if (body.trim() === '') return { achou: false, termos: [], categorias: [] };
+  const corpo =
+    opcoes.urlsPermitidas === undefined ? body : mascararUrlsDaBase(body, opcoes.urlsPermitidas);
   // Duas visões do MESMO texto: a regra (A) precisa da caixa (ver `RE_SNAKE_CASE`), todas
   // as outras precisam da uniformidade de minúsculas.
-  const comCaixa = semDiacriticos(body);
+  const comCaixa = semDiacriticos(corpo);
   const texto = comCaixa.toLowerCase();
 
   const achados: Achado[] = achaSnakeCase(comCaixa);
@@ -466,7 +508,19 @@ export function detectarVazamentoInterno(body: string): VazamentoInterno {
  * com o `casePromiseGate`, que veta promessa-de-humano sem caso aberto. Um veto que
  * empurra o modelo para o veto seguinte não ensina, só empurra o problema.
  */
-export function renderVetoDeVazamento(termos: readonly string[]): string {
+export function renderVetoDeVazamento(
+  termos: readonly string[],
+  opcoes: {
+    /**
+     * (C01) O identificador barrado está dentro de um LINK. A saída certa não é
+     * "omitir o detalhe": é copiar o link exatamente como a base devolveu, ou
+     * consultar de novo — link montado de cabeça não sai.
+     */
+    identificadorEmLink?: boolean;
+    /** (C01) É a última tentativa antes de o turno passar a uma pessoa. */
+    ultimaTentativa?: boolean;
+  } = {},
+): string {
   const partes = termos.slice(0, 3).map((t) => {
     const entrada = catalogEntry(t);
     return entrada === undefined ? `"${t}"` : `"${t}" (é o nome interno de «${entrada.rotulo.toLowerCase()}»)`;
@@ -478,6 +532,21 @@ export function renderVetoDeVazamento(termos: readonly string[]): string {
     'REESCREVA a MESMA mensagem trocando o termo técnico pelo EFEITO na vida dele: diga o que ' +
     'você conseguiu ou não conseguiu fazer, em português de gente, ou simplesmente omita o ' +
     'detalhe interno. Se o termo era a razão de você não conseguir algo, diga apenas que não ' +
-    'conseguiu — sem nomear o motivo interno.'
+    'conseguiu — sem nomear o motivo interno.' +
+    (opcoes.identificadorEmLink === true
+      ? ' Se o identificador faz parte de um LINK, copie o link EXATAMENTE como a base devolveu ' +
+        'na consulta deste turno (sem mudar nenhum caractere) ou refaça a consulta — link montado ' +
+        'de cabeça não sai.'
+      : '') +
+    (opcoes.ultimaTentativa === true ? ' ' + AVISO_DE_ULTIMA_TENTATIVA : '')
   );
 }
+
+/**
+ * (C01) A frase que o turno acrescenta ao veto na última tentativa de reescrita
+ * (ver `MAX_VETOS_DE_VOCABULARIO_INTERNO` em `inbound-turn.ts`): o modelo precisa
+ * saber que não haverá outra chance, senão repete o texto e o cliente fica mudo.
+ */
+export const AVISO_DE_ULTIMA_TENTATIVA =
+  'Esta é a ÚLTIMA tentativa: se a próxima versão repetir o problema, a mensagem não sai e a ' +
+  'conversa passa a uma pessoa da equipe.';

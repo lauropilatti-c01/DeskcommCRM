@@ -46,6 +46,13 @@ export interface ChannelSendInput {
    * URL curta para o canal é o handler de mensagens, como em toda mídia.
    */
   media?: { storagePath: string; mime: string };
+  /**
+   * (C01) Presente = o texto que IDENTIFICA este envio no ledger difere do `body`
+   * entregue: é o corpo antes das emendas da cadeia de envio (a apresentação
+   * automática da 1ª mensagem, `disclosureGate` em modo `inject`). O canal entrega
+   * `body`; o ledger reconhece a repetição por `identidade`. Ausente = `body`.
+   */
+  identidade?: string;
 }
 
 /**

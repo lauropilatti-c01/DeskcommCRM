@@ -55,6 +55,8 @@ import { WahaChannelAdapter } from '../edge/channel/waha-adapter';
 // applySendOutcome é disposição de FILA (cancel/reschedule + cache de opt-out), não
 // egress de canal — o envio em si vai pelo adapter (ChannelAdapter). Ver F2-25.
 import { applySendOutcome } from '../edge/crm/send-message';
+// (C01) A posição inicial do turno vem do ledger: re-execução continua de onde parou.
+import { conteudoRegistradoNoJob, estadoInicialDoJob, posicaoFalhadaFoiOcupada } from '../edge/crm/send-ledger';
 import {
   LlmBudgetExceededError,
   runModelCall,
@@ -74,7 +76,9 @@ import { buildNativeMediaParts } from './media-parts';
 import {
   copiarFotoNoStorage,
   enviarComFotos,
+  LIMITE_DA_LEGENDA,
   prepararFotosDoProduto,
+  type CopiarFoto,
   type FotoParaEnvio,
 } from './fotos-do-produto';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
@@ -106,6 +110,7 @@ import { podeExporScheduleFollowup } from '@/lib/followup/callback-policy';
 import {
   avisarLeadDaEscalacao,
   avisarLeadLendoOContato,
+  CODIGO_DO_VETO,
   type AvisoDeEscalacaoIds,
   type AvisoDeEscalacaoOpts,
   type DesfechoDoAviso,
@@ -175,12 +180,21 @@ import {
 } from './skills';
 import { readSkillReference, skillHasReferences } from './skill-references';
 import { READ_ONLY_TOOLS, wrapToolsWithBreaker, type ToolBreakerThresholds } from './tool-breaker';
-import { loadChannelProvider, nomesDasFerramentas, runBeforeSend } from '../guardrails/before-send';
+import {
+  loadChannelProvider,
+  nomesDasFerramentas,
+  runBeforeSend,
+  type BeforeSendResult,
+} from '../guardrails/before-send';
+// (C01) A mesma régua da cadeia para a identidade do envio no ledger (ver `identidadeDoEnvio`).
+import { aplicarAjustesDeEstilo, lerAjustesDeEstiloDaOrg } from '../guardrails/ajustes-de-estilo-da-org';
+// (C01) O aviso de última tentativa do fail-safe de vocabulário interno.
+import { AVISO_DE_ULTIMA_TENTATIVA } from '../guardrails/vazamento-interno';
 import { isStatusSendable } from '../../channels/meta/template-binding';
 import { capabilitiesOf } from '@/lib/channels/capabilities';
 import { renderTemplateBody } from '@/lib/channels/meta/render-template';
 import { acenderDigitando, esperarComoHumano } from './atraso-humano';
-import { instrucaoDeBolhas, sendInBubbles, splitForSend } from './split-message';
+import { instrucaoDeBolhas, OK_KINDS, sendInBubbles, splitForSend } from './split-message';
 import type { DisclosureMode } from '../guardrails/disclosure/template';
 import { decidePromise } from '../guardrails/promise/engine';
 import { loadPromiseTable } from '../guardrails/promise/table';
@@ -470,12 +484,257 @@ export const AGENT_TOOL_DEFS = {
 } as const;
 
 /**
- * Quantos vetos de `internal_vocabulary_leak` o turno tolera antes de o fail-safe soltar
- * o envio (ver o bloco em `send_message.execute`). Mesmo degrau do fail-safe de casos
- * humanos — 1ª vez ensina, a 2ª decide — porque a assimetria é a mesma: uma reescrita
- * que o modelo não fez não vale um cliente sem resposta.
+ * Quantos vetos de `internal_vocabulary_leak` o turno tolera antes de o fail-safe agir
+ * (ver o bloco em `send_message.execute`).
+ *
+ * (C01) O fail-safe NÃO desarma mais o gate. Até aqui, no 2º veto o texto vetado saía
+ * para o cliente "com registro" — isto é, o vocabulário interno chegava a quem não podia
+ * ler, só que medido. Agora: o 1º veto ensina; o 2º ensina e avisa que é a última
+ * tentativa (reescrita limitada, com o motivo do veto); no 3º o texto vetado NÃO sai,
+ * o cliente recebe uma frase curta de espera (`FRASE_DE_ESPERA_PADRAO`, configurável),
+ * um caso é aberto para uma pessoa da equipe, o lead vai à etapa de passagem e a
+ * passagem ao humano fica GRAVADA (`performHumanHandoff`: é o que o início do próximo
+ * turno lê). Ninguém fica sem resposta, e nada vetado chega ao cliente.
  */
-export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 2;
+export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 3;
+
+/**
+ * (C01) O que o cliente lê quando a resposta do modelo não pôde sair (3 vetos de
+ * vocabulário interno): curta, sem prazo, sem nome de ferramenta, e verdadeira — uma
+ * pessoa da equipe foi acionada pelo caso aberto no mesmo instante. Configurável por
+ * `AGENT_FRASE_DE_ESPERA` (knob `fraseDeEspera`). Texto a validar com o operador.
+ */
+export const FRASE_DE_ESPERA_PADRAO =
+  'Para te responder direitinho, vou pedir ajuda à equipe. Uma pessoa continua a conversa com você por aqui.';
+
+/**
+ * (C01) Em que pé ficou a frase de espera do fail-safe, para quem decide o resto do
+ * turno e para o que se diz ao modelo:
+ * - `entregue`: o canal aceitou (`sent`), ou já tinha aceitado numa execução
+ *   anterior do job (`already_sent`) — só aqui o cliente está avisado;
+ * - `a_caminho`: o canal segurou (`queued`, sessão fora) e entrega quando voltar —
+ *   não se reenvia;
+ * - `pendente`: não saiu (`unavailable`, `failed`, veto da cadeia). O erro fica
+ *   registrado e o job falha, mas a re-execução NÃO manda a frase: a passagem ao
+ *   humano já está gravada e o turno de um lead em handoff é pulado antes de qualquer
+ *   envio (achado 2 da quarta revisão adversarial). Quem assume lê na Central que o
+ *   cliente NÃO foi avisado (`avisoAoLeadPelaFraseDeEspera`) — a doutrina do autor:
+ *   aviso que falha não impede a passagem, e a informação fica com a pessoa;
+ * - `nao_sai`: o contato pediu para não receber mensagens (`blocked`); o fim do
+ *   turno cancela o job.
+ */
+/**
+ * (C01) Lançado por `enviarPeloCanal` quando um envio chega ao ponto comum — já sob a
+ * serialização do número, imediatamente antes do envio físico — DEPOIS de o turno
+ * ter passado a uma pessoa. Ferramentas da mesma etapa rodam em paralelo: um
+ * `send_template` que conferiu a trava, esperou a consulta do template e entrou na
+ * cadeia enquanto o 3º `send_message` vetado ligava o fail-safe chegaria ao canal
+ * sem reconferir (achado 3 da segunda revisão adversarial, 03/10/2026). Nada sai; a
+ * cadeia desfaz a transação e a ferramenta devolve `turno_passado_ao_humano`. Só a
+ * frase de espera do próprio fail-safe passa, e marcada por quem a manda.
+ */
+export class EnvioAposPassagemAoHumano extends Error {
+  constructor() {
+    super('envio depois da passagem ao humano: nada saiu');
+    this.name = 'EnvioAposPassagemAoHumano';
+  }
+}
+export type DesfechoDaFraseDeEspera = 'entregue' | 'a_caminho' | 'pendente' | 'nao_sai';
+
+/**
+ * (C01) Trata, um a um, os desfechos da frase de espera do fail-safe de vocabulário
+ * interno (achado 3 da revisão adversarial, 03/10/2026). Antes, qualquer resultado
+ * que não fosse veto entrava em `outcomes` e o turno fechava normal: com o canal
+ * indisponível (`unavailable`), o cliente ficava sem o aviso, o recibo ficava
+ * 'requested' e ninguém voltava para mandá-lo — enquanto o envio normal registra
+ * o erro e o job re-tenta. Aqui o `unavailable` registra o erro como lá e o turno
+ * falha. `failed` e `blocked` seguem para o fim do turno como todo envio (`failed`
+ * falha o job, `blocked` o cancela).
+ *
+ * (C01, rodada 5) O que a re-execução faz mudou com a passagem gravada: o lead já
+ * está em handoff, então o retry é pulado antes de qualquer envio e a frase pendente
+ * NÃO sai — nem por este caminho, nem pelo modelo (que não é mais chamado). O que
+ * garante que ninguém a espera em vão é a Central: o desfecho vai na passagem
+ * (`avisoAoLeadPelaFraseDeEspera`) e quem assume lê "O cliente NÃO foi avisado".
+ * Reenviar a frase de forma determinística no retry exigiria furar a trava
+ * (`stopGate` lê `force_human`) no início do turno de um lead em handoff — fora
+ * desta rodada, limite documentado em `docs/loops/motor-c54.md`.
+ */
+export function desfechoDaFraseDeEspera(
+  espera: BeforeSendResult,
+  efeitos: {
+    outcomes: ChannelSendResult[];
+    noteRunError: (err: Error) => void;
+    log: { error(msg: string, fields?: Record<string, unknown>): void };
+  },
+): DesfechoDaFraseDeEspera {
+  if (espera.status === 'vetoed') {
+    efeitos.log.error('frase de espera vetada pela cadeia — cliente sem resposta neste turno', {
+      code: espera.code,
+    });
+    efeitos.noteRunError(new Error(`frase de espera vetada: ${espera.code}`));
+    return 'pendente';
+  }
+  const desfecho = espera.outcome;
+  efeitos.outcomes.push(desfecho);
+  switch (desfecho.kind) {
+    case 'sent':
+    case 'already_sent':
+      return 'entregue';
+    case 'queued':
+      return 'a_caminho';
+    case 'blocked':
+      return 'nao_sai';
+    case 'failed':
+      // O fim do turno falha o job ao ver um `failed` em `outcomes` (mesmo caminho
+      // do envio normal); a re-execução é pulada — a passagem já está gravada.
+      return 'pendente';
+    case 'unavailable':
+      efeitos.log.error(
+        'frase de espera não saiu: canal indisponível — a passagem ao humano fica gravada e a Central lê que o cliente não foi avisado',
+        { reason: desfecho.reason },
+      );
+      efeitos.noteRunError(
+        new Error(
+          `frase de espera não enviada: canal indisponível (${desfecho.reason}) — a passagem ao humano fica gravada; a frase não é reenviada`,
+        ),
+      );
+      return 'pendente';
+  }
+}
+
+/**
+ * (C01, rodada 5) O desfecho da frase de espera traduzido para o que
+ * `performHumanHandoff` escreve na Central — a pergunta de quem assume é "essa pessoa
+ * sabe que estou vindo?". O MESMO vocabulário de `avisarLeadDaEscalacao`, desfecho a
+ * desfecho: só `sent`/`already_sent` é cliente avisado; `queued` é fila com o canal
+ * fora; veto da cadeia leva o código do gate e o par fechado quando há
+ * (`CODIGO_DO_VETO`); `failed`/`unavailable` é falha no envio; `blocked` fica sem par,
+ * como lá — inventar um seria escrever na tela uma razão que ninguém mediu.
+ */
+export function avisoAoLeadPelaFraseDeEspera(espera: BeforeSendResult): DesfechoDoAviso {
+  if (espera.status === 'vetoed') {
+    const codigo = CODIGO_DO_VETO[espera.code];
+    return {
+      avisado: false,
+      porque: espera.code,
+      ...(codigo !== undefined ? { motivoCodigo: codigo } : {}),
+    };
+  }
+  switch (espera.outcome.kind) {
+    case 'sent':
+    case 'already_sent':
+      return { avisado: true };
+    case 'queued':
+      return { avisado: false, porque: 'na_fila_canal_fora', motivoCodigo: 'na_fila_canal_fora' };
+    case 'blocked':
+      return { avisado: false, porque: 'contato_bloqueado' };
+    case 'failed':
+      return { avisado: false, porque: 'canal_falhou', motivoCodigo: 'falhou_no_envio' };
+    case 'unavailable':
+      return { avisado: false, porque: 'canal_indisponivel', motivoCodigo: 'falhou_no_envio' };
+  }
+}
+
+/** O que `gravarPassagemComNovaTentativa` conseguiu. */
+export type DesfechoDaGravacaoDaPassagem = 'gravada' | 'gravada_na_segunda' | 'falhou';
+
+/**
+ * (C01, rodada 6) Grava a passagem ao humano do fail-safe com UMA nova tentativa
+ * imediata quando a primeira falha — e diz a verdade sobre o que fica quando as duas
+ * falham.
+ *
+ * `performHumanHandoff` é at-least-once com escritas separadas, e `force_human` é a
+ * PRIMEIRA de propósito (fail-closed: o lead sai do automático antes de qualquer outra
+ * coisa). Uma falha entre as escritas deixa a passagem INCOMPLETA — `force_human`
+ * gravado sem o silêncio da conversa, os crons cancelados ou o aviso na Central — e o
+ * retry do job NÃO a refaz: `isLeadInHandoff` lê `force_human` no início do turno e a
+ * re-execução é pulada antes de chegar aqui. O retry só refaz a passagem quando nem
+ * `force_human` chegou a ser gravado. É propriedade herdada de todos os gatilhos do
+ * autor (palavra-chave, opt-out, orçamento, a ferramenta `request_human_handoff`);
+ * neste caminho o caso `guardrail_autofallback`, aberto antes da frase de espera, é o
+ * registro que uma pessoa lê — por isso "ninguém avisado" não é o cenário daqui.
+ * Limite documentado em `C01.md` (achado 2 da quinta revisão adversarial).
+ *
+ * A nova tentativa é barata e segura: a ação é idempotente pelo contrato do autor
+ * (re-executar no mesmo episódio é no-op semântico). Falhando de novo, o erro não some
+ * (`noteRunError`), e o log diz o que pode ter ficado pela metade.
+ */
+export async function gravarPassagemComNovaTentativa(
+  gravar: () => Promise<void>,
+  efeitos: {
+    noteRunError: (err: Error) => void;
+    log: {
+      warn(msg: string, fields?: Record<string, unknown>): void;
+      error(msg: string, fields?: Record<string, unknown>): void;
+    };
+  },
+): Promise<DesfechoDaGravacaoDaPassagem> {
+  const detalhe = (err: unknown) => (err instanceof Error ? err.message.slice(0, 200) : 'erro desconhecido');
+  try {
+    await gravar();
+    return 'gravada';
+  } catch (primeiraFalha) {
+    efeitos.log.warn('fail-safe de vocabulário interno: a passagem ao humano falhou — nova tentativa imediata', {
+      error: detalhe(primeiraFalha),
+    });
+  }
+  try {
+    await gravar();
+    return 'gravada_na_segunda';
+  } catch (err) {
+    efeitos.log.error(
+      'fail-safe de vocabulário interno: a passagem ao humano falhou duas vezes e pode ter ficado incompleta ' +
+        '(force_human gravado sem o silêncio da conversa, os crons cancelados ou o aviso na Central); ' +
+        'o retry do job não a refaz — o caso aberto é o registro para a equipe',
+      { error: detalhe(err) },
+    );
+    efeitos.noteRunError(err instanceof Error ? err : new Error(String(err)));
+    return 'falhou';
+  }
+}
+
+/**
+ * (C01, rodada 5) O motivo da passagem gravado em `conversations.last_handoff_reason` e
+ * no corpo do aviso da Central (`Motivo: …`). Frase legível, não código: sem a linha
+ * de `passagens_de_atendimento` (ver o fail-safe em `send_message.execute`), este
+ * texto é o único "por quê" que quem assume lê — e a Central não traduz código cru.
+ * Constante exportada pela mesma razão de `HANDOFF_REASON_ORCAMENTO`: quem procurar
+ * no banco por que a conversa foi parar na fila humana busca por este valor.
+ */
+export const MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO =
+  'A revisão automática travou a resposta da IA (vocabulário interno do sistema); uma pessoa precisa responder';
+
+/** (C01, rodada 5) O título do aviso na Central — o mesmo título do caso, com a ação de quem lê. */
+export const TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO =
+  'Resposta travada pela revisão automática — assumir a conversa';
+
+/**
+ * (C01, rodada 8) O motivo da passagem quando o laço do modelo foi cortado pelo teto de
+ * tokens da versão ANTES de qualquer mensagem ao lead (achado 1 da sétima revisão
+ * adversarial): o mesmo lugar e a mesma régua de `MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO`
+ * — frase legível em `conversations.last_handoff_reason` e na Central, não código.
+ */
+export const MOTIVO_DA_PASSAGEM_POR_CORTE =
+  'A resposta da IA foi cortada por tamanho antes de sair (teto de tokens da versão); uma pessoa precisa responder';
+
+/** (C01, rodada 8) O título do caso aberto pelo corte. */
+export const TITULO_DO_CASO_POR_CORTE = 'Resposta da IA cortada antes de sair';
+
+/** (C01, rodada 8) O título do aviso na Central — o do caso, com a ação de quem lê. */
+export const TITULO_DA_PASSAGEM_POR_CORTE = 'Resposta da IA cortada antes de sair — assumir a conversa';
+
+/** (C01) O que o modelo lê sobre a frase de espera, conforme o desfecho — nunca "o cliente recebeu" sem ter recebido. */
+export const AVISO_AO_MODELO_POR_DESFECHO: Record<DesfechoDaFraseDeEspera, string> = {
+  entregue:
+    'O cliente recebeu uma frase de espera e a conversa passou a uma pessoa da equipe.',
+  a_caminho:
+    'A conversa passou a uma pessoa da equipe; o canal entrega a frase de espera ao cliente quando a sessão voltar.',
+  pendente:
+    'A conversa passou a uma pessoa da equipe; a frase de espera ao cliente não saiu, e a equipe lê isso na Central.',
+  nao_sai:
+    'A conversa passou a uma pessoa da equipe; o cliente pediu para não receber mensagens e a frase de espera não sai.',
+};
 
 /**
  * O mesmo degrau para o veto de `false_empty_inbound`, e pela mesma assimetria.
@@ -1017,6 +1276,29 @@ export function blocosDeAgendaResidentes(toolIds: readonly string[]): string[] {
  * Tools de agenda cuja EXECUÇÃO neste turno arma o `agendaStallGate` (before-send.ts) —
  * ver o wrap no loop de montagem das tools MCP, mais abaixo.
  */
+/** (C01) A leitura da base da empresa; suas URLs são as únicas liberadas no gate de vocabulário. */
+const FERRAMENTA_DA_BASE = 'crm_query_external_data';
+const RE_URL = /https?:\/\/[^\s"'<>\\)\]]+/g;
+/**
+ * (C01) Toda URL em qualquer string do resultado da ferramenta, em profundidade.
+ * Exportada para o teste; não interpreta o formato do resultado de propósito —
+ * o que vale é o texto exato que o modelo pode copiar.
+ */
+export function urlsNoResultado(valor: unknown, achadas: Set<string> = new Set(), profundidade = 0): Set<string> {
+  if (profundidade > 8 || valor === null || valor === undefined) return achadas;
+  if (typeof valor === 'string') {
+    for (const m of valor.matchAll(RE_URL)) achadas.add(m[0].replace(/[.,;:!?]+$/, ''));
+    return achadas;
+  }
+  if (Array.isArray(valor)) {
+    for (const item of valor) urlsNoResultado(item, achadas, profundidade + 1);
+    return achadas;
+  }
+  if (typeof valor === 'object') {
+    for (const item of Object.values(valor as Record<string, unknown>)) urlsNoResultado(item, achadas, profundidade + 1);
+  }
+  return achadas;
+}
 const AGENDA_TOOL_NAMES = new Set([
   'crm_find_free_slots',
   'crm_book_appointment',
@@ -1117,6 +1399,11 @@ export interface InboundTurnKnobs {
    * testes que não exercitam o teto o omitem sem custo.
    */
   maxSendsPerTurn?: number;
+  /**
+   * (C01) A frase de espera do fail-safe de vocabulário interno (AGENT_FRASE_DE_ESPERA).
+   * Ausente = `FRASE_DE_ESPERA_PADRAO`.
+   */
+  fraseDeEspera?: string;
   /** atraso do reagendamento em veto/queued herdado da F2-06 (SEND_QUEUED_RETRY_MS) */
   queuedRetryDelayMs: number;
   /**
@@ -1224,6 +1511,11 @@ export interface InboundTurnDeps {
    * anti-ban observável no artefato de trace de forma determinística.
    */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * (C01) A cópia da foto do catálogo para a pasta da conversa — injetável só para
+   * teste (a real, `copiarFotoNoStorage`, fala com o Storage). Default = a real.
+   */
+  copiarFoto?: CopiarFoto;
   /**
    * O Jev no turno — na camada anti-manipulação e no roteador de intenção.
    * Injetável só para teste (chave e `fetch` dublês). Default = a chave da
@@ -2557,7 +2849,141 @@ async function executarTurnoDoAgente(
   }
 
   // Estado do RUN — vive só neste closure (isolamento por construção, acc 3).
-  let seq = 0;
+  //
+  // (C01) A posição continua de onde o canal já aceitou. A cada execução do
+  // mesmo job (reaper, retry) `seq` recomeçava em 0: a primeira bolha nova caía
+  // na posição da primeira antiga e era descartada como `already_sent` (C54).
+  // O ledger reconcilia os recibos pendentes e devolve a maior posição aceita.
+  //
+  // (C01) Dois números, não um: `posicao` é a dica de posição do próximo recibo no
+  // ledger; `seq` é quantas mensagens o cliente recebeu (ou vai receber) deste job —
+  // o que conta no teto do turno, nos "já falei neste turno" e no que resta para
+  // bolhas e fotos. Quando eram o mesmo número, a posição 1 'failed' com as 2 e 3
+  // aceitas valia "3 enviadas" e a re-execução recusava por teto antes de consultar
+  // o ledger: a primeira mensagem ficava sem entrega (achado 1 da terceira revisão
+  // adversarial). O preview não tem job: parte do zero.
+  const estadoInicial = preview
+    ? { posicao: 0, enviadas: 0, pendentes: [], falhadas: [] }
+    : await estadoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
+  let posicao = estadoInicial.posicao;
+  let seq = estadoInicial.enviadas;
+  // (C01, rodada 7) As posições que a execução anterior deixou com recibo 'failed',
+  // por ordem. Cada envio FÍSICO desta execução recebe a primeira delas como dica de
+  // posição, em vez de `posicao + 1`, e o ledger a rotaciona como sempre rotacionou
+  // o 'failed' no replay por posição; ocupada, sai da lista. Sem isto a mensagem
+  // regenerada nascia noutra posição e o 'failed' ficava no job para sempre: o
+  // follow-up por IA, que exige todos os recibos aceitos, nunca concluía o passo
+  // (achado 2 da sexta revisão adversarial). O conteúdo já conhecido (`already_sent`,
+  // retomada de pendente) não ocupa a posição: ela espera o próximo envio novo.
+  const falhadas = [...estadoInicial.falhadas];
+  // (C01) As chaves já contadas em `seq`. Começa pelos recibos pendentes que a
+  // recuperação contou (o canal os segura e vai entregar). Quando a re-execução
+  // retoma um deles pela mesma chave (`findPendente`) e o canal devolve `sent` ou
+  // `queued`, é a MESMA mensagem: não conta de novo. Contava, e com teto 3, foto 1
+  // aceita e foto 2 pendente, a re-execução chegava a 3 com duas mensagens e omitia
+  // a foto 3 devolvendo sucesso (achado 1 da quarta revisão adversarial). O mesmo
+  // vale dentro da execução: uma chave conta uma vez; `unavailable` não tem chave e
+  // conta como sempre contou.
+  const contadas = new Set<string>(estadoInicial.pendentes);
+  const contaNoTeto = (resultado: ChannelSendResult): boolean => {
+    if (resultado.kind === 'unavailable') return true;
+    if (contadas.has(resultado.idempotencyKey)) return false;
+    contadas.add(resultado.idempotencyKey);
+    return true;
+  };
+  // (C01, rodada 6) As chaves pendentes da recuperação que ESTA execução ainda não
+  // retomou. Enquanto houver uma, o teto cheio não recusa o envio de cara: a
+  // ferramenta pergunta ao ledger se o conteúdo é retomada e só recusa o que for
+  // novo (ver `recusaPorTeto`). Esvaziada, o teto cheio volta a recusar sem consulta.
+  const porRetomar = new Set<string>(estadoInicial.pendentes);
+  // (C01) As URLs que a base da empresa devolveu NESTE turno (resultado de
+  // `crm_query_external_data`). O gate de vocabulário interno libera a ocorrência
+  // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
+  const urlsDaBase = new Set<string>();
+  // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
+  // frase de espera NADA mais sai dele — nem send_message, nem send_template, nem a
+  // pergunta do roteiro. Toda ferramenta de envio recusa com o mesmo erro, e o laço
+  // do modelo para ao fim da etapa (`pararQuando`, na chamada do modelo): ele não
+  // ganha outra etapa para tentar outra ferramenta (achado 2 da revisão adversarial).
+  let passadoAoHumano = false;
+  const recusaPorPassagemAoHumano = () => ({
+    ok: false as const,
+    error: {
+      code: 'turno_passado_ao_humano' as const,
+      message:
+        'A conversa já passou a uma pessoa da equipe neste turno e o cliente já recebeu a frase de espera. ' +
+        'NÃO envie mais nada — encerre o turno agora.',
+    },
+  });
+  // (C01) O único caminho ao canal. `posicao` é a dica de posição do recibo (o
+  // ledger pode acomodar o conteúdo noutra: já aceito, pendente retomado, colisão);
+  // `seq` conta o que de fato saiu. `already_sent` é o ledger dizendo que ESTE
+  // conteúdo já saiu numa execução anterior do job: não é mensagem física nova, não
+  // ocupa posição e não conta no teto do turno. Qualquer outro desfecho conta — uma
+  // vez por chave (`contaNoTeto`) — e o teto continua medindo o que o lead recebeu.
+  //
+  // (C01) E é aqui, no ponto comum imediatamente anterior ao envio físico — já sob
+  // a serialização do número (a cadeia chama `send` dentro da transação com o
+  // lock) —, que a passagem ao humano é RECONFERIDA: a trava no começo de cada
+  // ferramenta não vê o fail-safe que outra ferramenta da MESMA etapa ligou
+  // enquanto esta esperava consulta ou gate. Só a frase de espera passa, e só
+  // quando quem a manda a marca (achado 3 da segunda revisão adversarial).
+  const enviarPeloCanal = async (
+    envio: Omit<Parameters<ChannelAdapter['send']>[0], 'seq'>,
+    opcoes?: { fraseDeEspera?: boolean },
+  ): Promise<ChannelSendResult> => {
+    if (passadoAoHumano && opcoes?.fraseDeEspera !== true) throw new EnvioAposPassagemAoHumano();
+    // (C01, rodada 7) A dica de posição: a primeira falhada da execução anterior, se
+    // houver; senão a próxima depois da maior aceita.
+    const falhada = falhadas[0];
+    const resultado = await liveChannel().send({ ...envio, seq: falhada?.seq ?? posicao + 1 });
+    if (resultado.kind !== 'already_sent') {
+      if (falhada === undefined) posicao += 1;
+      else if (await posicaoFalhadaFoiOcupada(pool, { tenantId, jobId: liveJob().id, ...falhada })) {
+        falhadas.shift();
+        if (falhada.seq > posicao) posicao = falhada.seq;
+      }
+      if (contaNoTeto(resultado)) seq += 1;
+    }
+    // (C01, rodada 6) A pendência da recuperação que esta chave retomou sai da lista.
+    if (resultado.kind !== 'unavailable') porRetomar.delete(resultado.idempotencyKey);
+    return resultado;
+  };
+  /** (C01) O veto que a passagem ao humano devolve às ferramentas de envio (ensino da trava). */
+  const vetoPorPassagemAoHumano = (trace: BeforeSendResult['trace'] = []): BeforeSendResult => ({
+    status: 'vetoed',
+    gate: 'turno_passado_ao_humano',
+    code: 'turno_passado_ao_humano',
+    message: recusaPorPassagemAoHumano().error.message,
+    trace,
+  });
+  /**
+   * (C01) A cadeia de envio (`runBeforeSend`) com a reconferência acima traduzida:
+   * o envio barrado em `enviarPeloCanal` volta como veto `turno_passado_ao_humano`
+   * — a cadeia já desfez a transação (nada gravado, lock solto) e a ferramenta o
+   * trata como qualquer veto, com o mesmo erro de ensino da trava.
+   */
+  const cadeiaDeEnvio = async (cadeia: () => Promise<BeforeSendResult>): Promise<BeforeSendResult> => {
+    try {
+      const resultado = await cadeia();
+      // (C01, rodada 5) A passagem GRAVADA pelo fail-safe arma o `stopGate`
+      // (`force_human`, lido sob o lock): o envio que chega à cadeia depois dela
+      // é vetado como `contato_bloqueado`, com o texto do opt-out — e o lead não
+      // pediu para sair; o turno passou a uma pessoa. O ensino ao modelo é o da
+      // passagem, o mesmo da reconferência abaixo. O veto em si fica: nada sai.
+      if (passadoAoHumano && resultado.status === 'vetoed' && resultado.gate === 'stop') {
+        runLog.warn('envio barrado pela trava da passagem gravada: o turno já passou a uma pessoa');
+        return vetoPorPassagemAoHumano(resultado.trace);
+      }
+      return resultado;
+    } catch (err) {
+      if (err instanceof EnvioAposPassagemAoHumano) {
+        runLog.warn('envio barrado no ponto comum: o turno já passou a uma pessoa (corrida entre ferramentas da etapa)');
+        return vetoPorPassagemAoHumano();
+      }
+      throw err;
+    }
+  };
   // O que o modelo de fato mandou neste turno (depois da cadeia). A trava "a
   // pergunta saiu?" do roteiro de atendimento lê daqui.
   const corposEnviados: string[] = [];
@@ -2571,6 +2997,148 @@ async function executarTurnoDoAgente(
   // incluídas), nunca em veto de gate. Checar `seq` antes de tentar o próximo envio
   // barra o modelo sem gastar uma chamada de before-send à toa.
   const maxSendsPerTurn = deps.knobs.maxSendsPerTurn ?? DEFAULT_MAX_SENDS_PER_TURN;
+  // (C01, rodada 6) O teto vale para intenção NOVA. Com ele cheio, a ferramenta de
+  // envio recusa de cara — a menos que a recuperação tenha contado pendências que esta
+  // execução ainda não retomou (`porRetomar`): então ela segue até saber se o conteúdo
+  // já tem recibo neste job (`conhecido`) e só recusa o que for novo. Antes, a
+  // pré-checagem recusava antes de consultar o ledger: com teto 3, 1 foto aceita e 2
+  // fotos `queued` (`enviadas = 3`), as duas pendentes ficavam sem retomada para
+  // sempre — e o vigia da sessão não as pega, porque foto sem legenda é `body` nulo,
+  // que ele pula (achado 1 da quinta revisão adversarial).
+  const tetoCheio = (): boolean => seq >= maxSendsPerTurn;
+  const recusaPorTeto = () => ({
+    ok: false as const,
+    error: {
+      code: 'max_sends_per_turn' as const,
+      message:
+        `você já enviou ${seq} mensagens neste turno (teto: ${maxSendsPerTurn}). ` +
+        'NÃO envie mais nada agora — encerre o turno e espere a resposta do lead.',
+    },
+  });
+  /** (C01) Uma mensagem física do envio: texto puro, ou foto com (ou sem) legenda. */
+  type MensagemPlanejada = { body: string; media?: FotoParaEnvio };
+  /** (C01) Este conteúdo já tem recibo neste job (aceito, ou pendente a retomar)? O preview não tem job. */
+  const conhecido = (envio: MensagemPlanejada & { template?: object; identidade?: string }): Promise<boolean> =>
+    preview ? Promise.resolve(false) : conteudoRegistradoNoJob(pool, { tenantId, jobId: liveJob().id, ...envio });
+  // (C01, rodada 6) O corpo com que a cadeia de envio COMEÇA é o texto do modelo com os
+  // ajustes de estilo da organização (`runBeforeSend` os aplica antes dos gates, pelas
+  // mesmas duas funções, fora de transação). Lidos uma vez por turno: é a régua da
+  // identidade do envio no ledger (`identidadeDoEnvio`, `planejarRetomada`).
+  const ajustesDeEstilo = (await lerAjustesDeEstiloDaOrg(pool, tenantId)).ajustes;
+  const comoACadeiaComeca = (textoDoModelo: string): string => aplicarAjustesDeEstilo(textoDoModelo, ajustesDeEstilo);
+  /**
+   * (C01, rodada 6) A identidade de UMA mensagem física no ledger: o texto entregue SEM
+   * a emenda da cadeia. A apresentação automática (`disclosureGate`, modo `inject`)
+   * emenda a 1ª mensagem ao lead na frente do corpo, separada por linha em branco — e a
+   * emenda depende de um estado que o próprio envio muda (haver envio aceito): na
+   * re-execução do job, com o envio aceito, ela não acontece, o corpo entregue é outro,
+   * e o hash do corpo entregue não reconhecia o recibo; a posição avançava e a resposta
+   * saía de novo (achado 3 da quinta revisão adversarial). A emenda é o que `finalBody`
+   * tem a mais que o corpo com que a cadeia começou (`antes`): fatiada em bolhas, vira
+   * bolha própria (fica como está — não é texto do modelo, e a re-execução não a
+   * regenera) ou abre a bolha única do teto e a legenda da foto, de onde sai. Sem
+   * emenda, nada a declarar: a identidade é o corpo entregue, como sempre.
+   */
+  const identidadeDoEnvio = (corpo: string, finalBody: string, antes: string): { identidade?: string } => {
+    if (finalBody === antes || !finalBody.endsWith(antes)) return {};
+    const emenda = finalBody.slice(0, finalBody.length - antes.length);
+    if (!corpo.startsWith(emenda) || corpo.length === emenda.length) return {};
+    return { identidade: corpo.slice(emenda.length) };
+  };
+  // (C01, rodada 7) O `send` EXCLUSIVO da frase de espera: UMA mensagem, só o
+  // `finalBody` que a cadeia validou — sem o plano da retomada, sem as fotos, sem
+  // nada do corpo do modelo. O `send` do modelo (em `beforeSendArgs`, no
+  // `send_message`) servia também à frase; com o teto cheio e uma pendência conhecida
+  // ele mandava o plano da retomada: a cadeia validava a frase e saía o texto que
+  // acabara de ser vetado, marcado como frase de espera, e a frase não saía (achado 1
+  // da sexta revisão adversarial). A reconferência do ponto comum continua a mesma. A
+  // identidade no ledger parte da frase (`deps.knobs.fraseDeEspera ??
+  // FRASE_DE_ESPERA_PADRAO`, o mesmo `body:` que os fail-safes dão à cadeia), como a de
+  // qualquer mensagem.
+  // (C01, rodada 8) No escopo do turno, e não mais dentro do `send_message`: o
+  // fail-safe do corte, que roda DEPOIS do laço do modelo, manda a frase pelo mesmo
+  // `send`.
+  const enviarFraseDeEspera = (finalBody: string): Promise<ChannelSendResult> => {
+    corposEnviados.push(finalBody);
+    return enviarPeloCanal(
+      {
+        tenantId,
+        leadId,
+        jobId: liveJob().id,
+        jobClaim: claimOfJob(liveJob()),
+        agentOperation,
+        conversationId: input.conversationId,
+        body: finalBody,
+        ...identidadeDoEnvio(
+          finalBody,
+          finalBody,
+          comoACadeiaComeca(deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO),
+        ),
+      },
+      { fraseDeEspera: true },
+    );
+  };
+  /**
+   * (C01, rodada 6) O plano do `send_message` com o teto cheio: as mensagens físicas
+   * que `enviarComFotos` + `sendInBubbles` produziriam — a legenda na capa e as demais
+   * fotos sem legenda; ou, quando o texto passa do teto de legenda, as bolhas do texto
+   * e todas as fotos sem legenda —, separadas entre as que o ledger já conhece (saem:
+   * retomada ou confirmação, pela mesma chave) e as novas (ficam de fora; o modelo é
+   * avisado). As bolhas são as naturais: a conhecida mantém a divisão com que saiu.
+   */
+  const planejarRetomada = async (
+    textoDoModelo: string,
+    fotos: readonly FotoParaEnvio[],
+  ): Promise<{ conhecidas: MensagemPlanejada[]; novas: number }> => {
+    // A identidade no ledger é o texto com que a cadeia começa (ajustes de estilo da
+    // organização; a emenda da apresentação fica de fora): a mesma régua aqui.
+    const texto = comoACadeiaComeca(textoDoModelo);
+    const naturais = splitForSend(texto, agentConfig?.splitMessages ?? false, agentConfig?.splitMaxChars ?? 600);
+    const bolhas: MensagemPlanejada[] = (naturais.length === 0 ? [texto] : naturais).map((body) => ({ body }));
+    const [capa, ...demais] = fotos;
+    const plano: MensagemPlanejada[] =
+      capa === undefined
+        ? bolhas
+        : texto.length <= LIMITE_DA_LEGENDA
+          ? [{ body: texto, media: capa }, ...demais.map((media) => ({ body: '', media }))]
+          : [...bolhas, ...fotos.map((media) => ({ body: '', media }))];
+    const conhecidas: MensagemPlanejada[] = [];
+    let novas = 0;
+    for (const mensagem of plano) {
+      if (await conhecido(mensagem)) conhecidas.push(mensagem);
+      else novas += 1;
+    }
+    return { conhecidas, novas };
+  };
+  /**
+   * (C01, rodada 6) O `send` do `send_message` com o teto cheio: manda só as mensagens
+   * que o ledger já conhece — a retomada das pendentes e a confirmação das aceitas,
+   * pela mesma chave —, na ordem, com o jitter anti-ban entre elas, e para no primeiro
+   * desfecho que não é de sucesso. O que seria novo fica de fora, e o modelo é avisado
+   * no resultado. `enviarComFotos` e `sendInBubbles` não servem aqui: sem vaga, mandam
+   * o texto como bolha nova.
+   */
+  const enviarSoAsConhecidas = async (
+    conhecidas: readonly MensagemPlanejada[],
+    o: {
+      enviar: (corpo: string, media?: FotoParaEnvio) => Promise<ChannelSendResult>;
+      sleep: (ms: number) => Promise<void>;
+      jitter: () => number;
+    },
+  ): Promise<ChannelSendResult> => {
+    let ultimo: ChannelSendResult | undefined;
+    for (const [i, mensagem] of conhecidas.entries()) {
+      if (i > 0) await o.sleep(o.jitter());
+      ultimo = await o.enviar(mensagem.body, mensagem.media);
+      if (!OK_KINDS.has(ultimo.kind)) return ultimo;
+    }
+    // A pré-checagem só entra aqui com ao menos uma conhecida.
+    if (ultimo === undefined) throw new Error('retomada sem mensagem conhecida');
+    return ultimo;
+  };
+  const avisoDaRetomada = (novas: number): string =>
+    `${novas} parte(s) nova(s) desta resposta NÃO saíram: o teto de mensagens do turno (${maxSendsPerTurn}) já estava cheio ` +
+    'e só o que já estava a caminho do cliente foi retomado. NÃO envie mais nada agora — encerre o turno e espere a resposta do lead.';
   // F3-11: estágio que o MODELO confirmou via update_lead_state neste turno (a máquina
   // F2-10 é a única porta). Comparado com a sugestão do classificador no fim → divergência.
   let confirmedStage: LeadStage | null = null;
@@ -2810,17 +3378,12 @@ async function executarTurnoDoAgente(
     send_template: tool({
       ...AGENT_TOOL_DEFS.send_template,
       execute: async ({ template_name, language, values }) => {
-        if (seq >= maxSendsPerTurn) {
-          return {
-            ok: false,
-            error: {
-              code: 'max_sends_per_turn',
-              message:
-                `você já enviou ${seq} mensagens neste turno (teto: ${maxSendsPerTurn}). ` +
-                'NÃO envie mais nada agora — encerre o turno e espere a resposta do lead.',
-            },
-          };
-        }
+        // (C01) A trava do fail-safe vale para TODA ferramenta de envio: um template
+        // depois da frase de espera chegaria ao cliente contrariando o encerramento
+        // (o texto do template não passa pelo gate de vocabulário, de propósito).
+        if (passadoAoHumano) return recusaPorPassagemAoHumano();
+        // (C01, rodada 6) Teto cheio sem pendência por retomar: recusa de cara, como sempre.
+        if (tetoCheio() && porRetomar.size === 0) return recusaPorTeto();
         // O texto RENDERIZADO vai como `body` da cadeia: os gates de promessa,
         // spinning e disclosure avaliam exatamente o que o contato vai ler. Sem
         // isso, "usar template" seria a forma de escapar dos guardrails de conteúdo.
@@ -2876,40 +3439,53 @@ async function executarTurnoDoAgente(
           language,
           parameterFormat: linha.parameter_format,
         });
+        // (C01, rodada 6) Teto cheio: só a retomada de um template já registrado neste
+        // job passa (mesmo nome, idioma e valores — a identidade do ledger). Template
+        // novo é intenção nova: recusa.
+        if (
+          tetoCheio() &&
+          !(await conhecido({ body: rendered, template: { name: template_name, language, values } }))
+        ) {
+          return recusaPorTeto();
+        }
 
-        const chain = await runBeforeSend({
-          pool,
-          log: runLog,
-          agentOperation,
-          tenantId,
-          leadId,
-          jobId: liveJob().id,
-          channelSessionId: input.channelSessionId,
-          body: rendered,
-          // Só ESTE gate muda; stop, LGPD e pacing continuam valendo integralmente.
-          isTemplate: true,
-          optedOutThisTurn,
-          // Resposta do turno, mesmo sendo template: lê a janela de resposta (0495).
-          resposta: eTurnoDeResposta(liveJob()),
-          crmDailyLimit: null,
-          now: clock(),
-          sleep: deps.sleep,
-          lgpd,
-          send: (finalBody: string) => {
-            seq += 1;
-            return liveChannel().send({
-              tenantId,
-              leadId,
-              jobId: liveJob().id,
-              jobClaim: claimOfJob(liveJob()),
-              agentOperation,
-              seq,
-              conversationId: input.conversationId,
-              body: finalBody,
-              template: { name: template_name, language, values },
-            });
-          },
-        });
+        // (C01) `cadeiaDeEnvio`, não `runBeforeSend`: a passagem ao humano é reconferida
+        // no ponto comum, sob a serialização (achado 3 da segunda revisão adversarial).
+        const chain = await cadeiaDeEnvio(() =>
+          runBeforeSend({
+            pool,
+            log: runLog,
+            agentOperation,
+            tenantId,
+            leadId,
+            jobId: liveJob().id,
+            channelSessionId: input.channelSessionId,
+            body: rendered,
+            // Só ESTE gate muda; stop, LGPD e pacing continuam valendo integralmente.
+            isTemplate: true,
+            optedOutThisTurn,
+            // Resposta do turno, mesmo sendo template: lê a janela de resposta (0495).
+            resposta: eTurnoDeResposta(liveJob()),
+            crmDailyLimit: null,
+            now: clock(),
+            sleep: deps.sleep,
+            lgpd,
+            send: (finalBody: string) =>
+              enviarPeloCanal({
+                tenantId,
+                leadId,
+                jobId: liveJob().id,
+                jobClaim: claimOfJob(liveJob()),
+                agentOperation,
+                conversationId: input.conversationId,
+                body: finalBody,
+                template: { name: template_name, language, values },
+                // (C01) A identidade sem a emenda da cadeia (ver `identidadeDoEnvio`). O
+                // template não passa pelos ajustes de estilo: a cadeia começa do renderizado.
+                ...identidadeDoEnvio(finalBody, finalBody, rendered),
+              }),
+          }),
+        );
 
         if (chain.status === 'vetoed') {
           return { ok: false, error: { code: chain.code, message: chain.message } };
@@ -3010,7 +3586,12 @@ async function executarTurnoDoAgente(
             vetos: falseEmptyInboundVetoCount,
           });
         }
-        if (seq >= maxSendsPerTurn) {
+        if (passadoAoHumano) return recusaPorPassagemAoHumano();
+        // (C01, rodada 6) Teto cheio sem pendência por retomar: recusa de cara, como
+        // sempre. Com pendência, segue até o plano do envio (depois das fotos), que
+        // decide pelo ledger o que é retomada e o que é novo. O erro fica escrito aqui
+        // (é o de `recusaPorTeto`): os testes do autor leem o código dele neste corpo.
+        if (tetoCheio() && porRetomar.size === 0) {
           return {
             ok: false,
             error: {
@@ -3058,8 +3639,19 @@ async function executarTurnoDoAgente(
         // segue (degradar para só texto). Ver `agent/fotos-do-produto.ts`.
         let fotosDoProduto: FotoParaEnvio[] = [];
         let fotosQueFaltaram = 0;
+        // (C01) Ligado pelo fail-safe de vocabulário interno antes de mandar a frase de
+        // espera: é o ÚNICO envio que passa pela reconferência de `enviarPeloCanal`
+        // depois da passagem ao humano.
+        let enviandoFraseDeEspera = false;
+        // (C01, rodada 6) O texto entregue à cadeia neste envio — o do modelo, ou a frase
+        // de espera do fail-safe (o mesmo valor do `body:` dela, abaixo): é dele que a
+        // identidade no ledger parte (`identidadeDoEnvio`).
+        const corpoDaCadeia = (): string =>
+          enviandoFraseDeEspera ? (deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO) : body;
+        // (C01, rodada 7) O `send` da frase de espera é `enviarFraseDeEspera`, no escopo
+        // do turno (rodada 8): só a frase, nunca o plano da retomada deste envio.
         if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
-          const preparadas = await prepararFotosDoProduto(pool, copiarFotoNoStorage(runLog), {
+          const preparadas = await prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog), {
             tenantId,
             conversationId: input.conversationId,
             codigo: produto_codigo,
@@ -3070,6 +3662,12 @@ async function executarTurnoDoAgente(
           fotosDoProduto = preparadas.fotos;
           fotosQueFaltaram = preparadas.tinha - preparadas.fotos.length;
         }
+        // (C01, rodada 6) Teto cheio com pendência por retomar: o plano das mensagens
+        // físicas deste envio, separadas entre as que o ledger já conhece e as novas.
+        // Nenhuma conhecida = intenção nova: recusa por teto, como sempre. Alguma
+        // conhecida: a cadeia roda e o `send` manda SÓ elas (ver `enviarSoAsConhecidas`).
+        const retomada = tetoCheio() ? await planejarRetomada(body, fotosDoProduto) : null;
+        if (retomada !== null && retomada.conhecidas.length === 0) return recusaPorTeto();
         // F4-04: sinaliza (independente do gate F4-01/F4-08) se ESTA candidata é uma
         // promessa fora de tabela — usado só para correlacionar com o jailbreak no fim do
         // turno. A detecção é determinística (decidePromise); sem tabela do tenant = no-op.
@@ -3132,6 +3730,8 @@ async function executarTurnoDoAgente(
             // não é dele, e a única saída seria o silêncio. O follow-up determinístico
             // idem (ver GateContext.internalVocabularyEnforced).
             enforceInternalVocabulary: true,
+            // (C01) As URLs que a base devolveu neste turno passam pelo gate acima.
+            urlsDaBase,
             // Mesmo padrão do vocabulário interno: só o `send_message` arma — é o único
             // corpo escrito pelo modelo. `active` é ter QUALQUER ferramenta de agenda:
             // um agente que só CONSULTA promete "vou verificar" igual, e enquanto a
@@ -3218,20 +3818,22 @@ async function executarTurnoDoAgente(
               const enviar = (
                 corpo: string,
                 media?: FotoParaEnvio,
-              ): Promise<ChannelSendResult> => {
-                seq += 1;
-                return liveChannel().send({
-                  tenantId,
-                  leadId,
-                  jobId: liveJob().id,
-                  jobClaim: claimOfJob(liveJob()),
-                  agentOperation,
-                  seq,
-                  conversationId: input.conversationId,
-                  body: corpo,
-                  ...(media ? { media } : {}),
-                });
-              };
+              ): Promise<ChannelSendResult> =>
+                enviarPeloCanal(
+                  {
+                    tenantId,
+                    leadId,
+                    jobId: liveJob().id,
+                    jobClaim: claimOfJob(liveJob()),
+                    agentOperation,
+                    conversationId: input.conversationId,
+                    body: corpo,
+                    ...(media ? { media } : {}),
+                    ...identidadeDoEnvio(corpo, finalBody, comoACadeiaComeca(corpoDaCadeia())),
+                  },
+                  { fraseDeEspera: enviandoFraseDeEspera },
+                );
+              if (retomada !== null) return enviarSoAsConhecidas(retomada.conhecidas, { enviar, sleep, jitter });
               // Cada foto é uma mensagem física: só vão as que cabem no que resta do teto
               // do turno (a checagem de `max_sends_per_turn` acima roda uma vez, antes).
               // O resto é medido ANTES DE CADA FOTO, depois do texto: o texto acima do
@@ -3240,6 +3842,7 @@ async function executarTurnoDoAgente(
                 sleep,
                 jitter,
                 restantes: () => maxSendsPerTurn - seq,
+                ...(preview ? {} : { jaRegistrada: (foto, legenda) => conhecido({ body: legenda, media: foto }) }),
                 enviarFoto: (foto, legenda) => enviar(legenda, foto),
                 enviarTexto: (texto) =>
                   sendInBubbles(texto, {
@@ -3247,6 +3850,18 @@ async function executarTurnoDoAgente(
                     maxChars: agentConfig?.splitMaxChars ?? 600,
                     // O teto do turno vale para as bolhas: o que passa dele vai junto na última.
                     maxBubbles: Math.max(1, maxSendsPerTurn - seq),
+                    // (C01) … mas só para as bolhas NOVAS. Na re-execução do job, a
+                    // posição recuperada já conta as bolhas que o canal aceitou; sem
+                    // perguntar ao ledger quais são, o mesmo texto era refatiado com
+                    // teto menor e saía junto numa bolha nova — A e B de novo no
+                    // aparelho do cliente (achado 1 da segunda revisão adversarial).
+                    ...(preview
+                      ? {}
+                      : {
+                          // A mesma identidade com que a bolha vai ao ledger (`identidadeDoEnvio`).
+                          jaRegistrada: (bolha: string) =>
+                            conhecido({ body: bolha, ...identidadeDoEnvio(bolha, finalBody, comoACadeiaComeca(corpoDaCadeia())) }),
+                        }),
                     sleep,
                     jitter,
                     // A pausa humana do turno NÃO mora mais aqui: ela subiu para
@@ -3257,7 +3872,7 @@ async function executarTurnoDoAgente(
               });
             },
           };
-          let chain = await runBeforeSend(beforeSendArgs);
+          let chain = await cadeiaDeEnvio(() => runBeforeSend(beforeSendArgs));
           if (chain.status === 'vetoed' && chain.code === 'case_promise_without_case') {
             // Wave 4 — fail-safe da invariante sagrada: o lead NUNCA recebe promessa-de-
             // humano sem caso aberto. 1ª vez no turno: erro-de-ensino (o modelo re-tenta —
@@ -3295,44 +3910,154 @@ async function executarTurnoDoAgente(
             // (perderia pacing/lgpd/stop). ponytail: re-roda a cadeia inteira no fail-safe
             // (raro) — pode reaplicar 1 espera de pacing; aceitável pelo caminho ser
             // excepcional.
-            chain = await runBeforeSend({
-              ...beforeSendArgs,
-              hasOpenCase: true,
-              openedCaseThisTurn: true,
-            });
+            chain = await cadeiaDeEnvio(() =>
+              runBeforeSend({
+                ...beforeSendArgs,
+                hasOpenCase: true,
+                openedCaseThisTurn: true,
+              }),
+            );
           }
           if (chain.status === 'vetoed' && chain.code === 'internal_vocabulary_leak') {
-            // Fail-safe do gate de vazamento — O CLIENTE NUNCA FICA SEM RESPOSTA.
+            // Fail-safe do gate de vazamento — O CLIENTE NUNCA FICA SEM RESPOSTA, E O
+            // TEXTO VETADO NUNCA CHEGA A ELE.
             //
-            // Este gate é REDE, não invariante sagrada (ao contrário do case_promise, cuja
-            // 2ª camada ABRE o caso antes de liberar). Aqui não há o que o sistema possa
-            // fazer no lugar do modelo: ou ele reescreve, ou a escolha é entre uma frase
-            // com um termo técnico e o silêncio. Silêncio é pior — some com o atendimento
-            // sem sintoma, que é o oposto do invariante 4 do sistema vivo. Então: 1º veto
-            // ensina (o modelo re-tenta); persistiu, o envio sai DESARMANDO só este gate —
-            // todos os outros continuam valendo, porque o re-run passa pela cadeia inteira.
-            //
-            // O veto da 1ª tentativa já virou linha em `before_send_traces` (com a
-            // categoria do vazamento) e atividade na timeline: a liberação não apaga a
-            // medição, que é o produto deste gate.
+            // (C01) A versão anterior desarmava o gate no 2º veto e soltava o texto "com
+            // registro": o vocabulário interno chegava ao cliente, só que medido. A
+            // medição é produto deste gate; a liberação não era. Agora os dois lados
+            // valem ao mesmo tempo: 1º veto ensina; 2º ensina e avisa que é a última
+            // tentativa; 3º: o texto vetado não sai, o cliente recebe uma frase curta de
+            // espera, um caso é aberto para uma pessoa da equipe (é ela quem responde),
+            // o lead vai à etapa de passagem e a passagem fica gravada
+            // (`performHumanHandoff`, depois da frase). A frase passa pela cadeia
+            // inteira (pacing, LGPD, stop) — nunca chamamos o canal por fora.
             internalVocabularyVetoCount += 1;
             if (internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO) {
-              return { ok: false, error: { code: chain.code, message: chain.message } };
+              const ultima = internalVocabularyVetoCount === MAX_VETOS_DE_VOCABULARIO_INTERNO - 1;
+              return {
+                ok: false,
+                error: {
+                  code: chain.code,
+                  message: ultima ? `${chain.message} ${AVISO_DE_ULTIMA_TENTATIVA}` : chain.message,
+                },
+              };
             }
             runLog.warn(
-              'fail-safe do gate de vocabulário interno: envio liberado após vetos seguidos',
+              'fail-safe do gate de vocabulário interno: texto vetado não sai — caso aberto e frase de espera enviada',
+              { vetos: internalVocabularyVetoCount },
+            );
+            const caso = await openCase(
+              pool,
               {
-                vetos: internalVocabularyVetoCount,
+                tenantId,
+                conversationId: input.conversationId,
+                agentId: agentConfig?.agentId ?? null,
+              },
+              {
+                title: 'Resposta travada pela revisão automática',
+                // O texto que o modelo tentou mandar: é o que a pessoa precisa ver para
+                // responder no lugar dele.
+                summary: body,
+                // (C01) O caso é aberto ANTES da frase de espera (sem pessoa acionada a frase
+                // não sai), então este texto não pode afirmar que o cliente a recebeu: o
+                // desfecho vem depois (`desfechoDaFraseDeEspera`) e pode ser pendente.
+                blocker:
+                  `Aberto automaticamente: a IA tentou ${internalVocabularyVetoCount} vezes responder com ` +
+                  'vocabulário interno do sistema e a mensagem não saiu. O sistema manda uma frase de espera ' +
+                  'ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
+                source: 'guardrail_autofallback',
+                contextSnapshot: buildCaseContextSnapshot(),
               },
             );
-            // `openedCaseThisTurn` vai pelo valor VIVO (o fail-safe de casos acima pode
-            // tê-lo mudado); reusar o do objeto capturado re-vetaria no case_promise.
-            chain = await runBeforeSend({
+            if (!caso.ok && caso.error.code !== 'case_already_open') {
+              // Sem pessoa acionada não há frase de espera honesta: o erro sobe e o job
+              // re-tenta pela fila (o cliente não fica mudo — fica atrasado, com rastro).
+              const falha = new Error(`fail-safe de vocabulário interno sem caso: ${caso.error.code}`);
+              noteRunError(falha);
+              return {
+                ok: false,
+                error: {
+                  code: 'internal_error',
+                  message: 'não foi possível acionar a equipe — encerre o turno agora.',
+                },
+              };
+            }
+            openedCaseThisTurn = true;
+            moverParaHandoffBestEffort('vocabulario_interno_autofallback');
+            passadoAoHumano = true;
+            // A frase de espera é texto de código, não do modelo: a cadeia inteira vale
+            // (inclusive este gate), menos o spinning — frase fixa repetida entre leads
+            // não é blast, é a mesma razão do aviso de escalação (`enforceSpinning`).
+            // (C01) A frase é texto de código, não a apresentação do produto: sai sem as
+            // fotos que a mensagem vetada pedia (a mensagem vetada não sai mais) e por um
+            // `send` só dela — o plano da retomada do teto cheio é do corpo do modelo.
+            fotosDoProduto = [];
+            enviandoFraseDeEspera = true;
+            const espera = await runBeforeSend({
               ...beforeSendArgs,
-              openedCaseThisTurn,
-              hasOpenCase: hasOpenCase || openedCaseThisTurn,
-              enforceInternalVocabulary: false,
+              body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+              hasOpenCase: true,
+              openedCaseThisTurn: true,
+              enforceSpinning: false,
+              // (C01, rodada 7) Só a frase sai: nunca o `send` do modelo (ver `enviarFraseDeEspera`).
+              send: enviarFraseDeEspera,
             });
+            // (C01) Desfecho por desfecho: só `sent`/`already_sent` é cliente avisado;
+            // `unavailable` registra o erro (achado 3 da revisão adversarial). Ver
+            // `desfechoDaFraseDeEspera`.
+            const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+            // (C01) A PASSAGEM FICA GRAVADA (achado 2 da quarta revisão adversarial). Até
+            // aqui o fail-safe abria o caso, movia a etapa em best-effort e ligava
+            // `passadoAoHumano` — só na closure. `openCase` não grava `force_human` nem
+            // `bot_silenced_until`, que é o que `isLeadInHandoff` lê no início de cada
+            // turno; a etapa de passagem é opt-in do tenant. Num pipeline sem ela, a
+            // próxima mensagem do cliente (ou o retry deste job) voltava ao modelo, que
+            // respondia normal — depois de o cliente ler "Uma pessoa continua a conversa
+            // com você por aqui". Agora o mecanismo canônico: `force_human`, silêncio
+            // durável, crons cancelados e o aviso na Central, com o desfecho da frase
+            // ("essa pessoa sabe que estou vindo?").
+            //
+            // DEPOIS da frase, não antes: `force_human` arma o `stopGate` que a vetaria
+            // (a ordem do autor nos outros gatilhos). O caso não duplica o aviso —
+            // `openCase` escreve só `agent_cases`/`agent_case_events`. Sem `passagem`
+            // (a linha de `passagens_de_atendimento`): as listas de origem e de motivo
+            // são fechadas no código e no banco (CHECK da migration 0291), e nenhuma
+            // descreve este caminho sem mentir na tela (`caso_escalado` é "Uma pessoa da
+            // equipe escalou um atendimento"); valor novo é migration, fora desta
+            // branch. O caso `guardrail_autofallback` é o registro: carrega o texto
+            // vetado, que é o que a pessoa precisa ler.
+            //
+            // Idempotente (re-executar é no-op semântico), mas at-least-once com escritas
+            // separadas e `force_human` primeiro: uma falha no meio deixa a passagem
+            // incompleta, e o retry do job NÃO a refaz (`isLeadInHandoff` pula o turno).
+            // Por isso uma nova tentativa imediata aqui; falhando de novo, o erro não
+            // some (`noteRunError`) e o caso aberto acima é o registro. Ver
+            // `gravarPassagemComNovaTentativa` (achado 2 da quinta revisão adversarial).
+            await gravarPassagemComNovaTentativa(
+              () =>
+                performHumanHandoff(
+                  pool,
+                  { tenantId, leadId, conversationId: input.conversationId },
+                  {
+                    reason: MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
+                    conversationSummary: buildHandoffSummary(previous),
+                    inboxTitle: TITULO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO,
+                    avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
+                    log: runLog,
+                  },
+                ),
+              { log: runLog, noteRunError },
+            );
+            return {
+              ok: false,
+              error: {
+                code: 'internal_vocabulary_leak_handoff',
+                message:
+                  `Sua mensagem NÃO foi enviada: depois de ${internalVocabularyVetoCount} tentativas ela ainda levava ` +
+                  `vocabulário interno do sistema. ${AVISO_AO_MODELO_POR_DESFECHO[desfecho]} ` +
+                  'NÃO escreva mais nada neste turno — encerre agora.',
+              },
+            };
           }
           if (chain.status === 'vetoed') {
             // Cap de warm-up/diário: reescrever o texto não resolve (é rate limit, não
@@ -3372,24 +4097,39 @@ async function executarTurnoDoAgente(
           }
           switch (outcome.kind) {
             case 'sent':
-            case 'already_sent':
+            case 'already_sent': {
+              const avisos = [
+                ...(fotosQueFaltaram > 0
+                  ? [
+                      `${fotosQueFaltaram} foto(s) do produto não puderam ser enviadas; o texto foi. Não diga ao cliente que mandou essas fotos.`,
+                    ]
+                  : []),
+                // (C01, rodada 6) O que ficou de fora na retomada com o teto cheio.
+                ...(retomada !== null && retomada.novas > 0 ? [avisoDaRetomada(retomada.novas)] : []),
+              ];
               return {
                 ok: true,
                 status: 'enviada',
                 message_id: outcome.messageId,
-                ...(produto_codigo !== undefined ? { fotos_enviadas: fotosDoProduto.length } : {}),
-                ...(fotosQueFaltaram > 0
+                ...(produto_codigo !== undefined
                   ? {
-                      aviso: `${fotosQueFaltaram} foto(s) do produto não puderam ser enviadas; o texto foi. Não diga ao cliente que mandou essas fotos.`,
+                      // Na retomada, só as fotos que o ledger conhecia saíram.
+                      fotos_enviadas:
+                        retomada !== null
+                          ? retomada.conhecidas.filter((m) => m.media !== undefined).length
+                          : fotosDoProduto.length,
                     }
                   : {}),
+                ...(avisos.length > 0 ? { aviso: avisos.join(' ') } : {}),
               };
+            }
             case 'queued':
               return {
                 ok: true,
                 status: 'aceita_aguardando_canal',
                 message:
                   'o canal aceitou a mensagem e vai enviá-la quando a sessão voltar — não reenvie.',
+                ...(retomada !== null && retomada.novas > 0 ? { aviso: avisoDaRetomada(retomada.novas) } : {}),
               };
             case 'blocked':
               return {
@@ -3890,6 +4630,18 @@ async function executarTurnoDoAgente(
                   return executeOriginal(...args);
                 }) as typeof mcpTool.execute,
               };
+            } else if (name === FERRAMENTA_DA_BASE && typeof mcpTool.execute === 'function') {
+              // (C01) Guarda as URLs que a base devolveu: só elas passam pelo gate
+              // de vocabulário interno quando carregam um identificador.
+              const executeOriginal = mcpTool.execute.bind(mcpTool);
+              rawTools[name] = {
+                ...mcpTool,
+                execute: (async (...args: Parameters<typeof executeOriginal>) => {
+                  const resultado = await executeOriginal(...args);
+                  for (const url of urlsNoResultado(resultado)) urlsDaBase.add(url);
+                  return resultado;
+                }) as typeof mcpTool.execute,
+              };
             } else {
               rawTools[name] = mcpTool;
             }
@@ -4229,12 +4981,21 @@ async function executarTurnoDoAgente(
         messages: openingMessages,
         tools,
         maxSteps,
+        // (C01) O `token_budget` da versão publicada corta o laço quando o
+        // acumulado passa do teto — mesma régua que o runtime nativo aplica.
+        ...(agentConfig?.tokenBudget !== undefined
+          ? { tetoDeTokensDoTurno: agentConfig.tokenBudget }
+          : {}),
+        // (C01) O laço para ao fim da etapa em que o fail-safe passou o turno a uma
+        // pessoa: o modelo não ganha outra etapa para chamar send_template (ou
+        // qualquer outra ferramenta) depois da frase de espera — o erro de ensino
+        // nas ferramentas de envio é a segunda trava, esta é a primeira.
         // Rascunho: a resposta é o send_message ACEITO; a etapa seguinte só
         // "encerrava". Aceito, e não chamado: o envio vetado pela cadeia
         // before_send volta ao modelo para ele reescrever (o 1º veto ensina).
-        ...(preview?.kind === 'assisted'
-          ? { pararQuando: () => preview.result.candidates.length > 0 }
-          : {}),
+        pararQuando: () =>
+          passadoAoHumano ||
+          (preview?.kind === 'assisted' && preview.result.candidates.length > 0),
         ...(agentConfig !== null
           ? {
               model: agentConfig.model,
@@ -4270,6 +5031,111 @@ async function executarTurnoDoAgente(
       }
     }
 
+    // ═══ (C01, rodada 8) O LAÇO FOI CORTADO POR NOSSO TETO ANTES DE QUALQUER MENSAGEM AO LEAD ═══
+    //
+    // O `token_budget` da versão para o laço ao fim da etapa em que o acumulado passa
+    // do teto (`pararPorTetoDeTokens`) — e a primeira etapa pode passar dele só
+    // consultando uma ferramenta (um contexto grande, uma busca na base). Até aqui o
+    // corte não dizia nada ao turno: sem roteiro, o checkpoint era gravado e o worker
+    // concluía o job com zero envios — o lead ficava mudo, sem retry nem
+    // encaminhamento, e o job "ok" (achado 1 da sétima revisão adversarial; é o
+    // sintoma da C54, cuja chamada de 66 mil tokens cairia neste corte). Agora o corte
+    // volta em `turn.corte` e, se NENHUMA mensagem física saiu ao lead neste job (`seq`
+    // conta as desta execução e as recuperadas das anteriores), o turno segue o mesmo
+    // caminho do fail-safe de vocabulário interno: caso aberto para uma pessoa da
+    // equipe, frase de espera pelo `send` exclusivo dela, passagem ao humano GRAVADA.
+    // Com pelo menos um envio feito nada muda: o lead recebeu algo, o corte só encerra
+    // o laço, como sempre, e fica no log. O fim por etapas (`stepCountIs(maxSteps)`) é
+    // desenho do autor e não passa por aqui; o prazo das chamadas aborta com exceção e
+    // o job re-tenta. Preview não tem lead; turno de retaguarda não fala com ele; turno
+    // descartado (#1943) deixa a resposta para o turno da mensagem nova; `runError` já
+    // vai falhar o job, e o retry roda o modelo de novo.
+    if (
+      !preview &&
+      turn.corte !== null &&
+      seq === 0 &&
+      runError === null &&
+      !passadoAoHumano &&
+      !turnoDescartado &&
+      turnoVaiFalarComOLead(liveJob())
+    ) {
+      const corte = turn.corte;
+      runLog.warn(
+        'fail-safe do corte: o laço do modelo foi cortado antes de qualquer mensagem ao lead — caso aberto e frase de espera',
+        { motivo: corte.motivo, teto: corte.teto, gastos: corte.gastos, etapas: corte.etapas },
+      );
+      // O caso ANTES da frase, como no fail-safe de vocabulário interno: sem pessoa
+      // acionada não há frase de espera honesta. Sem caso (e não é "já havia um"), o
+      // job falha e re-tenta pela fila — o cliente não fica mudo, fica atrasado, com rastro.
+      const caso = await openCase(
+        pool,
+        { tenantId, conversationId: input.conversationId, agentId: agentConfig?.agentId ?? null },
+        {
+          title: TITULO_DO_CASO_POR_CORTE,
+          summary:
+            'A IA não chegou a responder: o laço foi cortado pelo teto de tokens da versão ' +
+            `(${corte.gastos} tokens em ${corte.etapas} etapa(s); teto ${corte.teto}). ` +
+            'Nenhuma mensagem saiu ao cliente neste turno.',
+          blocker:
+            'Aberto automaticamente: a resposta da IA foi cortada por tamanho (teto de tokens da versão) ' +
+            'antes de sair, e nenhuma mensagem chegou ao cliente neste turno. O sistema manda uma frase de ' +
+            'espera ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
+          source: 'guardrail_autofallback',
+          contextSnapshot: buildCaseContextSnapshot(),
+        },
+      );
+      if (!caso.ok && caso.error.code !== 'case_already_open') {
+        throw new Error(`fail-safe do corte sem caso: ${caso.error.code}`);
+      }
+      openedCaseThisTurn = true;
+      moverParaHandoffBestEffort('corte_por_teto_de_tokens');
+      passadoAoHumano = true;
+      // A frase passa pela cadeia inteira (pacing, LGPD, stop), menos o spinning — frase
+      // fixa repetida entre leads não é blast —, e sai pelo `send` só dela.
+      const espera = await runBeforeSend({
+        pool,
+        log: runLog,
+        agentOperation,
+        tenantId,
+        leadId,
+        jobId: liveJob().id,
+        channelSessionId: input.channelSessionId,
+        body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+        optedOutThisTurn,
+        resposta: eTurnoDeResposta(liveJob()),
+        crmDailyLimit: null,
+        now: clock(),
+        sleep: deps.sleep,
+        lgpd,
+        casesEnabled: agentConfig?.casesEnabled ?? false,
+        hasOpenCase: true,
+        openedCaseThisTurn: true,
+        enforceSpinning: false,
+        ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
+        send: enviarFraseDeEspera,
+      });
+      // Desfecho por desfecho (`desfechoDaFraseDeEspera`) e a passagem GRAVADA depois da
+      // frase, com uma nova tentativa — as mesmas peças do fail-safe de vocabulário
+      // interno, pelas mesmas razões (achados 2 e 3 das revisões anteriores).
+      const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+      await gravarPassagemComNovaTentativa(
+        () =>
+          performHumanHandoff(
+            pool,
+            { tenantId, leadId, conversationId: input.conversationId },
+            {
+              reason: MOTIVO_DA_PASSAGEM_POR_CORTE,
+              conversationSummary: buildHandoffSummary(previous),
+              inboxTitle: TITULO_DA_PASSAGEM_POR_CORTE,
+              avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
+              log: runLog,
+            },
+          ),
+        { log: runLog, noteRunError },
+      );
+      runLog.info('fail-safe do corte: passagem ao humano gravada', { desfecho_da_frase: desfecho });
+    }
+
     if (runError !== null) {
       throw runError; // job falha → retry da fila; o ledger segura duplicata de envio
     }
@@ -4294,45 +5160,44 @@ async function executarTurnoDoAgente(
             // #1943: turno descartado como obsoleto → a pergunta do roteiro NÃO
             // sai (segue pendente para o turno seguinte). Também vigia o teto
             // de mensagens físicas do turno (F2-15b).
-            if (!perguntaDoRoteiroPodeSair({ turnoDescartado, seq, maxSendsPerTurn })) return false;
-            const chain = await runBeforeSend({
-              pool,
-              log: runLog,
-              agentOperation,
-              tenantId,
-              leadId,
-              jobId: liveJob().id,
-              channelSessionId: input.channelSessionId,
-              body: texto,
-              optedOutThisTurn,
-              // Sai no MESMO turno da resposta: sem isto, às 3h com a janela de
-              // resposta aberta, o agente responde e a pergunta do roteiro é vetada.
-              resposta: eTurnoDeResposta(liveJob()),
-              crmDailyLimit: null,
-              // A pergunta repete por design (foi feita e não respondida); o
-              // anti-blast vetaria justamente o que esta trava garante. Mesmo
-              // motivo do aviso de escalação.
-              enforceSpinning: false,
-              now: clock(),
-              sleep: deps.sleep,
-              lgpd,
-              ...(deps.knobs.disclosureMode !== undefined
-                ? { disclosureMode: deps.knobs.disclosureMode }
-                : {}),
-              send: (finalBody: string) => {
-                seq += 1;
-                return liveChannel().send({
-                  tenantId,
-                  leadId,
-                  jobId: liveJob().id,
-                  jobClaim: claimOfJob(liveJob()),
-                  agentOperation,
-                  seq,
-                  conversationId: input.conversationId,
-                  body: finalBody,
-                });
-              },
-            });
+            if (!perguntaDoRoteiroPodeSair({ turnoDescartado: turnoDescartado || passadoAoHumano, seq, maxSendsPerTurn })) return false;
+            const chain = await cadeiaDeEnvio(() =>
+              runBeforeSend({
+                pool,
+                log: runLog,
+                agentOperation,
+                tenantId,
+                leadId,
+                jobId: liveJob().id,
+                channelSessionId: input.channelSessionId,
+                body: texto,
+                optedOutThisTurn,
+                // Sai no MESMO turno da resposta: sem isto, às 3h com a janela de
+                // resposta aberta, o agente responde e a pergunta do roteiro é vetada.
+                resposta: eTurnoDeResposta(liveJob()),
+                crmDailyLimit: null,
+                // A pergunta repete por design (foi feita e não respondida); o
+                // anti-blast vetaria justamente o que esta trava garante. Mesmo
+                // motivo do aviso de escalação.
+                enforceSpinning: false,
+                now: clock(),
+                sleep: deps.sleep,
+                lgpd,
+                ...(deps.knobs.disclosureMode !== undefined
+                  ? { disclosureMode: deps.knobs.disclosureMode }
+                  : {}),
+                send: (finalBody: string) =>
+                  enviarPeloCanal({
+                    tenantId,
+                    leadId,
+                    jobId: liveJob().id,
+                    jobClaim: claimOfJob(liveJob()),
+                    agentOperation,
+                    conversationId: input.conversationId,
+                    body: finalBody,
+                  }),
+              }),
+            );
             return chain.status !== 'vetoed' && (chain.outcome.kind === 'sent' || chain.outcome.kind === 'already_sent');
           },
         },
