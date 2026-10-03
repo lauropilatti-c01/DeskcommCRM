@@ -153,6 +153,18 @@ export interface SendInBubblesOpts<T extends BubbleOutcome = BubbleOutcome> {
    * Ausente = sem teto (o comportamento de antes).
    */
   maxBubbles?: number;
+  /**
+   * (C01) "Esta bolha já tem recibo neste job?" — o ledger de envios responde pelo
+   * conteúdo (aceita ou pendente). Consultado para CADA bolha do fatiamento natural
+   * ANTES de aplicar `maxBubbles`: as bolhas conhecidas mantêm a divisão e a
+   * identidade (o canal as devolve como `already_sent`, ou retoma o recibo), e o
+   * teto vale só para as novas. Sem isto a re-execução de um job que já tinha
+   * entregado A e B (teto 3, posição recuperada 2) refatiava o mesmo texto com
+   * teto 1 e mandava "A+B+C" numa bolha só: hash novo, A e B de novo no aparelho
+   * do cliente (achado 1 da segunda revisão adversarial, 03/10/2026). Ausente =
+   * nenhuma bolha é conhecida: exatamente o fatiamento de antes.
+   */
+  jaRegistrada?: (bolha: string) => Promise<boolean>;
 }
 
 /**
@@ -225,11 +237,42 @@ export function splitForSend(
   ];
 }
 
+/**
+ * (C01) O teto de bolhas aplicado SÓ às bolhas novas. `registradas[i]` diz se a
+ * bolha i já tem recibo no job (ela não é mensagem física nova: sai como
+ * `already_sent` ou retoma o recibo pendente). Quando as novas passam de
+ * `restantes`, tudo a partir da última nova que cabe vira uma bolha só, na ordem —
+ * a mesma regra de `splitForSend`, que é o caso particular em que nenhuma bolha é
+ * conhecida. Pura.
+ */
+export function aplicarTetoAsNovas(
+  bolhas: readonly string[],
+  registradas: readonly boolean[],
+  restantes: number,
+): string[] {
+  const novas = bolhas.filter((_, i) => !registradas[i]).length;
+  if (novas <= restantes || restantes < 1) return [...bolhas];
+  let vistas = 0;
+  for (let i = 0; i < bolhas.length; i++) {
+    if (registradas[i]) continue;
+    vistas += 1;
+    if (vistas === restantes) return [...bolhas.slice(0, i), bolhas.slice(i).join("\n\n")];
+  }
+  return [...bolhas];
+}
+
 export async function sendInBubbles<T extends BubbleOutcome>(
   body: string,
   opts: SendInBubblesOpts<T>,
 ): Promise<T> {
-  const bubbles = splitForSend(body, opts.enabled, opts.maxChars, opts.maxBubbles);
+  // (C01) Fatiamento natural primeiro; o teto do turno só depois de saber quais
+  // bolhas o ledger já conhece (ver `jaRegistrada`). Sem `jaRegistrada`, é o
+  // `splitForSend(body, enabled, maxChars, maxBubbles)` de sempre.
+  const naturais = splitForSend(body, opts.enabled, opts.maxChars);
+  const registradas = opts.jaRegistrada
+    ? await Promise.all(naturais.map((bolha) => opts.jaRegistrada!(bolha)))
+    : naturais.map(() => false);
+  const bubbles = aplicarTetoAsNovas(naturais, registradas, opts.maxBubbles ?? Number.POSITIVE_INFINITY);
   if (bubbles.length === 0) return opts.send(body); // corpo vazio: deixa o canal decidir
   let last: T | undefined;
   for (let i = 0; i < bubbles.length; i++) {

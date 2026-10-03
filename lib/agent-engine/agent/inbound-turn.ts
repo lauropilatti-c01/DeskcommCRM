@@ -56,7 +56,7 @@ import { WahaChannelAdapter } from '../edge/channel/waha-adapter';
 // egress de canal — o envio em si vai pelo adapter (ChannelAdapter). Ver F2-25.
 import { applySendOutcome } from '../edge/crm/send-message';
 // (C01) A posição inicial do turno vem do ledger: re-execução continua de onde parou.
-import { posicaoInicialDoJob } from '../edge/crm/send-ledger';
+import { conteudoRegistradoNoJob, posicaoInicialDoJob } from '../edge/crm/send-ledger';
 import {
   LlmBudgetExceededError,
   runModelCall,
@@ -3413,6 +3413,17 @@ async function executarTurnoDoAgente(
                     maxChars: agentConfig?.splitMaxChars ?? 600,
                     // O teto do turno vale para as bolhas: o que passa dele vai junto na última.
                     maxBubbles: Math.max(1, maxSendsPerTurn - seq),
+                    // (C01) … mas só para as bolhas NOVAS. Na re-execução do job, a
+                    // posição recuperada já conta as bolhas que o canal aceitou; sem
+                    // perguntar ao ledger quais são, o mesmo texto era refatiado com
+                    // teto menor e saía junto numa bolha nova — A e B de novo no
+                    // aparelho do cliente (achado 1 da segunda revisão adversarial).
+                    ...(preview
+                      ? {}
+                      : {
+                          jaRegistrada: (bolha: string) =>
+                            conteudoRegistradoNoJob(pool, { tenantId, jobId: liveJob().id, body: bolha }),
+                        }),
                     sleep,
                     jitter,
                     // A pausa humana do turno NÃO mora mais aqui: ela subiu para

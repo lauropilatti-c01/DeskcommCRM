@@ -230,6 +230,22 @@ export async function sendWithLedger(
     ? { kind: "sent", idempotencyKey: key, crmMessageId: message.id }
     : { kind: status, idempotencyKey: key, crmMessageId: message.id };
 }
+/**
+ * (C01) Este conteúdo já tem recibo neste job — aceito, ou pendente a retomar?
+ * Quem fatia a resposta em bolhas pergunta isto para CADA bolha antes de aplicar o
+ * teto do turno ao que falta (achado 1 da segunda revisão adversarial): a bolha
+ * conhecida mantém a divisão e a identidade; o teto vale só para as novas. Só lê.
+ */
+export async function conteudoRegistradoNoJob(
+  db: Queryable,
+  input: { tenantId: string; jobId: string } & Pick<Intent, "body" | "media" | "template">,
+): Promise<boolean> {
+  const store = pgSendLedger(db);
+  const hash = hashDoConteudo(input);
+  const intent: Intent = { ...input, leadId: null, seq: 0 };
+  if ((await store.findAccepted!(intent, hash)) !== null) return true;
+  return (await store.findPendente!(intent, hash)) !== null;
+}
 /** Reconcilia um recibo já existente sem criar intenção nem chamar o canal.
  * Consumidores determinísticos consultam isto antes dos gates de um NOVO envio. */
 export async function reconcileAcceptedSend(
