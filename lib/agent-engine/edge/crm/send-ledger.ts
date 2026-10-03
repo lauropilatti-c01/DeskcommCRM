@@ -39,6 +39,20 @@ type Row = {
   body_hash?: string | null;
   seq?: number | string;
 };
+/**
+ * (C01) A mensagem que o handler gravou para um recibo, nas colunas que identificam
+ * o conteúdo: é por ela que um recibo LEGADO (hash só do texto) é confirmado como
+ * a mesma foto ou o mesmo template antes de a identidade ser reaproveitada.
+ */
+type MensagemPersistida = {
+  id: string;
+  status: string;
+  type: string;
+  body: string | null;
+  media_storage_path: string | null;
+  template_name: string | null;
+  template_language: string | null;
+};
 interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
   find(input: Intent): Promise<Row | null>;
@@ -60,6 +74,10 @@ interface LedgerStore {
   findPendente?(input: Intent, hash: string): Promise<Row | null>;
   /** (C01) A primeira posição livre do job (maior ocupada + 1). */
   nextSeq?(input: Intent): Promise<number>;
+  /** (C01) Os recibos deste job com um `body_hash` e um dos status dados, por posição. */
+  recibosPorHash?(input: Intent, hash: string, status: readonly SendLedgerStatus[]): Promise<Row[]>;
+  /** (C01) A mensagem gravada para um recibo (pela `idempotency_key`), com o que identifica o conteúdo. */
+  mensagemDoRecibo?(org: string, key: string): Promise<MensagemPersistida | null>;
 }
 /** (C01) Quantas vezes procurar posição livre antes de desistir (corrida entre execuções). */
 const TENTATIVAS_DE_POSICAO = 5;
@@ -91,6 +109,60 @@ export function hashDoConteudo(input: Pick<Intent, "body" | "template" | "media"
   if (input.template !== undefined) h.update("template\u0000").update(canonico(input.template)).update("\u0000");
   if (input.media !== undefined) h.update("media\u0000").update(canonico(input.media)).update("\u0000");
   return h.update(input.body).digest("hex");
+}
+/**
+ * (C01) O hash que a versão do autor gravava para TODO envio: só o texto. Para texto
+ * puro é o próprio `hashDoConteudo`; para foto e template é a identidade LEGADA, a dos
+ * recibos gravados antes desta versão — um job que estava no meio quando a versão
+ * trocou tem foto e template aceitos (ou a caminho) com esse hash, e procurá-los só
+ * pelo hash novo era não os reconhecer: a re-execução ganhava outro recibo e o
+ * cliente recebia a foto de novo (achado 2 da terceira revisão adversarial).
+ */
+function hashLegado(input: Pick<Intent, "body" | "template" | "media">): string | null {
+  if (input.template === undefined && input.media === undefined) return null;
+  return createHash("sha256").update(input.body).digest("hex");
+}
+/**
+ * (C01) O recibo legado é ESTE conteúdo? O hash antigo só conhecia o texto: duas fotos
+ * com a mesma legenda (ou sem legenda), e um template com o mesmo texto renderizado de
+ * um texto puro, colidiam nele. A confirmação é pela mensagem gravada: tipo, caminho
+ * da mídia, nome e idioma do template (nome e idioma só ficam gravados quando a
+ * mensagem é marcada enviada; os valores não ficam — o texto renderizado, que é o
+ * hash, já os carrega). Sem mensagem gravada não há confirmação, e o recibo não serve.
+ */
+function mesmoConteudoLegado(input: Intent, m: MensagemPersistida): boolean {
+  if ((m.body ?? "") !== input.body) return false;
+  if (input.template !== undefined) {
+    const t = input.template as { name?: unknown; language?: unknown };
+    return (
+      m.type === "template" &&
+      (m.template_name === null || m.template_name === t.name) &&
+      (m.template_language === null || m.template_language === t.language)
+    );
+  }
+  const caminho = (input.media as { storagePath?: unknown }).storagePath;
+  return (
+    typeof caminho === "string" && m.type !== "text" && m.type !== "template" && m.media_storage_path === caminho
+  );
+}
+/**
+ * (C01) O recibo legado (hash só do texto) deste job que é o mesmo conteúdo, entre os
+ * de um dos status dados: cada candidato é confirmado pela mensagem gravada. Só para
+ * foto e template (texto puro tem o hash de sempre) e só em lojas que sabem ler a
+ * mensagem; o primeiro confirmado, por posição, é o recibo.
+ */
+async function reciboLegado(
+  store: LedgerStore,
+  input: Intent,
+  status: readonly SendLedgerStatus[],
+): Promise<Row | null> {
+  const legado = hashLegado(input);
+  if (legado === null || !store.recibosPorHash || !store.mensagemDoRecibo) return null;
+  for (const recibo of await store.recibosPorHash(input, legado, status)) {
+    const mensagem = await store.mensagemDoRecibo(input.tenantId, recibo.id);
+    if (mensagem !== null && mesmoConteudoLegado(input, mensagem)) return recibo;
+  }
+  return null;
 }
 /**
  * (C01) Conteúdo novo numa posição ocupada vai para a primeira posição livre.
@@ -175,8 +247,10 @@ export async function sendWithLedger(
   // (reaper, retry) gera as bolhas de novo, em posições novas. O que o canal já
   // aceitou com este exato conteúdo — texto, foto ou template — não sai duas
   // vezes, qualquer que seja a posição.
+  // (C01) Segunda chance pelo hash legado (só foto e template): o recibo gravado pela
+  // versão anterior, confirmado pela mensagem — ver `reciboLegado`.
   if (store.findAccepted) {
-    const aceito = await store.findAccepted(input, hash);
+    const aceito = (await store.findAccepted(input, hash)) ?? (await reciboLegado(store, input, ["accepted"]));
     if (aceito)
       return { kind: "already_sent", idempotencyKey: aceito.id, crmMessageId: aceito.crm_message_id };
   }
@@ -188,7 +262,9 @@ export async function sendWithLedger(
   // nascer outra posição para um conteúdo que o canal talvez já tenha segurado
   // (`queued`) e vá entregar: era o cliente recebendo a mesma bolha duas vezes.
   // Se a mensagem foi entregue nesse meio-tempo, o recibo é reconciliado aqui.
-  const pendente = store.findPendente ? await store.findPendente(input, hash) : null;
+  const pendente =
+    (store.findPendente ? await store.findPendente(input, hash) : null) ??
+    (await reciboLegado(store, input, ["requested", "queued"]));
   if (pendente) {
     key = pendente.id;
     existing = await store.message(input.tenantId, key);
@@ -346,6 +422,20 @@ export function pgSendLedger(db: Queryable): LedgerStore {
       );
       return Number(rows[0]?.seq ?? 1);
     },
+    async recibosPorHash(i, hash, status) {
+      const { rows } = await db.query<Row>(
+        "select * from send_ledger where organization_id=$1 and job_id=$2 and body_hash=$3 and status = any($4::text[]) order by seq",
+        [i.tenantId, i.jobId, hash, [...status]],
+      );
+      return rows;
+    },
+    async mensagemDoRecibo(org, key) {
+      const { rows } = await db.query<MensagemPersistida>(
+        "select id,status,type,body,media_storage_path,template_name,template_language from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
+        [org, key],
+      );
+      return rows[0] ?? null;
+    },
   };
 }
 export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
@@ -458,6 +548,29 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
         .maybeSingle();
       if (error) throw error;
       return Number((data as { seq?: number | string } | null)?.seq ?? 0) + 1;
+    },
+    async recibosPorHash(i, hash, status) {
+      const { data, error } = await db
+        .from("send_ledger")
+        .select("id,status,crm_message_id,body_hash,seq")
+        .eq("organization_id", i.tenantId)
+        .eq("job_id", i.jobId)
+        .eq("body_hash", hash)
+        .in("status", [...status])
+        .order("seq");
+      if (error) throw error;
+      return (data ?? []) as Row[];
+    },
+    async mensagemDoRecibo(org, key) {
+      const { data, error } = await db
+        .from("messages")
+        .select("id,status,type,body,media_storage_path,template_name,template_language")
+        .eq("organization_id", org)
+        .eq("metadata->>idempotency_key", key)
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data as MensagemPersistida | null;
     },
   };
 }

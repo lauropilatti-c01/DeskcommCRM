@@ -148,6 +148,19 @@ function bancoFalso() {
       if (linha) Object.assign(linha, { status, crm_message_id: msgId ?? linha.crm_message_id, last_error: erro });
       return { rows: [], rowCount: linha ? 1 : 0 };
     }
+    // (C01, rodada 4) as consultas do recibo LEGADO (hash só do texto): os recibos de um
+    // hash e status dados, e a mensagem gravada. Este banco só conhece mensagens de
+    // texto — foto e template daqui nasceram já com o hash novo, nunca são legado.
+    if (s.startsWith("select * from send_ledger") && s.includes("body_hash=$3 and status = any($4::text[])")) {
+      const [org, jobId, hash, status] = p as [string, string, string, string[]];
+      const linhas = ledger.filter((l) => l.organization_id === org && l.job_id === jobId && l.body_hash === hash && status.includes(l.status)).sort((a, b) => a.seq - b.seq);
+      return { rows: linhas, rowCount: linhas.length };
+    }
+    if (s.startsWith("select id,status,type,body,media_storage_path,template_name,template_language from messages")) {
+      const [, key] = p as [string, string];
+      const m = messages.find((x) => x.idempotency_key === key);
+      return { rows: m ? [{ id: m.id, status: m.status, type: "text", body: m.body, media_storage_path: null, template_name: null, template_language: null }] : [], rowCount: m ? 1 : 0 };
+    }
     if (s.startsWith("select id,status from messages")) {
       const [org, key] = p as [string, string];
       void org;
