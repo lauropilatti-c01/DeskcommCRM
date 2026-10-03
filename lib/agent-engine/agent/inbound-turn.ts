@@ -177,7 +177,12 @@ import {
 } from './skills';
 import { readSkillReference, skillHasReferences } from './skill-references';
 import { READ_ONLY_TOOLS, wrapToolsWithBreaker, type ToolBreakerThresholds } from './tool-breaker';
-import { loadChannelProvider, nomesDasFerramentas, runBeforeSend } from '../guardrails/before-send';
+import {
+  loadChannelProvider,
+  nomesDasFerramentas,
+  runBeforeSend,
+  type BeforeSendResult,
+} from '../guardrails/before-send';
 // (C01) O aviso de última tentativa do fail-safe de vocabulário interno.
 import { AVISO_DE_ULTIMA_TENTATIVA } from '../guardrails/vazamento-interno';
 import { isStatusSendable } from '../../channels/meta/template-binding';
@@ -495,6 +500,83 @@ export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 3;
  */
 export const FRASE_DE_ESPERA_PADRAO =
   'Para te responder direitinho, vou pedir ajuda à equipe. Uma pessoa continua a conversa com você por aqui.';
+
+/**
+ * (C01) Em que pé ficou a frase de espera do fail-safe, para quem decide o resto do
+ * turno e para o que se diz ao modelo:
+ * - `entregue`: o canal aceitou (`sent`), ou já tinha aceitado numa execução
+ *   anterior do job (`already_sent`) — só aqui o cliente está avisado;
+ * - `a_caminho`: o canal segurou (`queued`, sessão fora) e entrega quando voltar —
+ *   não se reenvia;
+ * - `pendente`: não saiu agora e o job vai re-tentar pela fila (`unavailable`,
+ *   `failed`, veto da cadeia) — com a MESMA identidade no ledger, sem duplicar;
+ * - `nao_sai`: o contato pediu para não receber mensagens (`blocked`); o fim do
+ *   turno cancela o job.
+ */
+export type DesfechoDaFraseDeEspera = 'entregue' | 'a_caminho' | 'pendente' | 'nao_sai';
+
+/**
+ * (C01) Trata, um a um, os desfechos da frase de espera do fail-safe de vocabulário
+ * interno (achado 3 da revisão adversarial, 03/10/2026). Antes, qualquer resultado
+ * que não fosse veto entrava em `outcomes` e o turno fechava normal: com o canal
+ * indisponível (`unavailable`), o cliente ficava sem o aviso, o recibo ficava
+ * 'requested' e ninguém voltava para mandá-lo — enquanto o envio normal registra
+ * o erro e o job re-tenta. Aqui o `unavailable` faz o mesmo que lá: o turno falha e
+ * a re-execução manda a frase com a mesma identidade (o ledger reconhece o que já
+ * saiu). `failed` e `blocked` seguem para o fim do turno como todo envio
+ * (`failed` re-tenta, `blocked` cancela o job).
+ */
+export function desfechoDaFraseDeEspera(
+  espera: BeforeSendResult,
+  efeitos: {
+    outcomes: ChannelSendResult[];
+    noteRunError: (err: Error) => void;
+    log: { error(msg: string, fields?: Record<string, unknown>): void };
+  },
+): DesfechoDaFraseDeEspera {
+  if (espera.status === 'vetoed') {
+    efeitos.log.error('frase de espera vetada pela cadeia — cliente sem resposta neste turno', {
+      code: espera.code,
+    });
+    efeitos.noteRunError(new Error(`frase de espera vetada: ${espera.code}`));
+    return 'pendente';
+  }
+  const desfecho = espera.outcome;
+  efeitos.outcomes.push(desfecho);
+  switch (desfecho.kind) {
+    case 'sent':
+    case 'already_sent':
+      return 'entregue';
+    case 'queued':
+      return 'a_caminho';
+    case 'blocked':
+      return 'nao_sai';
+    case 'failed':
+      // O fim do turno re-tenta o job ao ver um `failed` em `outcomes` (mesmo
+      // caminho do envio normal: a posição é rotacionada na re-execução).
+      return 'pendente';
+    case 'unavailable':
+      efeitos.log.error('frase de espera não saiu: canal indisponível — job re-tentado pela fila', {
+        reason: desfecho.reason,
+      });
+      efeitos.noteRunError(
+        new Error(`frase de espera não enviada: canal indisponível (${desfecho.reason}) — job re-tentado pela fila`),
+      );
+      return 'pendente';
+  }
+}
+
+/** (C01) O que o modelo lê sobre a frase de espera, conforme o desfecho — nunca "o cliente recebeu" sem ter recebido. */
+export const AVISO_AO_MODELO_POR_DESFECHO: Record<DesfechoDaFraseDeEspera, string> = {
+  entregue:
+    'O cliente recebeu uma frase de espera e a conversa passou a uma pessoa da equipe.',
+  a_caminho:
+    'A conversa passou a uma pessoa da equipe; o canal entrega a frase de espera ao cliente quando a sessão voltar.',
+  pendente:
+    'A conversa passou a uma pessoa da equipe; a frase de espera ao cliente ainda não saiu e o sistema vai tentar de novo.',
+  nao_sai:
+    'A conversa passou a uma pessoa da equipe; o cliente pediu para não receber mensagens e a frase de espera não sai.',
+};
 
 /**
  * O mesmo degrau para o veto de `false_empty_inbound`, e pela mesma assimetria.
@@ -3458,22 +3540,18 @@ async function executarTurnoDoAgente(
               openedCaseThisTurn: true,
               enforceSpinning: false,
             });
-            if (espera.status === 'vetoed') {
-              runLog.error('frase de espera vetada pela cadeia — cliente sem resposta neste turno', {
-                code: espera.code,
-              });
-              noteRunError(new Error(`frase de espera vetada: ${espera.code}`));
-            } else {
-              outcomes.push(espera.outcome);
-            }
+            // (C01) Desfecho por desfecho: só `sent`/`already_sent` é cliente avisado;
+            // `unavailable` registra o erro e o job re-tenta com a mesma identidade
+            // (achado 3 da revisão adversarial). Ver `desfechoDaFraseDeEspera`.
+            const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
             return {
               ok: false,
               error: {
                 code: 'internal_vocabulary_leak_handoff',
                 message:
                   `Sua mensagem NÃO foi enviada: depois de ${internalVocabularyVetoCount} tentativas ela ainda levava ` +
-                  'vocabulário interno do sistema. O cliente recebeu uma frase de espera e a conversa passou a uma ' +
-                  'pessoa da equipe. NÃO escreva mais nada neste turno — encerre agora.',
+                  `vocabulário interno do sistema. ${AVISO_AO_MODELO_POR_DESFECHO[desfecho]} ` +
+                  'NÃO escreva mais nada neste turno — encerre agora.',
               },
             };
           }
