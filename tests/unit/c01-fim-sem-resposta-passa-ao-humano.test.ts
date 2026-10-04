@@ -334,4 +334,28 @@ describe("(C01) a ligação no turno, pelo código", () => {
     expect(frase).toBeGreaterThan(caso);
     expect(passagem).toBeGreaterThan(frase);
   });
+
+  it("(i, rodada 3b) a frase de cada fail-safe leva o contexto de operação do agente à cadeia e ao canal", () => {
+    // A escolta da preparação: o contexto lido na guarda do modo fica na marca e vai ao
+    // aviso, que o passa a `runBeforeSend` e a `channel.send` (o comportamento, contra o
+    // banco, em `tests/invariants/c01-falha-em-toda-a-preparacao.test.ts`).
+    expect(TURNO).toMatch(
+      /if \(agentOperation\) setExecutionAgentOperation\(agentOperation\);\n {2}marca\.agentOperation = agentOperation \?\? null;/,
+    );
+    const escolta = TURNO.slice(TURNO.indexOf("async function passarAoHumanoPelaFalhaNaPreparacao("));
+    expect(escolta.slice(0, escolta.indexOf("await gravarPassagemComNovaTentativa("))).toMatch(
+      /\.\.\.\(marca\.agentOperation !== null \? \{ agentOperation: marca\.agentOperation \} : \{\}\),/,
+    );
+    const AVISO = readFileSync("lib/agent-engine/agent/aviso-de-escalacao.ts", "utf8");
+    expect(AVISO.match(/\.\.\.\(opts\.agentOperation !== undefined \? \{ agentOperation: opts\.agentOperation \} : \{\}\),/g)).toHaveLength(2);
+    // O fail-safe do corpo (1c, corte e última tentativa) e o das travas de conteúdo (1d)
+    // passam por `passarAoHumanoSemResposta`: a cadeia recebe o contexto, e o `send` só
+    // da frase (`enviarFraseDeEspera`) também.
+    const semResposta = TURNO.slice(TURNO.indexOf("const passarAoHumanoSemResposta = async"));
+    expect(semResposta.slice(0, semResposta.indexOf("send: enviarFraseDeEspera,"))).toMatch(
+      /const espera = await runBeforeSend\(\{\s*pool,\s*log: runLog,\s*agentOperation,/,
+    );
+    const frase = TURNO.slice(TURNO.indexOf("const enviarFraseDeEspera = (finalBody: string)"));
+    expect(frase.slice(0, frase.indexOf("{ fraseDeEspera: true }"))).toMatch(/\n {8}agentOperation,\n/);
+  });
 });

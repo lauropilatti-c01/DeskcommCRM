@@ -1,5 +1,6 @@
 import { prospectingConversationContext } from "@/lib/prospecting/context";
 import { setExecutionAgentOperation } from '@/lib/atendimento/fronteira-server';
+import type { AgentOperationContext } from '@/lib/ai/agents/operation';
 import { TIPOS_DE_CASO, TIPOS_DE_CASO_PARA_A_IA } from "@/lib/ai/case-copy";
 import { DEFAULT_CHANNEL_PROVIDER } from '@/lib/channels/capabilities';
 import { applyPreviewPolicy, previewGateContext, type TurnPreview } from './preview';
@@ -1244,6 +1245,13 @@ export interface MarcaDaPreparacao {
   desviosConferidos: boolean;
   /** O corpo do turno começou: dali em diante quem decide é o `catch` do turno. */
   corpoComecou: boolean;
+  /**
+   * (Rodada 3b) O contexto de operação do agente lido na guarda do modo: vai com a frase
+   * de espera até a cadeia e o canal, que reconferem o modo no envio (o agente pausado ou
+   * passado para assistido depois do caso aberto não fala). `null` sem revisão de
+   * operação (como nos outros envios do turno).
+   */
+  agentOperation: AgentOperationContext | null;
 }
 
 export const marcaDaPreparacaoNova = (): MarcaDaPreparacao => ({
@@ -1251,6 +1259,7 @@ export const marcaDaPreparacaoNova = (): MarcaDaPreparacao => ({
   agentId: null,
   desviosConferidos: false,
   corpoComecou: false,
+  agentOperation: null,
 });
 
 /**
@@ -1408,6 +1417,8 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
             now: ctx.now(),
             log,
             agentId: marca.agentId,
+            // (Rodada 3b) O modo do agente reconferido sob o lock e na borda do envio.
+            ...(marca.agentOperation !== null ? { agentOperation: marca.agentOperation } : {}),
             ...(ctx.disclosureMode !== undefined ? { disclosureMode: ctx.disclosureMode } : {}),
             ...(ctx.sleep !== undefined ? { sleep: ctx.sleep } : {}),
           },
@@ -2908,6 +2919,7 @@ async function executarTurnoDoAgente(
         }
       : undefined;
   if (agentOperation) setExecutionAgentOperation(agentOperation);
+  marca.agentOperation = agentOperation ?? null;
   if (agentConfig !== null) {
     runLog.info('config do agente publicada em uso', {
       agent_id: agentConfig.agentId,

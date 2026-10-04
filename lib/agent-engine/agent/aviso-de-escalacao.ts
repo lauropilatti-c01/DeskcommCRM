@@ -1,4 +1,5 @@
 import type {JobClaim} from "../queue/claim";
+import type { AgentOperationContext } from '@/lib/ai/agents/operation';
 /**
  * O ENVIO do aviso de que a IA está saindo de campo — lado do MOTOR (`pg`).
  *
@@ -114,6 +115,15 @@ export interface AvisoDeEscalacaoOpts {
    * `inbound-turn.ts`), a mesma do fail-safe do corpo do turno.
    */
   corpo?: string;
+  /**
+   * (C01, -c01.3, rodada 3b) O contexto de operação do agente lido na guarda do modo do
+   * turno (versão publicada, revisão, modo automático). Com ele, a cadeia reconfere o
+   * agente sob o lock do número (`runBeforeSend`) e a borda do envio reconfere antes de
+   * mandar (`channel.send` → `sendTurnMessage`), como nos outros envios do turno: o agente
+   * pausado ou passado para assistido depois de a escolta da preparação abrir o caso não
+   * manda a frase de espera (regressão achada na 3ª revisão adversarial da -c01.3).
+   */
+  agentOperation?: AgentOperationContext;
 }
 
 /**
@@ -174,8 +184,10 @@ export async function avisarLeadDaEscalacao(
       ...(opts.lgpd !== undefined ? { lgpd: opts.lgpd } : {}),
       ...(opts.agentId !== undefined ? { agentId: opts.agentId } : {}),
       ...(opts.disclosureMode !== undefined ? { disclosureMode: opts.disclosureMode } : {}),
+      ...(opts.agentOperation !== undefined ? { agentOperation: opts.agentOperation } : {}),
       send: (finalBody) =>
         opts.channel.send({
+          ...(opts.agentOperation !== undefined ? { agentOperation: opts.agentOperation } : {}),
           tenantId: ids.tenantId,
           leadId: ids.leadId,
           jobId: ids.jobId,

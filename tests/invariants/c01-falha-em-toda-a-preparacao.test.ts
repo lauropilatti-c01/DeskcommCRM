@@ -33,6 +33,12 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *     resposta segura a frase: a passagem sai, a mensagem automática não;
  *   - o limite: com o próprio ledger fora, a escolta não dispara (não dá para saber se o
  *     lead já tem resposta).
+ *
+ * (Rodada 3b, regressão achada na 3ª revisão do Codex) A escolta reconfere o modo do
+ * agente no envio: o agente pausado ou passado para assistido DEPOIS de a escolta abrir o
+ * caso (durante as consultas do aviso) não manda a frase de espera; o contexto de
+ * operação do agente chega à cadeia (que reconfere sob o lock do número) e ao canal (que
+ * reconfere na borda do envio).
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -76,6 +82,10 @@ let m: Modules;
 
 /** Tudo o que chegou ao canal, na ordem. */
 let enviados: string[] = [];
+/** (Rodada 3b) A entrada inteira de cada envio ao canal. */
+let entradas: Array<{ body: string; agentOperation?: unknown }> = [];
+/** (Rodada 3b) O gancho que troca o modo do agente chegou a rodar. */
+let modoTrocado = false;
 /** O texto de cada chamada ao modelo (fora o checkpoint), para conferir a abertura. */
 let prompts: string[] = [];
 
@@ -137,13 +147,18 @@ function modelo() {
  * erro do `statement_timeout`. `connect()` (as transações da cadeia de envio) segue o
  * pool real.
  */
-function poolQueFalha(falha: string): pg.Pool {
+function poolQueFalha(falha: string, antesDaConsulta?: (sql: string) => Promise<void>): pg.Pool {
   return new Proxy(pool, {
     get(alvo, prop) {
       if (prop === "query") {
         return (sql: unknown, ...resto: unknown[]) => {
           const textoDoSql = typeof sql === "string" ? sql : (sql as { text?: string })?.text ?? "";
           if (textoDoSql.includes(falha)) return Promise.reject(new Error(ERRO_DO_BANCO));
+          if (antesDaConsulta !== undefined) {
+            return antesDaConsulta(textoDoSql).then(() =>
+              (alvo.query as (...a: unknown[]) => unknown)(sql, ...resto),
+            );
+          }
           return (alvo.query as (...a: unknown[]) => unknown)(sql, ...resto);
         };
       }
@@ -177,8 +192,9 @@ function montaHandler() {
     channel: () =>
       ({
         channel: "captura",
-        send: async (i: { body: string }) => {
+        send: async (i: { body: string; agentOperation?: unknown }) => {
           enviados.push(i.body);
+          entradas.push(i);
           const n = enviados.length;
           return { kind: "sent", idempotencyKey: `k${n}`, messageId: `m${n}` };
         },
@@ -195,6 +211,7 @@ async function rodaTurno(
   falha: string,
   maxAttempts: number,
   antes?: (jobId: string) => Promise<void>,
+  antesDaConsulta?: (sql: string) => Promise<void>,
 ): Promise<{ erro: Error | null; jobId: string }> {
   await pool.query("update job_queue set status = 'done' where status = 'pending'");
   const { job } = await m.queue.enqueueJob(pool, ORG, {
@@ -213,7 +230,7 @@ async function rodaTurno(
   const [claimed] = await m.queue.claimJobs(pool, { workerId: "preparo", maxConcurrency: 1 });
   expect(claimed?.id).toBe(job.id);
   try {
-    await montaHandler()(claimed!, poolQueFalha(falha), { workerId: "preparo" });
+    await montaHandler()(claimed!, poolQueFalha(falha, antesDaConsulta), { workerId: "preparo" });
     await m.queue.completeJob(pool, claimed!.id, "preparo");
     return { erro: null, jobId: job.id };
   } catch (err) {
@@ -290,7 +307,12 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   enviados = [];
+  entradas = [];
+  modoTrocado = false;
   prompts = [];
+  await pool.query("update ai_agents set paused_at = null, operation_mode = 'automatic' where id = $1", [
+    AGENTE,
+  ]);
   await pool.query("delete from agent_case_events where organization_id = $1", [ORG]);
   await pool.query("delete from agent_cases where organization_id = $1", [ORG]);
   await pool.query("delete from send_ledger where organization_id = $1", [ORG]);
@@ -450,5 +472,75 @@ describe("(C01, -c01.3, rodada 3) a falha em qualquer ponto da preparação, na 
     expect(await statusDoJob(jobId)).toBe("dead");
     expect(enviados).toEqual([]);
     await esperaSemPassagem();
+  });
+});
+
+/**
+ * (Rodada 3b) O gancho: na primeira consulta do aviso (o idioma da organização), com o
+ * caso da escolta já aberto, roda `troca` sobre o agente — o operador pausando ou
+ * passando para assistido enquanto o aviso consulta o banco.
+ */
+function trocaOModoDepoisDoCaso(troca: string) {
+  return async (sql: string) => {
+    if (modoTrocado || !sql.includes("select locale from organizations where id = $1")) return;
+    const { rows } = await pool.query(
+      "select 1 from agent_cases where organization_id = $1 and conversation_id = $2",
+      [ORG, CONV],
+    );
+    if (rows.length === 0) return;
+    await pool.query(troca, [AGENTE]);
+    modoTrocado = true;
+  };
+}
+
+describe("(C01, -c01.3, rodada 3b) a escolta da preparação reconfere o modo do agente no envio", () => {
+  it.each([
+    { modo: "pausado", troca: "update ai_agents set paused_at = now() where id = $1" },
+    { modo: "assistido", troca: "update ai_agents set operation_mode = 'assisted' where id = $1" },
+  ])(
+    "o agente $modo entre a abertura do caso e o envio do aviso: a frase de espera não sai",
+    async ({ troca }) => {
+      const { erro, jobId } = await rodaTurno("from lead_checkpoints", 1, undefined, trocaOModoDepoisDoCaso(troca));
+
+      expect(modoTrocado).toBe(true);
+      expect(erro?.message).toBe(ERRO_DO_BANCO);
+      expect(await statusDoJob(jobId)).toBe("dead");
+      // Sem a correção: a frase saía com o agente pausado ou assistido.
+      expect(enviados).toEqual([]);
+      // O caso foi aberto antes da troca: a equipe tem o registro.
+      const { casos } = await estadoDaPassagem();
+      expect(casos).toHaveLength(1);
+    },
+  );
+
+  it("controle: o agente ativo, o mesmo ponto do aviso — a frase de espera sai", async () => {
+    const { erro, jobId } = await rodaTurno(
+      "from lead_checkpoints",
+      1,
+      undefined,
+      trocaOModoDepoisDoCaso("select $1::uuid"),
+    );
+
+    expect(modoTrocado).toBe(true);
+    expect(erro?.message).toBe(ERRO_DO_BANCO);
+    expect(await statusDoJob(jobId)).toBe("dead");
+    expect(enviados).toEqual([m.turno.FRASE_DE_ESPERA_PADRAO]);
+    await esperaPassagemPelaFalha();
+  });
+
+  it("a frase leva ao canal o contexto de operação do agente lido na guarda do modo (o que a borda do envio reconfere)", async () => {
+    const { rows } = await pool.query<{ revisao: string }>(
+      "select operation_revision::text as revisao from ai_agents where id = $1",
+      [AGENTE],
+    );
+    await rodaTurno("from lead_checkpoints", 1);
+
+    expect(entradas.map((e) => e.body)).toEqual([m.turno.FRASE_DE_ESPERA_PADRAO]);
+    expect(entradas[0]!.agentOperation).toEqual({
+      organizationId: ORG,
+      agentId: AGENTE,
+      versionId: VERSAO,
+      revision: rows[0]!.revisao,
+    });
   });
 });
