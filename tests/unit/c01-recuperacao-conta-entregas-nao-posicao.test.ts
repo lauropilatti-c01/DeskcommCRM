@@ -361,7 +361,8 @@ describe("(C01) a ligação no turno", () => {
     );
     expect(FONTE).toMatch(
       // (rodada 5) A contagem é por chave: `contaNoTeto` (ver `c01-recibo-retomado-conta-uma-vez`).
-      /const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
+      // (-c01.3, rodada 3) Entre o envio e a contagem, a evidência de resposta.
+      /const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
     );
     expect(FONTE.match(/posicao \+= 1/g)).toHaveLength(1);
     expect(FONTE.match(/seq \+= 1/g)).toHaveLength(1);
@@ -391,9 +392,12 @@ describe("(C01) a ligação no turno", () => {
     expect(FONTE.match(/!leadTemResposta &&/g)).toHaveLength(3);
     expect(FONTE.match(/!leadTemResposta \|\| respostaAoLead === null/g)).toHaveLength(1);
     expect(FONTE).toMatch(/let seq = estadoInicial\.enviadas;\n(?: {2}\/\/.*\n)*\s*let leadTemResposta = estadoInicial\.enviadas > 0;/);
+    // (-c01.3, rodada 3) A evidência é marcada logo depois do aceite do canal, antes de
+    // qualquer outra espera (ver `tests/invariants/c01-aceite-antes-da-consulta.test.ts`).
     expect(FONTE).toMatch(
-      /if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}\s*registrarRespostaAoLead\(resultado\.kind\);/,
+      /const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\n/,
     );
+    expect(FONTE.match(/registrarRespostaAoLead\(/g)).toHaveLength(2);
     expect(FONTE.match(/leadTemResposta = true/g)).toHaveLength(1);
     // (-c01.3) O quarto `maxSendsPerTurn - seq` é o que resta para a trava de texto longo.
     expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(4);

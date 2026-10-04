@@ -3543,6 +3543,11 @@ async function executarTurnoDoAgente(
     // houver; senão a próxima depois da maior aceita.
     const falhada = falhadas[0];
     const resultado = await liveChannel().send({ ...envio, seq: falhada?.seq ?? posicao + 1 });
+    // (C01, -c01.3, rodada 3) A evidência de resposta é marcada logo depois do aceite,
+    // antes de qualquer outra espera: se a consulta da posição falhada cair depois de
+    // um `sent`, o `catch` da última tentativa já vê o lead respondido e não manda a
+    // frase de espera numa conversa respondida (achado 3 da 2ª revisão do Codex).
+    registrarRespostaAoLead(resultado.kind);
     if (resultado.kind !== 'already_sent') {
       if (falhada === undefined) posicao += 1;
       else if (await posicaoFalhadaFoiOcupada(pool, { tenantId, jobId: liveJob().id, ...falhada })) {
@@ -3551,7 +3556,6 @@ async function executarTurnoDoAgente(
       }
       if (contaNoTeto(resultado)) seq += 1;
     }
-    registrarRespostaAoLead(resultado.kind);
     // (C01, rodada 6) A pendência da recuperação que esta chave retomou sai da lista.
     if (resultado.kind !== 'unavailable') porRetomar.delete(resultado.idempotencyKey);
     return resultado;

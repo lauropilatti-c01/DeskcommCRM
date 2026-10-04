@@ -387,7 +387,8 @@ describe("(C01) recuperação pelo send_ledger — o caso C54 inteiro", () => {
     // `seq` do recibo; `seq` (a contagem do teto) só cresce quando algo de fato sai.
     expect(turno).toMatch(/const estadoInicial = preview\s*\?\s*\{ posicao: 0, enviadas: 0, pendentes: \[\], falhadas: \[\] \}\s*:\s*await estadoInicialDoJob\(pool, \{ tenantId, jobId: liveJob\(\)\.id \}\);/);
     expect(turno).toMatch(/let posicao = estadoInicial\.posicao;\s*let seq = estadoInicial\.enviadas;/);
-    expect(turno).toMatch(/const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/);
+    // (-c01.3, rodada 3) Entre o envio e a posição, a evidência de resposta (`registrarRespostaAoLead`).
+    expect(turno).toMatch(/const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/);
     // Posição e contagem só avançam dentro de `enviarPeloCanal`: nenhum outro `posicao += 1`
     // ou `seq += 1`, nenhum outro `.send(`.
     expect(turno.match(/posicao \+= 1/g)).toHaveLength(1);

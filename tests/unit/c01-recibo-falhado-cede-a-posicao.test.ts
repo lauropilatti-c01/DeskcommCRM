@@ -419,8 +419,9 @@ describe("(C01) a ligação pelo código", () => {
     expect(TURNO).toMatch(/\? \{ posicao: 0, enviadas: 0, pendentes: \[\], falhadas: \[\] \}/);
     expect(TURNO).toMatch(/const falhadas = \[\.\.\.estadoInicial\.falhadas\];/);
     expect(TURNO.match(/liveChannel\(\)\.send\(/g)).toHaveLength(1);
+    // (-c01.3, rodada 3) Entre o envio e a posição, a evidência de resposta (`registrarRespostaAoLead`).
     expect(TURNO).toMatch(
-      /const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
+      /const falhada = falhadas\[0\];\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
     );
     expect(TURNO).toMatch(
       /import \{ conteudoRegistradoNoJob, estadoInicialDoJob, posicaoFalhadaFoiOcupada \} from '\.\.\/edge\/crm\/send-ledger';/,
