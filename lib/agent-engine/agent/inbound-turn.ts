@@ -553,6 +553,17 @@ export const FRASE_DE_ESPERA_PADRAO =
   'Para te responder direitinho, vou pedir ajuda à equipe. Uma pessoa continua a conversa com você por aqui.';
 
 /**
+ * (C01, -c01.3, rodada 3) O que a abertura do turno diz quando o índice de notas ou os
+ * compromissos não puderam ser lidos: a leitura faltou — nunca "não há".
+ */
+export const INDICE_DE_NOTAS_NAO_LIDO =
+  '— as notas deste lead não puderam ser lidas neste turno. NÃO conclua que não há registro dele: ' +
+  'se precisar de algo de antes, pergunte ao cliente.';
+export const COMPROMISSOS_NAO_LIDOS =
+  '- (os compromissos deste contato não puderam ser lidos neste turno. NÃO afirme que ele tem ou ' +
+  'que não tem compromisso marcado.)';
+
+/**
  * (C01) Em que pé ficou a frase de espera do fail-safe, para quem decide o resto do
  * turno e para o que se diz ao modelo:
  * - `entregue`: o canal aceitou (`sent`), ou já tinha aceitado numa execução
@@ -1213,6 +1224,260 @@ async function briefingDoCheckpointDuravel(
       error: (err instanceof Error ? err.message : String(err)).slice(0, 120),
     });
     return montar(null);
+  }
+}
+
+/**
+ * (C01, -c01.3, rodada 3) Até onde a preparação do turno chegou: o que a escolta
+ * `comPassagemSeAPreparacaoFalhar` precisa saber para decidir a passagem. O turno a
+ * preenche à medida que passa por cada ponto.
+ */
+export interface MarcaDaPreparacao {
+  /** O agente fala neste turno: o turno passou da guarda do modo (pausado, assistido). */
+  agenteFala: boolean;
+  /** O agente resolvido: autor do caso e ator do envio da frase. */
+  agentId: string | null;
+  /**
+   * Os desvios determinísticos (pedido de humano, suspeita de opt-out) foram conferidos
+   * e não dispararam. Antes disso, a escolta confere ela mesma a suspeita de opt-out.
+   */
+  desviosConferidos: boolean;
+  /** O corpo do turno começou: dali em diante quem decide é o `catch` do turno. */
+  corpoComecou: boolean;
+}
+
+export const marcaDaPreparacaoNova = (): MarcaDaPreparacao => ({
+  agenteFala: false,
+  agentId: null,
+  desviosConferidos: false,
+  corpoComecou: false,
+});
+
+/**
+ * (C01, -c01.3, rodada 3) A FALHA NA PREPARAÇÃO DO TURNO, NA ÚLTIMA TENTATIVA, PASSA À
+ * EQUIPE.
+ *
+ * O `catch` da última tentativa (item 1c-i) cobre o corpo do turno, e a rodada 2 levou
+ * até ele a falha da compactação. O resto da preparação — playbook, checkpoint, contexto
+ * do lead, ledger, travas — ficava fora: um `statement_timeout` numa dessas leituras, na
+ * última tentativa, levava o job a 'dead' sem caso, sem frase de espera e sem passagem
+ * (achado 2 da 2ª revisão adversarial da -c01.3). Esta escolta envolve o turno inteiro,
+ * como a do orçamento, e só age quando:
+ *
+ * - o agente fala neste turno (`marca.agenteFala`): antes da guarda do modo a escolta
+ *   não sabe se o agente está pausado ou assistido — nesses, nada sai;
+ * - o corpo do turno ainda não começou (`marca.corpoComecou`): dali em diante o `catch`
+ *   do turno decide, com o estado do turno na mão;
+ * - o turno fala com o lead e a falha esgota as tentativas (`falhaEsgotaAsTentativas`:
+ *   lease, o que a fila cancela ou adia, o teto de orçamento — que a escolta de fora
+ *   trata).
+ *
+ * As leituras auxiliares que podem faltar sem risco (o índice de notas, os compromissos,
+ * a contagem de notas do log) degradam no próprio turno, com aviso no log: o turno
+ * segue e responde. O que sobra chega aqui. O erro ORIGINAL sobe sempre.
+ */
+export async function comPassagemSeAPreparacaoFalhar<T>(
+  ctx: {
+    pool: pg.Pool;
+    job: JobRow;
+    conversationId: string;
+    channelSessionId: string;
+    marca: MarcaDaPreparacao;
+    /** O canal do turno, com o agente como ator — criado só no caminho de erro. */
+    canal: (agentId: string | null) => ChannelAdapter;
+    fraseDeEspera: string;
+    now: () => Date;
+    log: Logger;
+    disclosureMode?: 'inject' | 'veto';
+    sleep?: (ms: number) => Promise<void>;
+  },
+  chamada: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await chamada();
+  } catch (err) {
+    if (
+      ctx.marca.agenteFala &&
+      !ctx.marca.corpoComecou &&
+      turnoVaiFalarComOLead(ctx.job) &&
+      falhaEsgotaAsTentativas(ctx.job, err)
+    ) {
+      await passarAoHumanoPelaFalhaNaPreparacao(ctx, err);
+    }
+    throw err;
+  }
+}
+
+/**
+ * A passagem da escolta acima. NUNCA lança: cada passo que falha fica no log e o job
+ * morre com o erro original.
+ *
+ * Reconcilia antes do caso: o ledger deste job já tem resposta aceita ou com o canal
+ * (`estadoInicialDoJob`, a mesma leitura do turno) → não dispara; o lead já está em
+ * passagem → não dispara. Sem conseguir ler os dois, não dispara (limite documentado em
+ * `C01.md`): a frase às cegas poderia ser a segunda mensagem a um lead já respondido ou
+ * já passado. Antes dos desvios determinísticos (`marca.desviosConferidos`), confere a
+ * suspeita de opt-out nas mensagens sem resposta: com ela, ou sem conseguir lê-las, a
+ * passagem sai SEM a frase — quem pediu para parar não recebe mensagem automática.
+ */
+async function passarAoHumanoPelaFalhaNaPreparacao(
+  ctx: Parameters<typeof comPassagemSeAPreparacaoFalhar>[0],
+  err: unknown,
+): Promise<void> {
+  const { pool, job, log, marca } = ctx;
+  const tenantId = job.organization_id;
+  const leadId = job.contact_id;
+  if (leadId === null) return;
+  const erro = `preparação do turno: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200);
+  try {
+    const estado = await estadoInicialDoJob(pool, { tenantId, jobId: job.id });
+    if (estado.enviadas > 0) {
+      log.info('falha na preparação na última tentativa: o lead já tem resposta deste job — sem passagem', {
+        erro,
+      });
+      return;
+    }
+    if (await isLeadInHandoff(pool, tenantId, leadId)) {
+      log.info('falha na preparação na última tentativa: o lead já está com uma pessoa — sem passagem', {
+        erro,
+      });
+      return;
+    }
+  } catch (erroDaConferencia) {
+    log.error('falha na preparação na última tentativa: ledger ou passagem não conferidos — o job morre sem passagem', {
+      erro,
+      error: (erroDaConferencia instanceof Error ? erroDaConferencia.message : String(erroDaConferencia)).slice(0, 200),
+    });
+    return;
+  }
+  const textos = textosDoFimSemResposta({
+    motivo: 'falha_na_ultima_tentativa',
+    erro,
+    tentativa: job.attempts,
+    tentativas: job.max_attempts,
+  });
+  log.warn('fail-safe da falha na preparação do turno: caso aberto, frase de espera e passagem', {
+    erro,
+    tentativa: job.attempts,
+  });
+  try {
+    // O caso ANTES da frase, como nos outros fail-safes: sem pessoa acionada não há
+    // frase de espera honesta.
+    const caso = await openCase(
+      pool,
+      { tenantId, conversationId: ctx.conversationId, agentId: marca.agentId },
+      {
+        title: textos.tituloDoCaso,
+        summary: textos.resumo,
+        blocker: textos.bloqueio,
+        source: 'guardrail_autofallback',
+      },
+    );
+    if (!caso.ok && caso.error.code !== 'case_already_open') {
+      log.error('fail-safe da falha na preparação sem caso — o job morre com o erro original', {
+        code: caso.error.code,
+      });
+      return;
+    }
+    moverLeadParaEtapaDeHandoff(createAdminClient(), {
+      organizationId: tenantId,
+      leadId,
+      reason: 'falha_na_ultima_tentativa',
+    }).catch((erroDoFunil) => {
+      log.warn('moverLeadParaEtapaDeHandoff falhou (best-effort, caso humano)', {
+        error: erroDoFunil instanceof Error ? erroDoFunil.message : String(erroDoFunil),
+      });
+    });
+    const semSuspeitaDeOptOut =
+      marca.desviosConferidos || (await mensagensSemSuspeitaDeOptOut(pool, tenantId, ctx.conversationId, log));
+    const aviso: DesfechoDoAviso = semSuspeitaDeOptOut
+      ? await avisarLeadLendoOContato(
+          pool,
+          {
+            tenantId,
+            leadId,
+            conversationId: ctx.conversationId,
+            channelSessionId: ctx.channelSessionId,
+            jobId: job.id,
+            jobClaim: claimOfJob(job),
+          },
+          {
+            motivo: 'outro',
+            corpo: ctx.fraseDeEspera,
+            channel: ctx.canal(marca.agentId),
+            now: ctx.now(),
+            log,
+            agentId: marca.agentId,
+            ...(ctx.disclosureMode !== undefined ? { disclosureMode: ctx.disclosureMode } : {}),
+            ...(ctx.sleep !== undefined ? { sleep: ctx.sleep } : {}),
+          },
+        )
+      : { avisado: false, porque: 'suspeita_de_opt_out_ou_mensagens_nao_lidas' };
+    let checkpoint: Awaited<ReturnType<typeof latestCheckpoint>> = null;
+    try {
+      checkpoint = await latestCheckpoint(pool, tenantId, leadId);
+    } catch {
+      checkpoint = null;
+    }
+    await gravarPassagemComNovaTentativa(
+      () =>
+        performHumanHandoff(
+          pool,
+          { tenantId, leadId, conversationId: ctx.conversationId },
+          {
+            reason: textos.motivoDaPassagem,
+            conversationSummary: buildHandoffSummary(checkpoint),
+            inboxTitle: textos.tituloDaPassagem,
+            avisoAoLead: aviso,
+            log,
+          },
+        ),
+      {
+        log,
+        noteRunError: (erroDaPassagem) => {
+          log.error('passagem da falha na preparação não gravada', {
+            error: erroDaPassagem.message.slice(0, 200),
+          });
+        },
+      },
+    );
+    log.info('fail-safe da falha na preparação do turno: passagem ao humano gravada', {
+      lead_avisado: aviso.avisado,
+    });
+  } catch (erroDoFailSafe) {
+    log.error('fail-safe da falha na preparação falhou — o job morre com o erro original', {
+      error: (erroDoFailSafe instanceof Error ? erroDoFailSafe.message : String(erroDoFailSafe)).slice(0, 200),
+    });
+  }
+}
+
+/**
+ * As mensagens do cliente ainda sem resposta (desde a última nossa) não trazem suspeita
+ * de opt-out? `false` também quando a leitura falha: na dúvida, nada automático sai.
+ */
+async function mensagensSemSuspeitaDeOptOut(
+  pool: pg.Pool,
+  tenantId: string,
+  conversationId: string,
+  log: Logger,
+): Promise<boolean> {
+  try {
+    const { rows } = await pool.query<{ direction: string; body: string | null }>(
+      `select direction, body from messages
+        where organization_id = $1 and conversation_id = $2
+        order by created_at desc limit 20`,
+      [tenantId, conversationId],
+    );
+    for (const m of rows) {
+      if (m.direction === 'outbound') break;
+      if (m.body !== null && detectAmbiguousOptOut(m.body)) return false;
+    }
+    return true;
+  } catch (err) {
+    log.warn('mensagens do cliente não lidas — a passagem sai sem a frase de espera', {
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 120),
+    });
+    return false;
   }
 }
 
@@ -1904,6 +2169,12 @@ export function inboundsNaoRespondidos(messages: readonly LeadContextMessage[]):
  */
 export interface AgentTurnInput {
   resolvedAgent?: TurnAgentResolution;
+  /**
+   * (C01, -c01.3, rodada 3) Até onde a preparação do turno chegou — preenchida pelo
+   * turno, lida pela escolta da preparação (`comPassagemSeAPreparacaoFalhar`). Posta
+   * por `runAgentTurn`; quem chama não a passa.
+   */
+  marcaDaPreparacao?: MarcaDaPreparacao;
   /** número (channel_sessions.id do CRM) — chave da serialização anti-ban do envio. */
   channelSessionId: string;
   /** conversa do CRM — destino do send_message. */
@@ -2255,7 +2526,11 @@ export async function runAgentTurn(
     tenant_id: job.organization_id,
     lead_id: leadIdDoJob,
   });
-  await comHandoffSeOrcamentoAcabar(
+  // (C01, -c01.3, rodada 3) A marca da preparação viaja no `input` até o turno: é por
+  // ela que a escolta da preparação, logo abaixo, sabe até onde o turno chegou.
+  const marca = marcaDaPreparacaoNova();
+  input = { ...input, marcaDaPreparacao: marca };
+  const turno = comHandoffSeOrcamentoAcabar(
     {
       pool,
       tenantId: job.organization_id,
@@ -2293,6 +2568,36 @@ export async function runAgentTurn(
       log: logDaEscolta,
     },
     () => executarTurnoDoAgente(deps, job, pool, ctx, input),
+  );
+  // (C01, -c01.3, rodada 3) Por fora da escolta do orçamento, a da preparação: a falha
+  // que esgota as tentativas antes do corpo do turno passa à equipe. O turno (com a
+  // escolta do orçamento) já começou acima; esta só observa o desfecho dele. O teto de
+  // orçamento não passa por ela (`falhaEsgotaAsTentativas`): é da escolta de dentro.
+  await comPassagemSeAPreparacaoFalhar(
+    {
+      pool,
+      job,
+      conversationId: input.conversationId,
+      channelSessionId: input.channelSessionId,
+      marca,
+      canal: (agentId) =>
+        (
+          deps.channel ??
+          ((p: pg.Pool) =>
+            new WahaChannelAdapter(
+              p,
+              agentId !== null ? { ...deps.crmCfg, agentActorId: agentId } : deps.crmCfg,
+            ))
+        )(pool),
+      fraseDeEspera: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+      now: () => deps.clock?.() ?? new Date(),
+      log: logDaEscolta,
+      ...(deps.knobs.disclosureMode !== undefined
+        ? { disclosureMode: deps.knobs.disclosureMode }
+        : {}),
+      ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    },
+    () => turno,
   );
 }
 
@@ -2336,6 +2641,9 @@ async function executarTurnoDoAgente(
   input: AgentTurnInput,
   preview?: TurnPreview,
 ): Promise<void> {
+  // (C01, -c01.3, rodada 3) Até onde a preparação chegou, para a escolta de
+  // `runAgentTurn`; a prévia não tem escolta e leva uma marca só sua.
+  const marca = input.marcaDaPreparacao ?? marcaDaPreparacaoNova();
   const liveJob = (): JobRow => {
     if (!job) throw new Error('preview_operational_job_forbidden');
     return job;
@@ -2582,6 +2890,10 @@ async function executarTurnoDoAgente(
   }
   if (!preview && agentConfig && (agentConfig.pausedAt || agentConfig.operationMode === 'assisted'))
     return;
+  // (C01, -c01.3, rodada 3) Daqui em diante o agente fala: a falha da preparação na
+  // última tentativa passa à equipe (`comPassagemSeAPreparacaoFalhar`).
+  marca.agenteFala = true;
+  marca.agentId = agentConfig?.agentId ?? null;
   const agentOperation =
     !preview && agentConfig?.operationRevision
       ? {
@@ -2927,6 +3239,9 @@ async function executarTurnoDoAgente(
     });
     return; // bot silencia: a confirmação já saiu, e nada mais sai neste turno
   }
+  // (C01, -c01.3, rodada 3) Nenhum desvio determinístico disparou: a escolta da
+  // preparação pode mandar a frase de espera sem conferir a suspeita de opt-out.
+  marca.desviosConferidos = true;
 
   // ROTEIRO DE ATENDIMENTO (módulo opcional `fluxos_atendimento`, #1130). Entra
   // AQUI, depois de tudo que silencia o turno — handoff humano, pausa, pedido de
@@ -3054,9 +3369,24 @@ async function executarTurnoDoAgente(
   // Índice da memória durável do lead (F3-05) — headlines dentro do orçamento fixo,
   // injetado no SUFIXO da abertura (não invalida o prefixo cacheável F2-17). Montado
   // DEPOIS do flush (F3-07) para que as notas gravadas neste turno já entrem no índice.
+  //
+  // (C01, -c01.3, rodada 3) As três leituras auxiliares abaixo (o índice de notas, os
+  // compromissos e a contagem de notas do log) DEGRADAM com aviso no log em vez de
+  // derrubar o turno: sem elas o turno ainda responde, e o texto degradado diz ao modelo
+  // que a leitura faltou — "sem notas" ou "sem compromisso" seria afirmar uma ausência
+  // que ninguém mediu. Antes, um `statement_timeout` numa delas na última tentativa
+  // levava o job a 'dead' com o lead mudo (achado 2 da 2ª revisão adversarial da -c01.3).
+  const leituraQueDegrada = <T>(oQue: string, degradado: T) => (err: unknown): T => {
+    runLog.warn(`${oQue} não lido — o turno segue sem ele`, {
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+    });
+    return degradado;
+  };
   const notesIndexBlock = preview
     ? (preview.notes ?? []).map((n) => n.headline + ': ' + n.body).join('\n')
-    : await buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens);
+    : await buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens).catch(
+        leituraQueDegrada('índice de notas do lead', INDICE_DE_NOTAS_NAO_LIDO),
+      );
   // ⚠️ `leadId` AQUI É O CONTATO (`leadIdDoJob = job.contact_id`, e o comentário
   // de `get-lead-context.ts:193` diz o mesmo). Passar essa variável para um
   // parâmetro chamado `contactId` é correto pelo VALOR; o nome é que mente, e é
@@ -3064,20 +3394,26 @@ async function executarTurnoDoAgente(
   const compromissosBlock =
     preview?.kind === 'sandbox'
       ? ''
-      : await buildCompromissosBlock(pool, tenantId, leadId, new Date());
+      : await buildCompromissosBlock(pool, tenantId, leadId, new Date()).catch(
+          leituraQueDegrada('compromissos do contato', COMPROMISSOS_NAO_LIDOS),
+        );
   // Observabilidade da memória (Fase 2A): SÓ ids/contagens no log — headline/corpo
   // são PII e nunca saem do prompt. Prova auditável de que a memória durável do
   // lead entrou no contexto DESTE turno.
   if (!preview) {
-    const { rows: noteIdRows } = await pool.query<{ id: string }>(
-      'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
-      [tenantId, leadId],
-    );
-    runLog.info('memória do lead injetada no turno', {
-      checkpoint_seq: effectivePrevious?.seq ?? null,
-      notes_count: noteIdRows.length,
-      note_ids: noteIdRows.map((r) => r.id),
-    });
+    const noteIdRows = await pool
+      .query<{ id: string }>(
+        'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
+        [tenantId, leadId],
+      )
+      .then((r) => r.rows, leituraQueDegrada('contagem das notas do lead (log)', null));
+    if (noteIdRows !== null) {
+      runLog.info('memória do lead injetada no turno', {
+        checkpoint_seq: effectivePrevious?.seq ?? null,
+        notes_count: noteIdRows.length,
+        note_ids: noteIdRows.map((r) => r.id),
+      });
+    }
   }
 
   // F4-07: STOP no CRM detectado no turno → cancela TODOS os follow-ups agendados do lead
@@ -5118,6 +5454,9 @@ async function executarTurnoDoAgente(
   // ver edge/crm/mcp-tools.ts). As 8 tools do engine têm precedência de nome.
   let mcpCleanup: (() => Promise<void>) | null = null;
   try {
+    // (C01, -c01.3, rodada 3) O corpo começou: daqui em diante quem decide a passagem
+    // pela falha é o `catch` abaixo, não a escolta da preparação.
+    marca.corpoComecou = true;
     // (C01, -c01.3, rodada 2) A falha da preparação guardada na última tentativa
     // (`adiarFalhaDaUltimaTentativa`, na compactação) sobe aqui, já dentro do corpo: o
     // `catch` abaixo decide a passagem à equipe pelas mesmas guardas da falha do corpo.

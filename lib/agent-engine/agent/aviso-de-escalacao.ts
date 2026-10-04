@@ -108,6 +108,12 @@ export interface AvisoDeEscalacaoOpts {
   agentId?: string | null;
   disclosureMode?: 'inject' | 'veto';
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * (C01, -c01.3, rodada 3) O texto no lugar do aviso por motivo (`textoDoAviso`): a
+   * frase de espera da escolta da preparação do turno (`comPassagemSeAPreparacaoFalhar`,
+   * `inbound-turn.ts`), a mesma do fail-safe do corpo do turno.
+   */
+  corpo?: string;
 }
 
 /**
@@ -144,6 +150,7 @@ export async function avisarLeadDaEscalacao(
     });
     body = textoDoAviso(opts.motivo, null, ids.leadId, idioma);
   }
+  if (opts.corpo !== undefined) body = opts.corpo;
 
   try {
     const chain = await runBeforeSend({

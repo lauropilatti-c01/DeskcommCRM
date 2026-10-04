@@ -293,9 +293,45 @@ describe("(C01) a ligação no turno, pelo código", () => {
     expect(TURNO).toMatch(
       /const adiarFalhaDaUltimaTentativa = \(err: unknown\): null => \{\s*if \(preview \|\| !falhaEsgotaAsTentativas\(liveJob\(\), err\)\) throw err;\s*preparacao\.falha = \{ erro: err \};/,
     );
-    // E sobe dentro do `try` do corpo, antes de qualquer outra coisa.
+    // E sobe dentro do `try` do corpo, antes de qualquer outra coisa (rodada 3: logo
+    // depois da marca de que o corpo começou).
     expect(TURNO).toMatch(
-      /let mcpCleanup: \(\(\) => Promise<void>\) \| null = null;\n {2}try \{\n(?: {4}\/\/.*\n)*\s*if \(preparacao\.falha !== null\) throw preparacao\.falha\.erro;/,
+      /let mcpCleanup: \(\(\) => Promise<void>\) \| null = null;\n {2}try \{\n(?: {4}\/\/.*\n)* {4}marca\.corpoComecou = true;\n(?: {4}\/\/.*\n)*\s*if \(preparacao\.falha !== null\) throw preparacao\.falha\.erro;/,
     );
+  });
+
+  it("(i, rodada 3) a escolta da preparação envolve o turno operacional, e o turno marca até onde chegou", () => {
+    // O comportamento, contra o banco, está em
+    // `tests/invariants/c01-falha-em-toda-a-preparacao.test.ts`.
+    const run = TURNO.slice(TURNO.indexOf("export async function runAgentTurn("));
+    expect(run).toMatch(
+      /const turno = comHandoffSeOrcamentoAcabar\([\s\S]*?\(\) => executarTurnoDoAgente\(deps, job, pool, ctx, input\),\n {2}\);[\s\S]*?await comPassagemSeAPreparacaoFalhar\([\s\S]*?marca,[\s\S]*?\(\) => turno,\n {2}\);\n\}/,
+    );
+    // A escolta só age com o agente falando, antes do corpo, na última tentativa.
+    expect(TURNO).toMatch(
+      /ctx\.marca\.agenteFala &&\s*!ctx\.marca\.corpoComecou &&\s*turnoVaiFalarComOLead\(ctx\.job\) &&\s*falhaEsgotaAsTentativas\(ctx\.job, err\)/,
+    );
+    // As marcas: o agente fala logo depois da guarda do modo; os desvios conferidos logo
+    // depois do último desvio determinístico; o corpo na primeira linha do `try`.
+    expect(TURNO).toMatch(
+      /agentConfig\.operationMode === 'assisted'\)\)\n {4}return;\n(?: {2}\/\/.*\n)* {2}marca\.agenteFala = true;/,
+    );
+    expect(TURNO).toMatch(
+      /return; \/\/ bot silencia: a confirmação já saiu, e nada mais sai neste turno\n {2}\}\n(?: {2}\/\/.*\n)* {2}marca\.desviosConferidos = true;/,
+    );
+    expect(TURNO.match(/marca\.(?:agenteFala|desviosConferidos|corpoComecou) = true;/g)).toHaveLength(3);
+    // Reconcilia com o ledger e com a passagem antes do caso; o caso antes da frase, a
+    // frase antes da passagem.
+    const escolta = TURNO.slice(TURNO.indexOf("async function passarAoHumanoPelaFalhaNaPreparacao("));
+    const ledger = escolta.indexOf("await estadoInicialDoJob(pool, { tenantId, jobId: job.id })");
+    const handoff = escolta.indexOf("await isLeadInHandoff(pool, tenantId, leadId)");
+    const caso = escolta.indexOf("source: 'guardrail_autofallback'");
+    const frase = escolta.indexOf("corpo: ctx.fraseDeEspera");
+    const passagem = escolta.indexOf("await gravarPassagemComNovaTentativa(");
+    expect(ledger).toBeGreaterThan(-1);
+    expect(handoff).toBeGreaterThan(ledger);
+    expect(caso).toBeGreaterThan(handoff);
+    expect(frase).toBeGreaterThan(caso);
+    expect(passagem).toBeGreaterThan(frase);
   });
 });
