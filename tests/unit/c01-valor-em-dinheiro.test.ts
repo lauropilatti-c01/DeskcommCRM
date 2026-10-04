@@ -80,6 +80,11 @@ const NAO_PODE_VETAR = [
   "O salário inicial é de 6000 reais, fora os benefícios.",
   "O salário do cargo é R$ 6 mil.",
   "A remuneração é de R$ 6000 mais auxílio de R$ 1200.",
+  // (Rodada 3) O valor ligado direto à expressão do cargo continua isento.
+  "O salário inicial é de R$ 11.000",
+  "O salário inicial é de R$ 11.000.",
+  "O salário base fica em torno de R$ 6 mil.",
+  "O piso salarial é R$ 5.000.",
   "A página do 18x é https://matricula.escolaexemplo.com.br/pay/concurso-estatal-premium-administracao-completo-18x",
   "Os planos são o Plano Completo e o de 12 meses; a diferença é o tempo de acesso.",
 ];
@@ -131,9 +136,33 @@ describe("(C01) a trava 'valor em dinheiro'", () => {
   ])("a isenção vale só para o valor do cargo: %s", async (frase) => {
     const v = await avaliar(frase);
     expect(v.pass, frase).toBe(false);
-    // O que a trava aponta é o preço; o salário continua isento.
+    // O que a trava aponta inclui o preço. (Rodada 3) Numa frase com palavra de
+    // pagamento ou do curso nada é isento: o salário também pode ser apontado.
     expect(v.reason).toMatch(/"(?:r\$ 9|997 reais)"/);
-    expect(v.reason).not.toMatch(/"r\$ 6"|6000|6 mil/);
+  });
+
+  it.each([
+    // (Rodada 3, achado 5 da 2ª revisão da -c01.3) A isenção cobria o valor até 40
+    // caracteres depois de "salário" desde que sem número nem palavra de oferta no meio;
+    // "Pix" e "à vista" não eram oferta, e o preço passava.
+    "Com salário alto, dá 997 no Pix.",
+    "Use parte do seu salário: R$ 997 à vista.",
+    "Com salário de seis mil reais, dá 997 no Pix.",
+    // O valor tem de vir ligado direto à expressão do cargo ...
+    "Com o salário alto dá pra encarar R$ 997.",
+    "Seu salário cobre os 997 reais.",
+    "O salário de quem estuda rende R$ 997.",
+    // ... e nunca numa frase com palavra de pagamento ou do curso.
+    "O salário inicial é de R$ 997 e dá pra pagar em boleto.",
+    "O salário é de R$ 997, mais que o plano.",
+    "O salário inicial é de R$ 997; o valor do curso está na página.",
+    "Salário de R$ 997 no cartão.",
+    "A remuneração é de 997 reais à vista.",
+  ])("(rodada 3) a isenção do salário não libera pagamento: %s", async (frase) => {
+    const v = await avaliar(frase);
+    expect(v.pass, frase).toBe(false);
+    // O trecho apontado é o do preço ("r$ 9", "997 no pix", "997 reais"…).
+    expect(v.reason).toMatch(/"r\$ 9"|"997 /);
   });
 
   it("o trace leva só a contagem", async () => {

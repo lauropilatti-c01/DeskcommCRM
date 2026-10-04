@@ -19,7 +19,9 @@
  * os benefícios do cargo (fato da base que a régua isenta) também passam: o valor logo
  * depois de "salário", "remuneração", "benefício"… na mesma frase não conta — só ele
  * (rodada 2): a isenção acaba no primeiro número depois da palavra e em qualquer palavra
- * de oferta ("curso", "matrícula", "custa"…).
+ * de oferta ("curso", "matrícula", "custa"…). (Rodada 3) E só o valor ligado DIRETO à
+ * expressão do cargo ("salário inicial é de R$ …", "piso salarial de …"), nunca numa
+ * frase com palavra de pagamento ou do curso ("Pix", "à vista", "boleto", "plano"…).
  *
  * Trava de CONTEÚDO: contador e fail-safe da promessa semântica
  * (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE` em `inbound-turn.ts`).
@@ -49,19 +51,46 @@ const FORMAS_DA_M1: readonly RegExp[] = [
 ];
 
 /**
- * Fato do cargo, não preço do curso: o valor que vem logo depois destas palavras, na mesma
- * frase. (C01, -c01.3, rodada 2) Só o PRIMEIRO valor: entre a palavra e ele não pode
- * haver outro número (o grupo exclui dígitos) nem palavra de oferta (`OFERTA`). Antes,
- * qualquer valor até 40 caracteres depois era isento, e "Com salário de R$ 6000, o curso
- * custa R$ 997." passava inteiro (achado 3 da 1ª revisão adversarial da -c01.3); o teste
- * usava salário com ponto de milhar, que interrompia a janela e escondia o buraco.
+ * Fato do cargo, não preço do curso: o valor que vem logo depois destas palavras.
+ * (C01, -c01.3, rodada 2) Só o PRIMEIRO valor, e a isenção acabava em palavra de oferta.
+ * Antes, qualquer valor até 40 caracteres depois era isento, e "Com salário de R$ 6000, o
+ * curso custa R$ 997." passava inteiro (achado 3 da 1ª revisão adversarial da -c01.3).
+ *
+ * (Rodada 3) A janela de 40 caracteres ainda deixava passar o preço sem palavra de
+ * oferta no meio: "Com salário alto, dá 997 no Pix.", "Use parte do seu salário: R$ 997
+ * à vista." (achado 5 da 2ª revisão). Agora o valor tem de vir LIGADO à expressão do
+ * cargo: entre a palavra e ele, só modificador ("inicial", "base", "salarial"…), ligação
+ * ("é", "fica", "de", "em torno de"…) ou a designação "de/do/da + uma palavra" ("do
+ * cargo", "de técnico") — sem pontuação, sem outro número, sem verbo solto. E a frase do
+ * valor não pode ter palavra de pagamento ou do curso (`PAGAMENTO_OU_CURSO`).
  */
-const FATO_DO_CARGO =
-  /\b(?:salari\w*|remunera\w*|vencimentos?|piso|beneficios?|auxilio|plr|participacao nos lucros)\b([^.!?\n\d]{0,40})$/;
+const PALAVRA_DO_CARGO =
+  '(?:salario|remuneracao|vencimentos?|piso|beneficios?|auxilio|plr|participacao nos lucros)';
+const LIGACAO =
+  '(?:inicial|base|basico|bruto|bruta|liquido|liquida|mensal|salarial|e|eh|sera|fica|chega|gira|vai|de|em|a|ate|torno|cerca)';
+const FATO_DO_CARGO = new RegExp(
+  `\\b${PALAVRA_DO_CARGO}(?: (?:${LIGACAO}|(?:de|do|da) [a-z]+)){0,6} (?:r\\$ ?)?$`,
+);
 
-/** O começo da oferta do curso: encerra a isenção do cargo. Sobre o texto sem acento. */
-const OFERTA =
-  /\b(?:cursos?|matriculas?|inscricao|investimento|mensalidades?|custa|custam|custo|preco|parcelas?|desconto|promocao|oferta)\b/;
+/**
+ * (Rodada 3) Palavra de pagamento ou do curso: na frase dela, nenhum valor é do cargo.
+ * Sobre o texto sem acento. "Entrada" fica, mesmo vetando "salário de entrada de R$ …":
+ * na dúvida, o valor não sai.
+ */
+const PAGAMENTO_OU_CURSO =
+  /\b(?:pix|a vista|parcel\w*|boletos?|cartao|cartoes|entrada|descontos?|cursos?|matriculas?|planos?|custa|custam|custo|investimentos?|valor (?:do|da|dos|das)|mensalidades?|precos?|promocao|ofertas?|inscricao|pag(?:a|ar|am|amos|ando|ou|o|amento|amentos))\b/;
+
+/** A frase do texto (sem acento) em que cai a posição `i`: o fim de frase é `.`, `!` ou `?` seguido de espaço. */
+function fraseEm(t: string, i: number): string {
+  const fim = /[.!?](?= |$)/g;
+  let ini = 0;
+  let f: RegExpExecArray | null;
+  while ((f = fim.exec(t)) !== null) {
+    if (f.index >= i) return t.slice(ini, f.index);
+    ini = f.index + 1;
+  }
+  return t.slice(ini);
+}
 
 function semAcento(texto: string): string {
   return texto
@@ -87,8 +116,7 @@ export function trechosDeDinheiro(body: string): string[] {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(t)) !== null) {
-      const cargo = FATO_DO_CARGO.exec(t.slice(0, m.index));
-      if (cargo !== null && !OFERTA.test(cargo[1] ?? '')) continue;
+      if (FATO_DO_CARGO.test(t.slice(0, m.index)) && !PAGAMENTO_OU_CURSO.test(fraseEm(t, m.index))) continue;
       trechos.push(m[0]);
     }
   }
