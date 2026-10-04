@@ -68,7 +68,7 @@ import { logger } from "@/lib/logger";
 import { scrubMessage } from "@/lib/sentry/scrub";
 import type { createAdminClient } from "@/lib/supabase/admin";
 
-import { MODELO_DO_JEV, type FalhaDaDecisao, type Pergunta, type Resposta } from "./cliente";
+import { modeloDoJev, type FalhaDaDecisao, type Pergunta, type Resposta } from "./cliente";
 import type { ConfigDoJev, EstadoQuePergunta } from "./config";
 import { podeTentar, registrarFalha, registrarSucesso } from "./disjuntor";
 import { decidirNoPonto, type DependenciasDoPonto } from "./ponto";
@@ -523,7 +523,7 @@ async function gravarFalhaQuePedeAcao(admin: Admin, e: EntradaDosPedidos, falha:
     agent_id: e.agentId,
     purpose: PEDIDOS_DO_CLIENTE.purpose,
     provider: "typesafe",
-    model: `typesafe/${MODELO_DO_JEV}`,
+    model: `typesafe/${modeloDoJev()}`,
     input_tokens: 0,
     output_tokens: 0,
     cost_cents: 0,

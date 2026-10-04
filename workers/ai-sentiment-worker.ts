@@ -27,7 +27,7 @@ import { resolverAgenteDaConversa } from "@/lib/ai/agents/agente-da-conversa";
 import { agenteAtende, precisaRecuperarLegado } from "@/lib/ai/agents/no-ar";
 import { computeCost } from "@/lib/ai/cost";
 import { avisarNaCentral, fecharAvisoDoJev } from "@/lib/ai/decisao/aviso";
-import { MODELO_DO_JEV } from "@/lib/ai/decisao/cliente";
+import { modeloDoJev } from "@/lib/ai/decisao/cliente";
 import { medirClima, type ClimaMedido } from "@/lib/ai/decisao/clima";
 import { lerConfigDoJev } from "@/lib/ai/decisao/config";
 import { falhasSeguidas } from "@/lib/ai/decisao/disjuntor";
@@ -378,7 +378,7 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
         logInvocation({
           ...comum,
           provider: "typesafe",
-          model: `typesafe/${MODELO_DO_JEV}`,
+          model: `typesafe/${modeloDoJev()}`,
           origem_da_escolha: "jev",
           prompt_tokens: 0,
           completion_tokens: 0,
