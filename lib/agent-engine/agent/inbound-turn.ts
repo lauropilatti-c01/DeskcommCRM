@@ -1462,7 +1462,10 @@ export function blocosDeAgendaResidentes(toolIds: readonly string[]): string[] {
  * Tools de agenda cuja EXECUÇÃO neste turno arma o `agendaStallGate` (before-send.ts) —
  * ver o wrap no loop de montagem das tools MCP, mais abaixo.
  */
-/** (C01) A leitura da base da empresa; suas URLs são as únicas liberadas no gate de vocabulário. */
+/**
+ * (C01) A leitura da base da empresa; suas URLs (e, desde a rodada 2 da -c01.3, as da
+ * base RAG, `search_knowledge`) são as únicas liberadas no gate de vocabulário.
+ */
 const FERRAMENTA_DA_BASE = 'crm_query_external_data';
 const RE_URL = /https?:\/\/[^\s"'<>\\)\]]+/g;
 /**
@@ -3119,7 +3122,8 @@ async function executarTurnoDoAgente(
   // novo (ver `recusaPorTeto`). Esvaziada, o teto cheio volta a recusar sem consulta.
   const porRetomar = new Set<string>(estadoInicial.pendentes);
   // (C01) As URLs que a base da empresa devolveu NESTE turno (resultado de
-  // `crm_query_external_data`). O gate de vocabulário interno libera a ocorrência
+  // `crm_query_external_data` e, desde a rodada 2 da -c01.3, de `search_knowledge`).
+  // A trava "link permitido" as libera; o gate de vocabulário interno libera a ocorrência
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
   const urlsDaBase = new Set<string>();
   // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
@@ -3821,6 +3825,12 @@ async function executarTurnoDoAgente(
           // perder nada: quem precisa deles é esta linha, não o modelo.
           pendingCitations = citationsFromHits(out.results);
         }
+        // (C01, -c01.3, rodada 2) As URLs que a base RAG devolveu valem como as da base
+        // externa (`FERRAMENTA_DA_BASE`): entram em `urlsDaBase`, e a trava "link
+        // permitido" deixa passar o link exato que o modelo acabou de ler. Antes só a
+        // consulta externa alimentava o conjunto, e o link legítimo do material era
+        // vetado (achado 5 da 1ª revisão adversarial da -c01.3).
+        if (out.ok) for (const url of urlsNoResultado(out.results)) urlsDaBase.add(url);
         // `chunk_id` e `knowledge_source_id` viajavam CRUS para o modelo em toda
         // busca com RAG — dois UUIDs por resultado, sem uso nenhum do lado dele
         // (nenhuma ferramenta os aceita como argumento). UUID cru na resposta ao

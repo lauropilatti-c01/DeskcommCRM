@@ -232,7 +232,8 @@ export interface GateContext {
    */
   internalVocabularyEnforced?: boolean;
   /**
-   * (C01) URLs que a base da empresa devolveu NESTE turno (`crm_query_external_data`).
+   * (C01) URLs que a base da empresa devolveu NESTE turno (`crm_query_external_data`
+   * e, desde a rodada 2 da -c01.3, `search_knowledge`).
    * O `internalVocabularyGate` mascara a ocorrência exata de cada uma antes de
    * varrer: o link de vídeo legítimo carrega um UUID e caía como "identificador
    * interno". Ausente = nada liberado. Ver `OpcoesDeDeteccao.urlsPermitidas`.

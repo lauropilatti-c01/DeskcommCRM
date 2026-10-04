@@ -7,7 +7,8 @@
  *
  * A trava libera três origens, e só elas:
  * 1. o link que a base da empresa devolveu NESTE turno (`urlsDaBase`, o mesmo conjunto
- *    que o vocabulário interno já usa);
+ *    que o vocabulário interno já usa: a consulta externa e, desde a rodada 2, a base RAG
+ *    do agente, `search_knowledge`);
  * 2. o link que já foi mandado nesta conversa (por pessoa da equipe ou pelo agente),
  *    lido uma vez por turno (`lerLinksJaEnviados`);
  * 3. qualquer link de um domínio da lista da organização (`dominios`, o domínio ou
