@@ -307,16 +307,55 @@ export function tokensDasEtapas(etapas: ReadonlyArray<EtapaComUso>): number {
  * Até aqui o corte só aparecia no log: `runModelCall` devolvia o resultado como o de
  * um laço que acabou sozinho, e o turno, sem saber que a resposta foi cortada antes
  * de sair, gravava o checkpoint e concluía o job com o lead sem nada (achado 1 da
- * sétima revisão adversarial — o sintoma da C54, agora com job "ok"). Só o teto de
- * tokens tem motivo: o prazo das chamadas (`prazoDasChamadas`) aborta a chamada com
- * exceção, o job falha e a fila re-tenta — não é corte silencioso, e não passa aqui.
- * O fim por etapas (`stepCountIs(maxSteps)`) é desenho do autor e fica como está.
+ * sétima revisão adversarial — o sintoma da C54, agora com job "ok"). O prazo das
+ * chamadas (`prazoDasChamadas`, e o por requisição) aborta a chamada com exceção, o
+ * job falha e a fila re-tenta — não é corte silencioso, e não passa aqui.
+ *
+ * (C01, -c01.3, item 1c) Mais dois fins do laço que deixam o turno sem resposta, com o
+ * mesmo tratamento: `limite_de_etapas` — o laço chegou ao teto de etapas
+ * (`stepCountIs(maxSteps)`, que fica como o autor desenhou) com a última etapa ainda
+ * pedindo ferramenta; e `teto_de_saida` — a última etapa parou no teto de tokens de
+ * saída por requisição (`finishReason` 'length', o `maxOutputTokens` da -c01.3). O
+ * laço que acaba sozinho ('stop') continua sem motivo: calar é decisão do modelo.
  */
 export interface CorteDoLaco {
-  motivo: 'corte_por_teto_de_tokens';
+  motivo: 'corte_por_teto_de_tokens' | 'limite_de_etapas' | 'teto_de_saida';
+  /** O teto que parou o laço: tokens do turno, etapas, ou tokens de saída por requisição. */
   teto: number;
+  /** O gasto na grandeza do teto: tokens novos, etapas feitas, ou a saída da última etapa. */
   gastos: number;
   etapas: number;
+}
+
+/**
+ * (C01, -c01.3, item 1c) O fim do laço por limite, quando não houve corte pelo teto de
+ * tokens: ver `CorteDoLaco`. Pura, sobre o resultado do `generateText`.
+ */
+export function fimDoLacoPorLimite(
+  resultado: {
+    finishReason: string;
+    steps: ReadonlyArray<{ usage?: { outputTokens?: number } }>;
+  },
+  limites: { maxSteps?: number; maxOutputTokens?: number },
+): CorteDoLaco | null {
+  const etapas = resultado.steps.length;
+  if (resultado.finishReason === 'length') {
+    return {
+      motivo: 'teto_de_saida',
+      // 0 = sem teto nosso: parou no máximo do próprio modelo.
+      teto: limites.maxOutputTokens ?? 0,
+      gastos: resultado.steps.at(-1)?.usage?.outputTokens ?? 0,
+      etapas,
+    };
+  }
+  if (
+    resultado.finishReason === 'tool-calls' &&
+    limites.maxSteps !== undefined &&
+    etapas >= limites.maxSteps
+  ) {
+    return { motivo: 'limite_de_etapas', teto: limites.maxSteps, gastos: etapas, etapas };
+  }
+  return null;
 }
 
 /**
@@ -770,6 +809,10 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   // vai ao chamador no retorno. Objeto, e não `let`: a atribuição acontece num
   // callback, que o fluxo de tipos não acompanha.
   const corte: { valor: CorteDoLaco | null } = { valor: null };
+  const tetoDeSaida =
+    input.maxOutputTokens === undefined
+      ? maxOutputTokens
+      : Math.min(maxOutputTokens ?? Infinity, input.maxOutputTokens);
   let result: Awaited<ReturnType<typeof generateText>>;
   try {
     abortSignal?.throwIfAborted();
@@ -815,9 +858,7 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
       temperature,
       topP,
       topK,
-      maxOutputTokens: input.maxOutputTokens === undefined
-        ? maxOutputTokens
-        : Math.min(maxOutputTokens ?? Infinity, input.maxOutputTokens),
+      maxOutputTokens: tetoDeSaida,
     });
   } catch (err) {
     // ─── A LINHA QUE FALTAVA ────────────────────────────────────────────────
@@ -855,6 +896,12 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     throw err;
   }
   const latencyMs = Date.now() - startedAt;
+  // (C01, -c01.3, item 1c) O fim por limite (etapas ou teto de saída) também volta em
+  // `corte`; o corte pelo teto de tokens, quando houve, tem a precedência.
+  corte.valor ??= fimDoLacoPorLimite(result, {
+    maxSteps: input.maxSteps,
+    maxOutputTokens: tetoDeSaida,
+  });
 
   const usage = {
     inputTokens: result.usage.inputTokens ?? 0,
@@ -928,7 +975,8 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     avisos: decisao.avisos,
     /**
      * (C01, rodada 8) O corte NOSSO do laço, quando houve (`null` quando o laço
-     * acabou sozinho ou pelo teto de etapas do autor). A linha de `llm_calls` fica
+     * acabou sozinho). (-c01.3) Também o fim pelo teto de etapas ainda pedindo
+     * ferramenta, e pelo teto de saída (ver `CorteDoLaco`). A linha de `llm_calls` fica
      * 'ok' — a chamada ao provedor foi bem, e o CHECK da coluna só aceita 'ok' e
      * 'erro' —; o motivo vive aqui, no log e no que o chamador faz com ele.
      */

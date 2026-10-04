@@ -89,7 +89,9 @@ describe("(C01) a reconferência no ponto comum e a tradução em veto", () => {
     // corte, que roda depois do laço do modelo com `passadoAoHumano` já ligado e sai
     // pelo mesmo `send` exclusivo (que leva a marca).
     expect(FONTE.match(/^\s*const espera = await runBeforeSend\(\{/gm)).toHaveLength(2);
-    const corte = corpo("turn.corte !== null &&", "const desfecho = desfechoDaFraseDeEspera(");
+    // (-c01.3) A do corte mora em `passarAoHumanoSemResposta`, que o bloco do corte e o
+    // `catch` da última tentativa chamam.
+    const corte = corpo("const passarAoHumanoSemResposta = async", "const desfecho = desfechoDaFraseDeEspera(");
     expect(corte).toMatch(
       /passadoAoHumano = true;[\s\S]*const espera = await runBeforeSend\(\{[\s\S]*send: enviarFraseDeEspera,/,
     );

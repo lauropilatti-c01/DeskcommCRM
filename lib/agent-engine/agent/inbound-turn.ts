@@ -61,10 +61,13 @@ import {
   LlmBudgetExceededError,
   runModelCall,
   tool,
+  type CorteDoLaco,
   type LlmEdgeConfig,
   type ModelMessage,
   type ToolSet,
 } from '../edge/llm/run-model-call';
+// (C01, -c01.3) A falha que vai matar o job: o fail-safe do turno sem resposta roda antes.
+import { falhaEsgotaAsTentativas } from './ultima-tentativa';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
@@ -723,6 +726,104 @@ export const TITULO_DO_CASO_POR_CORTE = 'Resposta da IA cortada antes de sair';
 
 /** (C01, rodada 8) O título do aviso na Central — o do caso, com a ação de quem lê. */
 export const TITULO_DA_PASSAGEM_POR_CORTE = 'Resposta da IA cortada antes de sair — assumir a conversa';
+
+/**
+ * (C01, -c01.3, item 1c) Os outros fins de turno sem nenhuma mensagem ao lead que
+ * seguem o mesmo fail-safe do corte (caso, frase de espera, passagem gravada): o laço
+ * chegou ao teto de etapas ainda pedindo ferramenta; a etapa parou no teto de saída por
+ * requisição; a última tentativa do job falhou. A mesma régua dos textos do corte: frase
+ * legível, sem código cru e sem prometer prazo.
+ */
+export const MOTIVO_DA_PASSAGEM_POR_LIMITE_DE_ETAPAS =
+  'A IA chegou ao limite de etapas da versão sem responder; uma pessoa precisa responder';
+export const TITULO_DO_CASO_POR_LIMITE_DE_ETAPAS = 'IA parou no limite de etapas sem responder';
+export const TITULO_DA_PASSAGEM_POR_LIMITE_DE_ETAPAS =
+  'IA parou no limite de etapas sem responder — assumir a conversa';
+export const MOTIVO_DA_PASSAGEM_POR_TETO_DE_SAIDA =
+  'A resposta da IA passou do tamanho máximo por etapa e não saiu; uma pessoa precisa responder';
+export const TITULO_DO_CASO_POR_TETO_DE_SAIDA = 'Resposta da IA passou do tamanho máximo e não saiu';
+export const TITULO_DA_PASSAGEM_POR_TETO_DE_SAIDA =
+  'Resposta da IA passou do tamanho máximo e não saiu — assumir a conversa';
+export const MOTIVO_DA_PASSAGEM_POR_FALHA_NA_ULTIMA_TENTATIVA =
+  'A IA falhou em todas as tentativas de responder; uma pessoa precisa responder';
+export const TITULO_DO_CASO_POR_FALHA_NA_ULTIMA_TENTATIVA = 'IA falhou em todas as tentativas de responder';
+export const TITULO_DA_PASSAGEM_POR_FALHA_NA_ULTIMA_TENTATIVA =
+  'IA falhou em todas as tentativas de responder — assumir a conversa';
+
+/** (C01, -c01.3) Por que o turno acabou sem nenhuma mensagem ao lead. */
+export type FimSemResposta =
+  | CorteDoLaco
+  | { motivo: 'falha_na_ultima_tentativa'; erro: string; tentativa: number; tentativas: number };
+
+/** (C01, -c01.3) O que o caso e a passagem dizem, conforme o fim. */
+export interface TextosDoFimSemResposta {
+  tituloDoCaso: string;
+  resumo: string;
+  bloqueio: string;
+  motivoDaPassagem: string;
+  tituloDaPassagem: string;
+}
+
+const SEM_MENSAGEM_NESTE_TURNO = 'Nenhuma mensagem saiu ao cliente neste turno.';
+const fimDoBloqueio = (oQue: string): string =>
+  `Aberto automaticamente: ${oQue}, e nenhuma mensagem chegou ao cliente neste turno. O sistema manda ` +
+  'uma frase de espera ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.';
+
+/**
+ * (C01, -c01.3) Os textos do fail-safe do turno sem resposta. O corte pelo teto de
+ * tokens mantém os da rodada 8, palavra por palavra (o invariante
+ * `c01-corte-antes-do-primeiro-envio` os lê no banco).
+ */
+export function textosDoFimSemResposta(fim: FimSemResposta): TextosDoFimSemResposta {
+  switch (fim.motivo) {
+    case 'corte_por_teto_de_tokens':
+      return {
+        tituloDoCaso: TITULO_DO_CASO_POR_CORTE,
+        resumo:
+          'A IA não chegou a responder: o laço foi cortado pelo teto de tokens da versão ' +
+          `(${fim.gastos} tokens em ${fim.etapas} etapa(s); teto ${fim.teto}). ` +
+          SEM_MENSAGEM_NESTE_TURNO,
+        bloqueio:
+          'Aberto automaticamente: a resposta da IA foi cortada por tamanho (teto de tokens da versão) ' +
+          'antes de sair, e nenhuma mensagem chegou ao cliente neste turno. O sistema manda uma frase de ' +
+          'espera ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
+        motivoDaPassagem: MOTIVO_DA_PASSAGEM_POR_CORTE,
+        tituloDaPassagem: TITULO_DA_PASSAGEM_POR_CORTE,
+      };
+    case 'limite_de_etapas':
+      return {
+        tituloDoCaso: TITULO_DO_CASO_POR_LIMITE_DE_ETAPAS,
+        resumo:
+          'A IA não chegou a responder: o laço de ferramentas chegou ao limite de etapas da versão ' +
+          `(${fim.etapas} de ${fim.teto}) ainda consultando. ` +
+          SEM_MENSAGEM_NESTE_TURNO,
+        bloqueio: fimDoBloqueio('a IA chegou ao limite de etapas da versão sem responder'),
+        motivoDaPassagem: MOTIVO_DA_PASSAGEM_POR_LIMITE_DE_ETAPAS,
+        tituloDaPassagem: TITULO_DA_PASSAGEM_POR_LIMITE_DE_ETAPAS,
+      };
+    case 'teto_de_saida':
+      return {
+        tituloDoCaso: TITULO_DO_CASO_POR_TETO_DE_SAIDA,
+        resumo:
+          'A IA não chegou a responder: uma etapa parou no tamanho máximo de resposta ' +
+          `(${fim.gastos} tokens; teto ${fim.teto > 0 ? fim.teto : 'do próprio modelo'}). ` +
+          SEM_MENSAGEM_NESTE_TURNO,
+        bloqueio: fimDoBloqueio('a resposta da IA passou do tamanho máximo por etapa e não saiu'),
+        motivoDaPassagem: MOTIVO_DA_PASSAGEM_POR_TETO_DE_SAIDA,
+        tituloDaPassagem: TITULO_DA_PASSAGEM_POR_TETO_DE_SAIDA,
+      };
+    case 'falha_na_ultima_tentativa':
+      return {
+        tituloDoCaso: TITULO_DO_CASO_POR_FALHA_NA_ULTIMA_TENTATIVA,
+        resumo:
+          `A IA não chegou a responder: a tentativa ${fim.tentativa} de ${fim.tentativas} também falhou ` +
+          `(${fim.erro}). Nenhuma mensagem saiu ao cliente.`,
+        bloqueio: fimDoBloqueio('a IA falhou em todas as tentativas de responder'),
+        motivoDaPassagem: MOTIVO_DA_PASSAGEM_POR_FALHA_NA_ULTIMA_TENTATIVA,
+        tituloDaPassagem: TITULO_DA_PASSAGEM_POR_FALHA_NA_ULTIMA_TENTATIVA,
+      };
+  }
+}
 
 /** (C01) O que o modelo lê sobre a frase de espera, conforme o desfecho — nunca "o cliente recebeu" sem ter recebido. */
 export const AVISO_AO_MODELO_POR_DESFECHO: Record<DesfechoDaFraseDeEspera, string> = {
@@ -4583,6 +4684,91 @@ async function executarTurnoDoAgente(
     }
   }
 
+  /**
+   * (C01, rodada 8; -c01.3) O FAIL-SAFE DO TURNO SEM RESPOSTA: nenhuma mensagem saiu ao
+   * lead e o turno não vai responder — o laço foi cortado (teto de tokens, teto de
+   * etapas ainda pedindo ferramenta, teto de saída) ou a última tentativa do job falhou.
+   * O mesmo caminho do fail-safe de vocabulário interno: caso aberto para uma pessoa da
+   * equipe, frase de espera pelo `send` exclusivo dela, passagem ao humano GRAVADA. Só
+   * os textos mudam conforme o fim (`textosDoFimSemResposta`); nenhuma frase nova ao
+   * cliente. Quem chama confere as condições (sem preview, nenhuma mensagem contada em
+   * `seq`, sem passagem, turno não descartado, turno que fala com o lead).
+   */
+  const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<void> => {
+    const textos = textosDoFimSemResposta(fim);
+    runLog.warn(
+      'fail-safe do turno sem resposta: nenhuma mensagem ao lead — caso aberto e frase de espera',
+      { ...fim },
+    );
+    // O caso ANTES da frase, como no fail-safe de vocabulário interno: sem pessoa
+    // acionada não há frase de espera honesta. Sem caso (e não é "já havia um"), o
+    // job falha e re-tenta pela fila — o cliente não fica mudo, fica atrasado, com rastro.
+    const caso = await openCase(
+      pool,
+      { tenantId, conversationId: input.conversationId, agentId: agentConfig?.agentId ?? null },
+      {
+        title: textos.tituloDoCaso,
+        summary: textos.resumo,
+        blocker: textos.bloqueio,
+        source: 'guardrail_autofallback',
+        contextSnapshot: buildCaseContextSnapshot(),
+      },
+    );
+    if (!caso.ok && caso.error.code !== 'case_already_open') {
+      throw new Error(`fail-safe do turno sem resposta (${fim.motivo}) sem caso: ${caso.error.code}`);
+    }
+    openedCaseThisTurn = true;
+    moverParaHandoffBestEffort(fim.motivo);
+    passadoAoHumano = true;
+    // A frase passa pela cadeia inteira (pacing, LGPD, stop), menos o spinning — frase
+    // fixa repetida entre leads não é blast —, e sai pelo `send` só dela.
+    const espera = await runBeforeSend({
+      pool,
+      log: runLog,
+      agentOperation,
+      tenantId,
+      leadId,
+      jobId: liveJob().id,
+      channelSessionId: input.channelSessionId,
+      body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+      optedOutThisTurn,
+      resposta: eTurnoDeResposta(liveJob()),
+      crmDailyLimit: null,
+      now: clock(),
+      sleep: deps.sleep,
+      lgpd,
+      casesEnabled: agentConfig?.casesEnabled ?? false,
+      hasOpenCase: true,
+      openedCaseThisTurn: true,
+      enforceSpinning: false,
+      ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
+      send: enviarFraseDeEspera,
+    });
+    // Desfecho por desfecho (`desfechoDaFraseDeEspera`) e a passagem GRAVADA depois da
+    // frase, com uma nova tentativa — as mesmas peças do fail-safe de vocabulário
+    // interno, pelas mesmas razões (achados 2 e 3 das revisões anteriores).
+    const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+    await gravarPassagemComNovaTentativa(
+      () =>
+        performHumanHandoff(
+          pool,
+          { tenantId, leadId, conversationId: input.conversationId },
+          {
+            reason: textos.motivoDaPassagem,
+            conversationSummary: buildHandoffSummary(previous),
+            inboxTitle: textos.tituloDaPassagem,
+            avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
+            log: runLog,
+          },
+        ),
+      { log: runLog, noteRunError },
+    );
+    runLog.info('fail-safe do turno sem resposta: passagem ao humano gravada', {
+      motivo: fim.motivo,
+      desfecho_da_frase: desfecho,
+    });
+  };
+
   // 2B-tools: tools do catálogo MCP habilitadas NA TELA entram no run (audit +
   // role/scope da ponte nativa; envio e handoff do catálogo são bloqueados —
   // ver edge/crm/mcp-tools.ts). As 8 tools do engine têm precedência de nome.
@@ -5057,11 +5243,13 @@ async function executarTurnoDoAgente(
     // caminho do fail-safe de vocabulário interno: caso aberto para uma pessoa da
     // equipe, frase de espera pelo `send` exclusivo dela, passagem ao humano GRAVADA.
     // Com pelo menos um envio feito nada muda: o lead recebeu algo, o corte só encerra
-    // o laço, como sempre, e fica no log. O fim por etapas (`stepCountIs(maxSteps)`) é
-    // desenho do autor e não passa por aqui; o prazo das chamadas aborta com exceção e
-    // o job re-tenta. Preview não tem lead; turno de retaguarda não fala com ele; turno
-    // descartado (#1943) deixa a resposta para o turno da mensagem nova; `runError` já
-    // vai falhar o job, e o retry roda o modelo de novo.
+    // o laço, como sempre, e fica no log. (-c01.3, item 1c) O fim pelo teto de etapas
+    // ainda pedindo ferramenta e o fim pelo teto de saída também voltam em `turn.corte`
+    // e passam por aqui; o prazo das chamadas aborta com exceção e o job re-tenta (na
+    // última tentativa, o `catch` do turno faz a mesma passagem). Preview não tem lead;
+    // turno de retaguarda não fala com ele; turno descartado (#1943) deixa a resposta
+    // para o turno da mensagem nova; `runError` já vai falhar o job, e o retry roda o
+    // modelo de novo. A sequência está em `passarAoHumanoSemResposta`.
     if (
       !preview &&
       turn.corte !== null &&
@@ -5071,81 +5259,7 @@ async function executarTurnoDoAgente(
       !turnoDescartado &&
       turnoVaiFalarComOLead(liveJob())
     ) {
-      const corte = turn.corte;
-      runLog.warn(
-        'fail-safe do corte: o laço do modelo foi cortado antes de qualquer mensagem ao lead — caso aberto e frase de espera',
-        { motivo: corte.motivo, teto: corte.teto, gastos: corte.gastos, etapas: corte.etapas },
-      );
-      // O caso ANTES da frase, como no fail-safe de vocabulário interno: sem pessoa
-      // acionada não há frase de espera honesta. Sem caso (e não é "já havia um"), o
-      // job falha e re-tenta pela fila — o cliente não fica mudo, fica atrasado, com rastro.
-      const caso = await openCase(
-        pool,
-        { tenantId, conversationId: input.conversationId, agentId: agentConfig?.agentId ?? null },
-        {
-          title: TITULO_DO_CASO_POR_CORTE,
-          summary:
-            'A IA não chegou a responder: o laço foi cortado pelo teto de tokens da versão ' +
-            `(${corte.gastos} tokens em ${corte.etapas} etapa(s); teto ${corte.teto}). ` +
-            'Nenhuma mensagem saiu ao cliente neste turno.',
-          blocker:
-            'Aberto automaticamente: a resposta da IA foi cortada por tamanho (teto de tokens da versão) ' +
-            'antes de sair, e nenhuma mensagem chegou ao cliente neste turno. O sistema manda uma frase de ' +
-            'espera ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
-          source: 'guardrail_autofallback',
-          contextSnapshot: buildCaseContextSnapshot(),
-        },
-      );
-      if (!caso.ok && caso.error.code !== 'case_already_open') {
-        throw new Error(`fail-safe do corte sem caso: ${caso.error.code}`);
-      }
-      openedCaseThisTurn = true;
-      moverParaHandoffBestEffort('corte_por_teto_de_tokens');
-      passadoAoHumano = true;
-      // A frase passa pela cadeia inteira (pacing, LGPD, stop), menos o spinning — frase
-      // fixa repetida entre leads não é blast —, e sai pelo `send` só dela.
-      const espera = await runBeforeSend({
-        pool,
-        log: runLog,
-        agentOperation,
-        tenantId,
-        leadId,
-        jobId: liveJob().id,
-        channelSessionId: input.channelSessionId,
-        body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
-        optedOutThisTurn,
-        resposta: eTurnoDeResposta(liveJob()),
-        crmDailyLimit: null,
-        now: clock(),
-        sleep: deps.sleep,
-        lgpd,
-        casesEnabled: agentConfig?.casesEnabled ?? false,
-        hasOpenCase: true,
-        openedCaseThisTurn: true,
-        enforceSpinning: false,
-        ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
-        send: enviarFraseDeEspera,
-      });
-      // Desfecho por desfecho (`desfechoDaFraseDeEspera`) e a passagem GRAVADA depois da
-      // frase, com uma nova tentativa — as mesmas peças do fail-safe de vocabulário
-      // interno, pelas mesmas razões (achados 2 e 3 das revisões anteriores).
-      const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
-      await gravarPassagemComNovaTentativa(
-        () =>
-          performHumanHandoff(
-            pool,
-            { tenantId, leadId, conversationId: input.conversationId },
-            {
-              reason: MOTIVO_DA_PASSAGEM_POR_CORTE,
-              conversationSummary: buildHandoffSummary(previous),
-              inboxTitle: TITULO_DA_PASSAGEM_POR_CORTE,
-              avisoAoLead: avisoAoLeadPelaFraseDeEspera(espera),
-              log: runLog,
-            },
-          ),
-        { log: runLog, noteRunError },
-      );
-      runLog.info('fail-safe do corte: passagem ao humano gravada', { desfecho_da_frase: desfecho });
+      await passarAoHumanoSemResposta(turn.corte);
     }
 
     if (runError !== null) {
@@ -5577,6 +5691,39 @@ async function executarTurnoDoAgente(
       messages_sent: outcomes.length,
       model: turn.model,
     });
+  } catch (err) {
+    // ═══ (C01, -c01.3, item 1c-i) A ÚLTIMA TENTATIVA FALHOU SEM NENHUMA MENSAGEM AO LEAD ═══
+    //
+    // Um erro aqui volta à fila e o job re-tenta; na ÚLTIMA tentativa ele vai a 'dead'
+    // (alerta `job_dead` na Central) e, se nada tinha saído, o lead fica mudo — o
+    // desfecho possível da C41 (requisições penduradas comendo as tentativas). Antes de o
+    // erro subir, o mesmo fail-safe do corte: caso, frase de espera, passagem gravada. O
+    // erro sobe do mesmo jeito: o job morre com o alerta e o motivo em `last_error`.
+    // `falhaEsgotaAsTentativas` espelha a disposição do worker (o que não gasta
+    // tentativa, o que cancela, o que já foi resolvido, o teto de orçamento).
+    if (
+      !preview &&
+      seq === 0 &&
+      !passadoAoHumano &&
+      !turnoDescartado &&
+      turnoVaiFalarComOLead(liveJob()) &&
+      falhaEsgotaAsTentativas(liveJob(), err)
+    ) {
+      try {
+        await passarAoHumanoSemResposta({
+          motivo: 'falha_na_ultima_tentativa',
+          erro: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+          tentativa: liveJob().attempts,
+          tentativas: liveJob().max_attempts,
+        });
+      } catch (erroDoFailSafe) {
+        // O erro ORIGINAL é o que sobe: é ele que explica o job morto.
+        runLog.error('fail-safe da última tentativa falhou — o job morre com o erro original', {
+          error: (erroDoFailSafe instanceof Error ? erroDoFailSafe.message : String(erroDoFailSafe)).slice(0, 200),
+        });
+      }
+    }
+    throw err;
   } finally {
     await mcpCleanup?.();
   }

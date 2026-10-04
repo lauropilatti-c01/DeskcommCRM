@@ -379,8 +379,9 @@ describe("(C01) a ligação no turno", () => {
     expect(FONTE.match(/if \(tetoCheio\(\) && porRetomar\.size === 0\)/g)).toHaveLength(2);
     expect(FONTE).not.toMatch(/if \(seq >= maxSendsPerTurn\) \{/);
     // (rodada 8) O terceiro `seq === 0` é o fail-safe do corte: "nenhuma mensagem
-    // chegou ao lead neste job" lê a contagem, como os outros dois.
-    expect(FONTE.match(/seq === 0/g)).toHaveLength(3);
+    // chegou ao lead neste job" lê a contagem, como os outros dois. (-c01.3) O quarto é
+    // o da última tentativa que falhou (o `catch` do turno), pela mesma régua.
+    expect(FONTE.match(/seq === 0/g)).toHaveLength(4);
     expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(3);
     expect(FONTE).toMatch(
       /perguntaDoRoteiroPodeSair\(\{ turnoDescartado: turnoDescartado \|\| passadoAoHumano, seq, maxSendsPerTurn \}\)/,

@@ -19,8 +19,11 @@
  *       menos um envio feito, nada muda. A prova de turno completo (Postgres real)
  *       está em `tests/invariants/c01-corte-antes-do-primeiro-envio.test.ts`.
  *
- * O fim por etapas (`stepCountIs(maxSteps)`) é desenho do autor e não vira corte; o
- * prazo das chamadas aborta com exceção (o job falha e re-tenta) e também não.
+ * O prazo das chamadas aborta com exceção (o job falha e re-tenta) e não vira corte.
+ * (-c01.3, item 1c) O fim pelo teto de etapas ainda pedindo ferramenta passou a voltar
+ * em `corte` (`limite_de_etapas`), como o fim pelo teto de saída (`teto_de_saida`), e a
+ * sequência do fail-safe subiu para `passarAoHumanoSemResposta`, que o bloco chama —
+ * ver `c01-fim-sem-resposta-passa-ao-humano.test.ts`.
  */
 import { readFileSync } from "node:fs";
 import { tool } from "ai";
@@ -192,7 +195,7 @@ describe("(C01) `runModelCall` devolve o corte ao chamador", () => {
     expect(r.corte).toBeNull();
   });
 
-  it("o fim pelo teto de ETAPAS do autor (`stepCountIs`) não é corte nosso: `corte` é null", async () => {
+  it("(-c01.3) o fim pelo teto de ETAPAS ainda pedindo ferramenta volta em `corte` como `limite_de_etapas` (o teto de tokens não estourou)", async () => {
     const modelo = modeloQueConsulta([uso(100, 10), uso(100, 10), uso(100, 10)]);
     const r = await runModelCall(
       poolDoModelo(),
@@ -201,7 +204,7 @@ describe("(C01) `runModelCall` devolve o corte ao chamador", () => {
       { registry: modelo.registry as never, log: log as never },
     );
     expect(modelo.estado.etapas).toBe(2);
-    expect(r.corte).toBeNull();
+    expect(r.corte).toEqual({ motivo: "limite_de_etapas", teto: 2, gastos: 2, etapas: 2 });
   });
 
   it("sem teto de tokens (chamada auxiliar) `corte` é null, como sempre", async () => {
@@ -226,8 +229,9 @@ describe("(C01) a ligação pelo código", () => {
       /pararPorTetoDeTokens\(input\.tetoDeTokensDoTurno, deps\.log, \(c\) => \{\s*corte\.valor = c;\s*\}\)/,
     );
     expect(SEAM).toMatch(/avisos: decisao\.avisos,[\s\S]{0,600}corte: corte\.valor,\s*\};\s*\}/);
-    // O motivo único: o prazo das chamadas aborta com exceção e não passa por aqui.
-    expect(SEAM).toMatch(/motivo: 'corte_por_teto_de_tokens';/);
+    // Os motivos (-c01.3: mais o teto de etapas e o de saída); o prazo das chamadas
+    // aborta com exceção e não passa por aqui.
+    expect(SEAM).toMatch(/motivo: 'corte_por_teto_de_tokens' \| 'limite_de_etapas' \| 'teto_de_saida';/);
     expect(SEAM).not.toMatch(/corte_por_timeout/);
     // O teto de etapas do autor fica como está.
     expect(SEAM).toMatch(/stepCountIs\(input\.maxSteps\),/);
@@ -236,20 +240,25 @@ describe("(C01) a ligação pelo código", () => {
   it("o turno: corte nosso + zero mensagens ao lead + sem erro + sem passagem + turno que fala com o lead → caso, frase pelo `send` exclusivo, passagem gravada", () => {
     const i = TURNO.indexOf("turn.corte !== null &&");
     expect(i).toBeGreaterThan(-1);
-    const bloco = TURNO.slice(i - 200, TURNO.indexOf("if (runError !== null) {", i));
-    expect(bloco).toMatch(
-      /if \(\s*!preview &&\s*turn\.corte !== null &&\s*seq === 0 &&\s*runError === null &&\s*!passadoAoHumano &&\s*!turnoDescartado &&\s*turnoVaiFalarComOLead\(liveJob\(\)\)\s*\) \{/,
+    const condicao = TURNO.slice(i - 200, TURNO.indexOf("if (runError !== null) {", i));
+    expect(condicao).toMatch(
+      /if \(\s*!preview &&\s*turn\.corte !== null &&\s*seq === 0 &&\s*runError === null &&\s*!passadoAoHumano &&\s*!turnoDescartado &&\s*turnoVaiFalarComOLead\(liveJob\(\)\)\s*\) \{\s*await passarAoHumanoSemResposta\(turn\.corte\);\s*\}/,
     );
+    // (-c01.3) A sequência mora em `passarAoHumanoSemResposta`; os textos vêm de
+    // `textosDoFimSemResposta` (o corte pelo teto de tokens: os constantes de sempre).
+    const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<void> => {");
+    expect(ini).toBeGreaterThan(-1);
+    const bloco = TURNO.slice(ini, TURNO.indexOf("\n  };\n", ini));
     // Caso ANTES da frase, com a origem do fail-safe; sem caso (e não é "já havia") o job falha.
     expect(bloco).toMatch(/const caso = await openCase\(/);
-    expect(bloco).toMatch(/title: TITULO_DO_CASO_POR_CORTE,/);
+    expect(bloco).toMatch(/title: textos\.tituloDoCaso,/);
     expect(bloco).toMatch(/source: 'guardrail_autofallback',/);
     expect(bloco).toMatch(
-      /if \(!caso\.ok && caso\.error\.code !== 'case_already_open'\) \{\s*throw new Error\(`fail-safe do corte sem caso: \$\{caso\.error\.code\}`\);/,
+      /if \(!caso\.ok && caso\.error\.code !== 'case_already_open'\) \{\s*throw new Error\(`fail-safe do turno sem resposta \(\$\{fim\.motivo\}\) sem caso: \$\{caso\.error\.code\}`\);/,
     );
     // A mesma sequência do fail-safe de vocabulário interno.
     expect(bloco).toMatch(
-      /openedCaseThisTurn = true;\s*moverParaHandoffBestEffort\('corte_por_teto_de_tokens'\);\s*passadoAoHumano = true;/,
+      /openedCaseThisTurn = true;\s*moverParaHandoffBestEffort\(fim\.motivo\);\s*passadoAoHumano = true;/,
     );
     expect(bloco).toMatch(
       /const espera = await runBeforeSend\(\{[\s\S]*?body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,[\s\S]*?hasOpenCase: true,\s*openedCaseThisTurn: true,\s*enforceSpinning: false,[\s\S]*?send: enviarFraseDeEspera,\s*\}\);/,
@@ -258,7 +267,7 @@ describe("(C01) a ligação pelo código", () => {
       /const desfecho = desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);/,
     );
     expect(bloco).toMatch(
-      /await gravarPassagemComNovaTentativa\(\s*\(\) =>\s*performHumanHandoff\(\s*pool,\s*\{ tenantId, leadId, conversationId: input\.conversationId \},\s*\{\s*reason: MOTIVO_DA_PASSAGEM_POR_CORTE,\s*conversationSummary: buildHandoffSummary\(previous\),\s*inboxTitle: TITULO_DA_PASSAGEM_POR_CORTE,\s*avisoAoLead: avisoAoLeadPelaFraseDeEspera\(espera\),/,
+      /await gravarPassagemComNovaTentativa\(\s*\(\) =>\s*performHumanHandoff\(\s*pool,\s*\{ tenantId, leadId, conversationId: input\.conversationId \},\s*\{\s*reason: textos\.motivoDaPassagem,\s*conversationSummary: buildHandoffSummary\(previous\),\s*inboxTitle: textos\.tituloDaPassagem,\s*avisoAoLead: avisoAoLeadPelaFraseDeEspera\(espera\),/,
     );
     // Nada do envio do modelo: sem fotos, sem bolhas, sem plano da retomada.
     for (const proibido of [
