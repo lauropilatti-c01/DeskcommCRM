@@ -221,12 +221,19 @@ export interface RunModelCallInput {
    * reescrever na etapa seguinte, e parar ali entregava rascunho vazio.
    */
   pararQuando?: () => boolean;
-  /** Teto por chamada auxiliar; nunca aumenta o limite configurado pela organização. */
+  /**
+   * Teto de tokens de saída por requisição (auxiliares e, desde a -c01.3, o turno do
+   * agente — knob AGENT_MAX_OUTPUT_TOKENS); nunca aumenta o limite configurado pela
+   * organização.
+   */
   maxOutputTokens?: number;
   /**
-   * (C01) Teto de tokens (entrada + saída, somados pelas etapas) do laço de
-   * ferramentas desta chamada — o `token_budget` da versão publicada do agente,
-   * o mesmo que o runtime nativo (`lib/ai/runtime/agent.ts`) já aplica. Passado
+   * (C01) Teto de tokens do laço de ferramentas desta chamada — o `token_budget` da
+   * versão publicada do agente, o mesmo campo que o runtime nativo
+   * (`lib/ai/runtime/agent.ts`) já aplica. (C01, -c01.3) Conta só o que é NOVO em cada
+   * etapa: saída + entrada fora do cache (`tokensDasEtapas`). Cada etapa reenvia o
+   * prompt inteiro, e com a conta do autor (entrada + saída) um prompt de ~21.700
+   * tokens passava de 50.000 na 3ª etapa só relendo do cache (volta 19-A). Passado
    * o teto, o laço para ao fim da etapa corrente (`pararPorTetoDeTokens`); não é
    * erro: o que já saiu para o cliente fica, e o turno fecha com checkpoint.
    * (C01, rodada 8) O corte volta ao chamador em `corte` (ver `CorteDoLaco`): é
@@ -273,15 +280,26 @@ export function combinarSinais(
 
 /** Etapa do laço como o SDK a entrega — só o que a conta de tokens precisa. */
 export interface EtapaComUso {
-  usage?: { inputTokens?: number; outputTokens?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    inputTokenDetails?: { cacheReadTokens?: number };
+  };
 }
 
-/** (C01) Tokens de entrada + saída somados por todas as etapas até aqui. */
+/**
+ * (C01) Tokens NOVOS somados por todas as etapas até aqui: saída + entrada fora do
+ * cache. (-c01.3) A entrada lida do cache sai da conta: ela é o mesmo prompt relido a
+ * cada etapa, não trabalho novo — e é a parte que fazia o teto cortar turnos normais
+ * de prompt grande (C01.md, "Limite desta versão — o `token_budget`…"). Sem detalhe
+ * de cache (provedor que não informa), conta a entrada inteira, como antes.
+ */
 export function tokensDasEtapas(etapas: ReadonlyArray<EtapaComUso>): number {
-  return etapas.reduce(
-    (total, etapa) => total + (etapa.usage?.inputTokens ?? 0) + (etapa.usage?.outputTokens ?? 0),
-    0,
-  );
+  return etapas.reduce((total, etapa) => {
+    const entrada = etapa.usage?.inputTokens ?? 0;
+    const doCache = etapa.usage?.inputTokenDetails?.cacheReadTokens ?? 0;
+    return total + Math.max(0, entrada - doCache) + (etapa.usage?.outputTokens ?? 0);
+  }, 0);
 }
 
 /**

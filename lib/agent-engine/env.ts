@@ -236,6 +236,11 @@ const envSchema = z.object({
   FOLLOWUP_AI_MODEL: z.string().min(1).optional(),
   // Loop do agente — teto de steps de tool-calls por run.
   AGENT_MAX_STEPS: z.coerce.number().int().positive().default(8),
+  // (C01, -c01.3) Teto de tokens de SAÍDA de cada requisição do turno do agente (o corte da
+  // própria etapa). Sem ele, uma etapa podia gerar sem fim (C54: 66 mil tokens de saída numa
+  // etapa só, 1.033 s) — o `token_budget` da versão só é avaliado entre etapas. O
+  // `maxOutputTokens` da organização (settings.llm.params), quando menor, vence.
+  AGENT_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8000),
   // Teto de mensagens FÍSICAS enviadas ao lead por turno (send_message + send_template
   // somados, bolhas incluídas) — nenhum gate de before-send limita CONTAGEM, só ritmo.
   MAX_SENDS_PER_TURN: z.coerce.number().int().positive().default(3),

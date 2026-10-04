@@ -1393,6 +1393,12 @@ export interface InboundTurnKnobs {
   /** teto de steps do loop de tools por run (AGENT_MAX_STEPS) — circuit breaker fino é F2-15 */
   maxSteps: number;
   /**
+   * (C01, -c01.3) Teto de tokens de saída de cada requisição do turno do agente
+   * (AGENT_MAX_OUTPUT_TOKENS, padrão 8.000). Ausente = sem teto do turno (vale só o da
+   * organização, como antes) — o worker sempre o preenche pelo env; testes o omitem.
+   */
+  maxOutputTokens?: number;
+  /**
    * Teto de mensagens FÍSICAS enviadas ao lead neste turno (MAX_SENDS_PER_TURN),
    * send_message + send_template somados, bolhas incluídas. Ausente = usa
    * `DEFAULT_MAX_SENDS_PER_TURN` — main.ts sempre o preenche pelo knob do env;
@@ -4985,6 +4991,12 @@ async function executarTurnoDoAgente(
         // acumulado passa do teto — mesma régua que o runtime nativo aplica.
         ...(agentConfig?.tokenBudget !== undefined
           ? { tetoDeTokensDoTurno: agentConfig.tokenBudget }
+          : {}),
+        // (C01, -c01.3) O corte da PRÓPRIA etapa: o teto acima só é avaliado entre
+        // etapas, e uma etapa podia gerar sem fim (C54: 66 mil tokens de saída numa só).
+        // O `maxOutputTokens` da organização, quando menor, vence (ver o seam).
+        ...(deps.knobs.maxOutputTokens !== undefined
+          ? { maxOutputTokens: deps.knobs.maxOutputTokens }
           : {}),
         // (C01) O laço para ao fim da etapa em que o fail-safe passou o turno a uma
         // pessoa: o modelo não ganha outra etapa para chamar send_template (ou

@@ -16,8 +16,9 @@
  *      existia na tela e no runtime antigo, mas o motor nunca lia) vira condição
  *      de parada do laço de ferramentas, como já era `maxSteps`.
  *
- * O teto por chamada (`maxOutputTokens`) continua sendo o da organização: um
- * valor por turno acima do máximo do modelo faria o provedor recusar a chamada.
+ * O teto por chamada (`maxOutputTokens`) era só o da organização. Desde a -c01.3 o
+ * turno do agente também passa o seu (`AGENT_MAX_OUTPUT_TOKENS`, padrão 8.000; o da
+ * organização, quando menor, vence) — ver `c01-teto-de-saida-e-teto-sem-cache.test.ts`.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
