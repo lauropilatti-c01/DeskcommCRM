@@ -1193,18 +1193,27 @@ async function briefingDoCheckpointDuravel(
  * Bloco de sistema RESIDENTE das tools de caso (spec 15 §5.2) — entra no prefixo
  * cacheável junto do índice de skills quando `casesEnabled`, pra não sumir em
  * conversa longa (ao contrário do índice de skills, este bloco não some).
+ *
+ * (C01, -c01.3, item 4) O fim do bloco mandava dizer ao lead que ia verificar ou
+ * ajustar e depois voltar com uma resposta — o contrário do texto do vendedor
+ * (`docs/comercial/02`, seção 7: "não diga que alguém já está analisando nem prometa
+ * prazo ou resultado"), e o bloco fixo vencia: "a equipe vai conferir o pagamento e te
+ * avisar por aqui assim que possível" (C10), "registrei seu pedido pra equipe te
+ * orientar assim que possível" (C51). Agora o bloco diz o que foi registrado e o que a
+ * pessoa pode fazer agora, sem prometer retorno, prazo nem resultado.
  */
-const CASES_SYSTEM_BLOCK =
+export const CASES_SYSTEM_BLOCK =
   '## Casos para um humano de retaguarda\n' +
   'Quando você NÃO conseguir resolver o pedido do lead sozinho (liberar acesso, corrigir algo num ' +
   'sistema, uma decisão que exige uma pessoa), use a tool open_human_case — você CONTINUA conversando ' +
-  'com o lead, não silencia. NUNCA prometa ao lead que um humano vai verificar/resolver sem antes chamar ' +
+  'com o lead, não silencia. NUNCA diga ao lead que uma pessoa vai cuidar do pedido sem antes chamar ' +
   'open_human_case. Quando um caso estiver esperando informação do cliente e você já a obteve na ' +
   'conversa, use provide_case_update para devolver ao responsável. Ao avisar o lead que abriu o caso, ' +
   'NUNCA narre a causa técnica ou interna (erro de sistema, falha de confirmação, nome de ferramenta, ' +
   'log ou qualquer diagnóstico) — isso é assunto técnico e não vai pro cliente. `title`/`summary`/`blocker` ' +
-  'são só para o humano; a mensagem ao lead diz apenas, em linguagem simples, que você vai verificar/ajustar ' +
-  'e volta com uma resposta, sem explicar o motivo interno.';
+  'são só para o humano. A mensagem ao lead diz, em linguagem simples, o que ficou registrado e o que ele ' +
+  'pode fazer agora (seguir pela página, mandar o que falta), sem prometer retorno, prazo nem resultado: ' +
+  'não diga que alguém já está analisando, que vai verificar e voltar, nem quando.';
 
 /**
  * Bloco de sistema RESIDENTE de transparência — SEMPRE presente, independente de
@@ -1219,15 +1228,23 @@ const CASES_SYSTEM_BLOCK =
  * detector de vazamento (`vazamento-interno.ts`) não pega isso por desenho — ele caça
  * FORMA (identificador técnico), não sentença comum em português — então a única
  * cura possível aqui é instrução, não filtro.
+ *
+ * (C01, -c01.3, item 4) A saída que o bloco oferecia (dizer que ia verificar e voltar,
+ * ou pedir mais tempo) era promessa de retorno — a mesma que o texto do vendedor
+ * proíbe (ver `CASES_SYSTEM_BLOCK`). Agora: o que ficou
+ * registrado e o que a pessoa pode fazer agora, sem prometer retorno, prazo nem
+ * resultado que nenhuma ferramenta confirmou.
  */
-const TRANSPARENCIA_SYSTEM_BLOCK =
+export const TRANSPARENCIA_SYSTEM_BLOCK =
   '## Nunca narre problema interno ao lead\n' +
   'Em QUALQUER mensagem — abrindo caso ou não — NUNCA diga ao lead que "houve um problema/erro no ' +
   'sistema", "falha na confirmação", "erro técnico" ou qualquer variação que admita que algo deu errado ' +
   'do lado interno. Isso vale mesmo quando você está incerto do resultado de uma ferramenta ou algo ' +
   'falhou sem você entender o motivo. O lead não precisa do diagnóstico, precisa saber o que fazer ' +
-  'agora: diga que vai verificar/confirmar e volta com a resposta, peça mais um instante, ou pergunte de ' +
-  'novo o que falta — nunca admita que "o sistema" ou "a confirmação" teve um problema.';
+  'agora: diga o que ficou registrado e o que ele pode fazer neste momento, ou pergunte de novo o que ' +
+  'falta. Não prometa por conta própria retorno, prazo nem resultado que nenhuma ferramenta confirmou ' +
+  '(nada de "vou verificar e já te volto", "a equipe vai te avisar", "só um instante") — e nunca admita ' +
+  'que "o sistema" ou "a confirmação" teve um problema.';
 
 /**
  * Bloco de sistema RESIDENTE da Agenda — entra no prefixo cacheável sempre que o
