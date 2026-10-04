@@ -246,7 +246,7 @@ describe("(C01) a ligação pelo código", () => {
     );
     // (-c01.3) A sequência mora em `passarAoHumanoSemResposta`; os textos vêm de
     // `textosDoFimSemResposta` (o corte pelo teto de tokens: os constantes de sempre).
-    const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<void> => {");
+    const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {");
     expect(ini).toBeGreaterThan(-1);
     const bloco = TURNO.slice(ini, TURNO.indexOf("\n  };\n", ini));
     // Caso ANTES da frase, com a origem do fail-safe; sem caso (e não é "já havia") o job falha.

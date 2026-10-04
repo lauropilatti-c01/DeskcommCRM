@@ -238,7 +238,7 @@ describe("(C01) a ligação no turno, pelo código", () => {
   });
 
   it("a sequência comum: caso → frase pelo `send` exclusivo → passagem gravada, com os textos do fim", () => {
-    const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<void> => {");
+    const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {");
     expect(ini).toBeGreaterThan(-1);
     const corpo = TURNO.slice(ini, TURNO.indexOf("\n  };\n", ini));
     const caso = corpo.indexOf("const caso = await openCase(");

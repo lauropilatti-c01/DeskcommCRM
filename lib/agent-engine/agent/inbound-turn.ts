@@ -502,6 +502,22 @@ export const AGENT_TOOL_DEFS = {
 export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 3;
 
 /**
+ * (C01, -c01.3, item 1d) As travas de CONTEÚDO que seguem a mesma régua da de vocabulário
+ * interno, cada uma com o seu contador por turno: 1º veto ensina; 2º ensina e avisa que é
+ * a última tentativa; no 3º o texto vetado não sai e o turno passa à equipe pelo mesmo
+ * caminho (caso, frase de espera, passagem gravada — `passarAoHumanoSemResposta`). Antes,
+ * o veto da promessa semântica só ensinava, sem limite: o modelo podia reescrever a mesma
+ * promessa até o teto de etapas, com o lead esperando. O valor é o nome legível da trava,
+ * que o caso e a passagem mostram.
+ */
+export const TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE: Readonly<Record<string, string>> = {
+  promise_semantic: 'promessa sem respaldo',
+};
+
+/** (C01, -c01.3) O limite das travas de conteúdo: o mesmo da de vocabulário interno. */
+export const MAX_VETOS_DE_CONTEUDO = MAX_VETOS_DE_VOCABULARIO_INTERNO;
+
+/**
  * (C01) O que o cliente lê quando a resposta do modelo não pôde sair (3 vetos de
  * vocabulário interno): curta, sem prazo, sem nome de ferramenta, e verdadeira — uma
  * pessoa da equipe foi acionada pelo caso aberto no mesmo instante. Configurável por
@@ -750,10 +766,16 @@ export const TITULO_DO_CASO_POR_FALHA_NA_ULTIMA_TENTATIVA = 'IA falhou em todas 
 export const TITULO_DA_PASSAGEM_POR_FALHA_NA_ULTIMA_TENTATIVA =
   'IA falhou em todas as tentativas de responder — assumir a conversa';
 
-/** (C01, -c01.3) Por que o turno acabou sem nenhuma mensagem ao lead. */
+/**
+ * (C01, -c01.3) Por que a resposta do turno não sai e o turno passa à equipe: os fins sem
+ * nenhuma mensagem ao lead (o corte do laço, a falha na última tentativa) e o limite de
+ * vetos de uma trava de conteúdo (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE`), em que `texto` é o
+ * que o modelo tentou mandar — é o que a pessoa precisa ler para responder no lugar dele.
+ */
 export type FimSemResposta =
   | CorteDoLaco
-  | { motivo: 'falha_na_ultima_tentativa'; erro: string; tentativa: number; tentativas: number };
+  | { motivo: 'falha_na_ultima_tentativa'; erro: string; tentativa: number; tentativas: number }
+  | { motivo: 'veto_de_conteudo'; trava: string; vetos: number; texto: string };
 
 /** (C01, -c01.3) O que o caso e a passagem dizem, conforme o fim. */
 export interface TextosDoFimSemResposta {
@@ -765,9 +787,10 @@ export interface TextosDoFimSemResposta {
 }
 
 const SEM_MENSAGEM_NESTE_TURNO = 'Nenhuma mensagem saiu ao cliente neste turno.';
+const NENHUMA_AO_CLIENTE = 'e nenhuma mensagem chegou ao cliente neste turno';
 const fimDoBloqueio = (oQue: string): string =>
-  `Aberto automaticamente: ${oQue}, e nenhuma mensagem chegou ao cliente neste turno. O sistema manda ` +
-  'uma frase de espera ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.';
+  `Aberto automaticamente: ${oQue}. O sistema manda uma frase de espera ao cliente (a entrega ` +
+  'aparece na conversa); uma pessoa precisa responder.';
 
 /**
  * (C01, -c01.3) Os textos do fail-safe do turno sem resposta. O corte pelo teto de
@@ -797,7 +820,7 @@ export function textosDoFimSemResposta(fim: FimSemResposta): TextosDoFimSemRespo
           'A IA não chegou a responder: o laço de ferramentas chegou ao limite de etapas da versão ' +
           `(${fim.etapas} de ${fim.teto}) ainda consultando. ` +
           SEM_MENSAGEM_NESTE_TURNO,
-        bloqueio: fimDoBloqueio('a IA chegou ao limite de etapas da versão sem responder'),
+        bloqueio: fimDoBloqueio(`a IA chegou ao limite de etapas da versão sem responder, ${NENHUMA_AO_CLIENTE}`),
         motivoDaPassagem: MOTIVO_DA_PASSAGEM_POR_LIMITE_DE_ETAPAS,
         tituloDaPassagem: TITULO_DA_PASSAGEM_POR_LIMITE_DE_ETAPAS,
       };
@@ -808,17 +831,36 @@ export function textosDoFimSemResposta(fim: FimSemResposta): TextosDoFimSemRespo
           'A IA não chegou a responder: uma etapa parou no tamanho máximo de resposta ' +
           `(${fim.gastos} tokens; teto ${fim.teto > 0 ? fim.teto : 'do próprio modelo'}). ` +
           SEM_MENSAGEM_NESTE_TURNO,
-        bloqueio: fimDoBloqueio('a resposta da IA passou do tamanho máximo por etapa e não saiu'),
+        bloqueio: fimDoBloqueio(
+          `a resposta da IA passou do tamanho máximo por etapa e não saiu, ${NENHUMA_AO_CLIENTE}`,
+        ),
         motivoDaPassagem: MOTIVO_DA_PASSAGEM_POR_TETO_DE_SAIDA,
         tituloDaPassagem: TITULO_DA_PASSAGEM_POR_TETO_DE_SAIDA,
       };
+    case 'veto_de_conteudo': {
+      const nome = Object.hasOwn(TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE, fim.trava)
+        ? TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE[fim.trava]!
+        : 'revisão automática';
+      const titulo = `Resposta travada pela revisão automática (${nome})`;
+      return {
+        tituloDoCaso: titulo,
+        resumo: fim.texto,
+        // O caso é aberto ANTES da frase: o texto não afirma que o cliente a recebeu.
+        bloqueio: fimDoBloqueio(
+          `a IA tentou ${fim.vetos} vezes responder e a revisão automática travou a mensagem (${nome}); ` +
+            'ela não saiu',
+        ),
+        motivoDaPassagem: `A revisão automática travou a resposta da IA (${nome}); uma pessoa precisa responder`,
+        tituloDaPassagem: `${titulo} — assumir a conversa`,
+      };
+    }
     case 'falha_na_ultima_tentativa':
       return {
         tituloDoCaso: TITULO_DO_CASO_POR_FALHA_NA_ULTIMA_TENTATIVA,
         resumo:
           `A IA não chegou a responder: a tentativa ${fim.tentativa} de ${fim.tentativas} também falhou ` +
           `(${fim.erro}). Nenhuma mensagem saiu ao cliente.`,
-        bloqueio: fimDoBloqueio('a IA falhou em todas as tentativas de responder'),
+        bloqueio: fimDoBloqueio(`a IA falhou em todas as tentativas de responder, ${NENHUMA_AO_CLIENTE}`),
         motivoDaPassagem: MOTIVO_DA_PASSAGEM_POR_FALHA_NA_ULTIMA_TENTATIVA,
         tituloDaPassagem: TITULO_DA_PASSAGEM_POR_FALHA_NA_ULTIMA_TENTATIVA,
       };
@@ -3284,6 +3326,9 @@ async function executarTurnoDoAgente(
   // (`internal_vocabulary_leak`): 1º veto no turno ensina o modelo a reescrever; persistir
   // solta o envio com registro. Por turno (closure), nunca cross-turno.
   let internalVocabularyVetoCount = 0;
+  // (C01, -c01.3) Os contadores das travas de conteúdo (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE`),
+  // um por código. Por turno (closure), nunca cross-turno.
+  const vetosDeConteudo = new Map<string, number>();
   // Uma recusa deste tipo devolve o texto confirmado ao modelo para que ele
   // reescreva antes de falar com o cliente. Não gasta envio nem toca no canal.
   let falseEmptyInboundVetoCount = 0;
@@ -4166,6 +4211,56 @@ async function executarTurnoDoAgente(
               },
             };
           }
+          if (chain.status === 'vetoed' && Object.hasOwn(TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE, chain.code)) {
+            // (C01, -c01.3, item 1d) As travas de conteúdo com contador e fail-safe, pela
+            // régua da de vocabulário interno (acima): 1º veto ensina; 2º ensina e avisa
+            // que é a última tentativa; 3º: o texto vetado não sai e o turno passa à
+            // equipe pelo caminho comum (`passarAoHumanoSemResposta`: caso com o texto
+            // vetado, frase de espera pelo `send` exclusivo, passagem gravada). Um
+            // contador por trava, por turno.
+            const vetos = (vetosDeConteudo.get(chain.code) ?? 0) + 1;
+            vetosDeConteudo.set(chain.code, vetos);
+            if (vetos < MAX_VETOS_DE_CONTEUDO) {
+              const ultima = vetos === MAX_VETOS_DE_CONTEUDO - 1;
+              return {
+                ok: false,
+                error: {
+                  code: chain.code,
+                  message: ultima ? `${chain.message} ${AVISO_DE_ULTIMA_TENTATIVA}` : chain.message,
+                },
+              };
+            }
+            let desfecho: DesfechoDaFraseDeEspera;
+            try {
+              desfecho = await passarAoHumanoSemResposta({
+                motivo: 'veto_de_conteudo',
+                trava: chain.code,
+                vetos,
+                texto: body,
+              });
+            } catch (err) {
+              // Sem pessoa acionada não há frase de espera honesta: o erro sobe pelo
+              // `runError` e o job re-tenta (o cliente fica atrasado, com rastro).
+              noteRunError(err instanceof Error ? err : new Error(String(err)));
+              return {
+                ok: false,
+                error: {
+                  code: 'internal_error',
+                  message: 'não foi possível acionar a equipe — encerre o turno agora.',
+                },
+              };
+            }
+            return {
+              ok: false,
+              error: {
+                code: `${chain.code}_handoff`,
+                message:
+                  `Sua mensagem NÃO foi enviada: depois de ${vetos} tentativas a revisão automática ainda a ` +
+                  `travava. ${AVISO_AO_MODELO_POR_DESFECHO[desfecho]} ` +
+                  'NÃO escreva mais nada neste turno — encerre agora.',
+              },
+            };
+          }
           if (chain.status === 'vetoed') {
             // Cap de warm-up/diário: reescrever o texto não resolve (é rate limit, não
             // conteúdo) — ensinar o modelo a "tentar de novo" só gasta passo. Guardamos
@@ -4694,11 +4789,14 @@ async function executarTurnoDoAgente(
    * cliente. Quem chama confere as condições (sem preview, nenhuma mensagem contada em
    * `seq`, sem passagem, turno não descartado, turno que fala com o lead).
    */
-  const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<void> => {
+  const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {
     const textos = textosDoFimSemResposta(fim);
+    // O texto vetado (`veto_de_conteudo`) vai ao caso, nunca ao log.
     runLog.warn(
-      'fail-safe do turno sem resposta: nenhuma mensagem ao lead — caso aberto e frase de espera',
-      { ...fim },
+      'fail-safe do turno sem resposta: a resposta não sai — caso aberto e frase de espera',
+      fim.motivo === 'veto_de_conteudo'
+        ? { motivo: fim.motivo, trava: fim.trava, vetos: fim.vetos }
+        : { ...fim },
     );
     // O caso ANTES da frase, como no fail-safe de vocabulário interno: sem pessoa
     // acionada não há frase de espera honesta. Sem caso (e não é "já havia um"), o
@@ -4767,6 +4865,7 @@ async function executarTurnoDoAgente(
       motivo: fim.motivo,
       desfecho_da_frase: desfecho,
     });
+    return desfecho;
   };
 
   // 2B-tools: tools do catálogo MCP habilitadas NA TELA entram no run (audit +
