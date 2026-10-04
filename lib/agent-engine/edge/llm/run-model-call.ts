@@ -176,6 +176,11 @@ const paramsSchema = z
     topP: z.number().optional(),
     topK: z.number().int().optional(),
     maxOutputTokens: z.number().int().positive().optional(),
+    // (C01, -c01.3, item 5) Só o OpenRouter os envia (ver `ParametrosDoOpenRouter` em
+    // `./providers.ts`); os nomes são os do corpo da API.
+    reasoning_effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+    seed: z.number().int().optional(),
+    verbosity: z.enum(['low', 'medium', 'high']).optional(),
   })
   .passthrough();
 
@@ -653,9 +658,6 @@ async function registrarRecusaDeEnderecoSemChave(d: {
 }
 
 export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunModelCallInput, deps: RunModelCallDeps = {}) {
-  // O knob do raciocínio da DeepSeek entra pela fábrica: `deepseekThinking` só é
-  // lido pela fábrica `deepseek`, então os outros provedores não têm como mudar.
-  const registry = deps.registry ?? createDefaultRegistry({ deepseekThinking: cfg.deepseekThinking });
   const purpose = input.purpose ?? 'agent_turn';
 
   // A config da org é lida ANTES da decisão porque o resolvedor precisa dela
@@ -714,15 +716,29 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   if (config.enabledModels.length > 0 && !config.enabledModels.includes(model)) {
     throw new LlmModelNotEnabledError(model);
   }
-  const factory = registry[config.provider];
-  if (factory === undefined) {
-    throw new LlmProviderUnknownError(config.provider);
-  }
   const parsedParams = paramsSchema.safeParse(config.params);
   if (!parsedParams.success) {
     throw new Error('params inválidos em organizations.settings.llm.params — corrija a config da org');
   }
-  const { temperature, topP, topK, maxOutputTokens } = parsedParams.data;
+  const { temperature, topP, topK, maxOutputTokens, reasoning_effort, seed, verbosity } = parsedParams.data;
+  // O knob do raciocínio da DeepSeek entra pela fábrica: `deepseekThinking` só é
+  // lido pela fábrica `deepseek`, então os outros provedores não têm como mudar.
+  // (C01, -c01.3) Idem os parâmetros do OpenRouter, lidos dos params da org — por
+  // isso o registry nasce depois da leitura deles.
+  const registry =
+    deps.registry ??
+    createDefaultRegistry({
+      deepseekThinking: cfg.deepseekThinking,
+      openrouterParams: {
+        ...(reasoning_effort !== undefined ? { reasoning_effort } : {}),
+        ...(seed !== undefined ? { seed } : {}),
+        ...(verbosity !== undefined ? { verbosity } : {}),
+      },
+    });
+  const factory = registry[config.provider];
+  if (factory === undefined) {
+    throw new LlmProviderUnknownError(config.provider);
+  }
 
   // ═══ A CHAVE DA INSTALAÇÃO NÃO VAI PARA O ENDEREÇO DA EMPRESA ═══
   //
