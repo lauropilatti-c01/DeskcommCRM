@@ -52,6 +52,9 @@ const TEM_DE_VETAR = [
   "Os juros são de 1,67% ao mês.",
   "Dá pra parcelar em 12 vezes.",
   "Sai por 49 € por mês.",
+  // (Rodada 2, achado 3 da 1ª revisão da -c01.3) "real" no singular, como `extractPromises` lê.
+  "A matrícula custa 1 real.",
+  "Fica 1 real por dia de estudo.",
 ];
 
 const NAO_PODE_VETAR = [
@@ -72,6 +75,11 @@ const NAO_PODE_VETAR = [
   "Só 1% dos inscritos chega à segunda fase.",
   "Concorreram mais de 60 mil candidatos.",
   "O salário inicial de técnico é de R$ 5.800, fora os benefícios.",
+  // (Rodada 2) O salário sem separador de milhar, e cada valor depois da sua palavra do cargo.
+  "O salário inicial é de R$ 6000.",
+  "O salário inicial é de 6000 reais, fora os benefícios.",
+  "O salário do cargo é R$ 6 mil.",
+  "A remuneração é de R$ 6000 mais auxílio de R$ 1200.",
   "A página do 18x é https://matricula.escolaexemplo.com.br/pay/concurso-estatal-premium-administracao-completo-18x",
   "Os planos são o Plano Completo e o de 12 meses; a diferença é o tempo de acesso.",
 ];
@@ -109,6 +117,23 @@ describe("(C01) a trava 'valor em dinheiro'", () => {
 
   it("o salário não abre brecha para o preço do curso na mesma frase", async () => {
     expect((await avaliar("O salário é de R$ 5.800,00 e o curso sai por R$ 2.490.")).pass).toBe(false);
+  });
+
+  it.each([
+    // (Rodada 2, achado 3 da 1ª revisão da -c01.3) Sem separador de milhar, a isenção do
+    // salário cobria qualquer valor até 40 caracteres depois — inclusive o preço seguinte.
+    "Com salário de R$ 6000, o curso custa R$ 997.",
+    "Com salário de 6000 reais, o curso custa 997 reais.",
+    "O salário passa de R$ 6 mil, e a matrícula sai por R$ 997.",
+    // A isenção também acaba na oferta, mesmo sem outro número no meio.
+    "Para quem sonha com salário alto, o curso custa R$ 997.",
+    "Pensando no salário, o investimento é de 997 reais.",
+  ])("a isenção vale só para o valor do cargo: %s", async (frase) => {
+    const v = await avaliar(frase);
+    expect(v.pass, frase).toBe(false);
+    // O que a trava aponta é o preço; o salário continua isento.
+    expect(v.reason).toMatch(/"(?:r\$ 9|997 reais)"/);
+    expect(v.reason).not.toMatch(/"r\$ 6"|6000|6 mil/);
   });
 
   it("o trace leva só a contagem", async () => {

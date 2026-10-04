@@ -17,7 +17,9 @@
  * vaga, "100% online", "30% das vagas", "3 mil questões" — o "%" só conta com desconto
  * ou "off"; o "mil" não conta antes de questões, inscritos, vagas e afins. O salário e
  * os benefícios do cargo (fato da base que a régua isenta) também passam: o valor logo
- * depois de "salário", "remuneração", "benefício"… na mesma frase não conta.
+ * depois de "salário", "remuneração", "benefício"… na mesma frase não conta — só ele
+ * (rodada 2): a isenção acaba no primeiro número depois da palavra e em qualquer palavra
+ * de oferta ("curso", "matrícula", "custa"…).
  *
  * Trava de CONTEÚDO: contador e fail-safe da promessa semântica
  * (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE` em `inbound-turn.ts`).
@@ -29,7 +31,7 @@ import { extractPromises } from './promise/engine';
 /** As formas da M1 que `extractPromises` não lê, sobre o texto em minúsculas e sem acento. */
 const FORMAS_DA_M1: readonly RegExp[] = [
   /r\$\s?\d/g,
-  /\b\d[\d.,]*\s?(?:mil\s?)?reais\b/g,
+  /\b\d[\d.,]*\s?(?:mil\s?)?(?:reais|real)\b/g,
   /\b\d+\s?(?:x|vezes)\s?de\s?(?:r\$\s?)?\d/g,
   /\b\d+\s?x\s+(?:r\$\s?)?\d/g,
   /\bem ate \d+\s?(?:x|vezes)\b/g,
@@ -46,9 +48,20 @@ const FORMAS_DA_M1: readonly RegExp[] = [
   /\b\d+\s?mil\b(?!\s?(?:questoes|exercicios|alunos|alunas|aprovados|aprovadas|inscritos|inscritas|candidatos|candidatas|concorrentes|estudantes|usuarios|pessoas|horas|metas|aulas|videoaulas|paginas|vagas|km))/g,
 ];
 
-/** Fato do cargo, não preço do curso: o valor que vem logo depois destas palavras, na mesma frase. */
+/**
+ * Fato do cargo, não preço do curso: o valor que vem logo depois destas palavras, na mesma
+ * frase. (C01, -c01.3, rodada 2) Só o PRIMEIRO valor: entre a palavra e ele não pode
+ * haver outro número (o grupo exclui dígitos) nem palavra de oferta (`OFERTA`). Antes,
+ * qualquer valor até 40 caracteres depois era isento, e "Com salário de R$ 6000, o curso
+ * custa R$ 997." passava inteiro (achado 3 da 1ª revisão adversarial da -c01.3); o teste
+ * usava salário com ponto de milhar, que interrompia a janela e escondia o buraco.
+ */
 const FATO_DO_CARGO =
-  /\b(?:salari\w*|remunera\w*|vencimentos?|piso|beneficios?|auxilio|plr|participacao nos lucros)\b[^.!?\n]{0,40}$/;
+  /\b(?:salari\w*|remunera\w*|vencimentos?|piso|beneficios?|auxilio|plr|participacao nos lucros)\b([^.!?\n\d]{0,40})$/;
+
+/** O começo da oferta do curso: encerra a isenção do cargo. Sobre o texto sem acento. */
+const OFERTA =
+  /\b(?:cursos?|matriculas?|inscricao|investimento|mensalidades?|custa|custam|custo|preco|parcelas?|desconto|promocao|oferta)\b/;
 
 function semAcento(texto: string): string {
   return texto
@@ -74,13 +87,14 @@ export function trechosDeDinheiro(body: string): string[] {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(t)) !== null) {
-      if (FATO_DO_CARGO.test(t.slice(0, m.index))) continue;
+      const cargo = FATO_DO_CARGO.exec(t.slice(0, m.index));
+      if (cargo !== null && !OFERTA.test(cargo[1] ?? '')) continue;
       trechos.push(m[0]);
     }
   }
   // O que o detector de promessas lê e a lista acima não cobre (euro, "N% off",
-  // "desconto de N%", "parcelado em 12x"). Real (R$, reais) fica com a lista acima, que
-  // conhece a isenção do salário.
+  // "desconto de N%", "parcelado em 12x"). Real (R$, reais, real) fica com a lista acima,
+  // que lê as mesmas formas e conhece a isenção do salário.
   if (trechos.length === 0) {
     for (const p of extractPromises(original)) {
       if (p.kind === 'discount') trechos.push(`${p.value}%`);
