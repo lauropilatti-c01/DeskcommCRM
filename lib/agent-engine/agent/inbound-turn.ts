@@ -2939,6 +2939,27 @@ async function executarTurnoDoAgente(
   // modelo BARATO; o resumo compactado entra no lugar do rolling summary e o transcript
   // integral é trocado por uma cauda recente sob orçamento (regra de cache 15). O rolling
   // summary DURÁVEL segue vindo do checkpoint de fechamento; aqui ele só alimenta o prompt.
+  //
+  // (C01, -c01.3, rodada 2) A FALHA DA PREPARAÇÃO NA ÚLTIMA TENTATIVA. O flush e a
+  // compactação chamam o provedor antes do corpo do turno, e o `catch` da última
+  // tentativa (item 1c-i) só cobria o corpo: o prazo vencido de uma delas levava o job a
+  // 'dead' sem caso, sem frase de espera e sem passagem (achado 1 da 1ª revisão
+  // adversarial da -c01.3). Na última tentativa a falha fica guardada, a preparação
+  // termina com o histórico cru (o mesmo de quando a compactação não dispara) e o erro
+  // ORIGINAL sobe na primeira linha do corpo, onde o `catch` confere as guardas de
+  // sempre: lease e o que a fila cancela ou adia (`falhaEsgotaAsTentativas`), envios
+  // anteriores, passagem, turno descartado, turno que fala com o lead. Antes da última
+  // tentativa nada muda: o erro sobe daqui e a fila re-tenta. As outras chamadas de
+  // modelo da preparação (o roteador e o roteiro) já seguem sem elas quando falham.
+  const preparacao: { falha: { erro: unknown } | null } = { falha: null };
+  const adiarFalhaDaUltimaTentativa = (err: unknown): null => {
+    if (preview || !falhaEsgotaAsTentativas(liveJob(), err)) throw err;
+    preparacao.falha = { erro: err };
+    runLog.warn('preparação do turno falhou na última tentativa — a falha sobe no corpo do turno', {
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    });
+    return null;
+  };
   let effectivePrevious = previous;
   let effectiveContext = openingContext.context;
   if (deps.knobs.compaction !== undefined) {
@@ -2967,7 +2988,7 @@ async function executarTurnoDoAgente(
             }
           : {}),
       },
-    );
+    ).catch(adiarFalhaDaUltimaTentativa);
     if (compacted !== null) {
       // Só o rolling_summary é sobrescrito (o resumo compactado carrega compromissos/
       // objeções/estágio/dados pessoais planificados). O `previous` sintético do 1º
@@ -4999,6 +5020,10 @@ async function executarTurnoDoAgente(
   // ver edge/crm/mcp-tools.ts). As 8 tools do engine têm precedência de nome.
   let mcpCleanup: (() => Promise<void>) | null = null;
   try {
+    // (C01, -c01.3, rodada 2) A falha da preparação guardada na última tentativa
+    // (`adiarFalhaDaUltimaTentativa`, na compactação) sobe aqui, já dentro do corpo: o
+    // `catch` abaixo decide a passagem à equipe pelas mesmas guardas da falha do corpo.
+    if (preparacao.falha !== null) throw preparacao.falha.erro;
     if (agentConfig !== null && agentConfig.toolIds.length > 0) {
       try {
         // As de OPERAÇÃO saem antes de serem montadas, quando o Operador as tem.
@@ -5925,7 +5950,9 @@ async function executarTurnoDoAgente(
     // erro subir, o mesmo fail-safe do corte: caso, frase de espera, passagem gravada. O
     // erro sobe do mesmo jeito: o job morre com o alerta e o motivo em `last_error`.
     // `falhaEsgotaAsTentativas` espelha a disposição do worker (o que não gasta
-    // tentativa, o que cancela, o que já foi resolvido, o teto de orçamento).
+    // tentativa, o que cancela, o que já foi resolvido, o teto de orçamento). (Rodada 2)
+    // A falha da compactação na última tentativa também chega aqui (ver
+    // `adiarFalhaDaUltimaTentativa`).
     if (
       !preview &&
       seq === 0 &&

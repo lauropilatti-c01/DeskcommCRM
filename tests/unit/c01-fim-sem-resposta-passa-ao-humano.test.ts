@@ -281,4 +281,21 @@ describe("(C01) a ligação no turno, pelo código", () => {
     // Entre o início do corpo e a captura não há outro `catch` no nível do corpo.
     expect(TURNO.slice(corpoDoTurno, captura).match(/\n {2}\} catch \(/g)).toHaveLength(1);
   });
+
+  it("(i, rodada 2) a falha da compactação na última tentativa fica guardada e sobe na primeira linha do corpo, onde o `catch` a trata", () => {
+    // A única chamada da compactação passa pela captura; o comportamento, contra o banco,
+    // está em `tests/invariants/c01-falha-na-preparacao-na-ultima-tentativa.test.ts`.
+    expect(TURNO.match(/await maybeCompact\(/g)).toHaveLength(1);
+    const chamada = TURNO.indexOf("const compacted = await maybeCompact(");
+    expect(chamada).toBeGreaterThan(-1);
+    expect(TURNO.indexOf("    ).catch(adiarFalhaDaUltimaTentativa);\n    if (compacted !== null) {", chamada)).toBeGreaterThan(chamada);
+    // Só na última tentativa (a mesma régua do `catch`); antes dela o erro sobe na hora.
+    expect(TURNO).toMatch(
+      /const adiarFalhaDaUltimaTentativa = \(err: unknown\): null => \{\s*if \(preview \|\| !falhaEsgotaAsTentativas\(liveJob\(\), err\)\) throw err;\s*preparacao\.falha = \{ erro: err \};/,
+    );
+    // E sobe dentro do `try` do corpo, antes de qualquer outra coisa.
+    expect(TURNO).toMatch(
+      /let mcpCleanup: \(\(\) => Promise<void>\) \| null = null;\n {2}try \{\n(?: {4}\/\/.*\n)*\s*if \(preparacao\.falha !== null\) throw preparacao\.falha\.erro;/,
+    );
+  });
 });
