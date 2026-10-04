@@ -73,6 +73,10 @@ const NAO_AVALIAVEIS_SEM_TURNO: ReadonlyArray<{ gate: string; porque: string }> 
     porque: "depende de a ferramenta de agenda ter sido chamada neste turno — não há turno real no teste",
   },
   {
+    gate: "link_permitido",
+    porque: "depende dos links que a base devolveu e dos já mandados nesta conversa",
+  },
+  {
     gate: "texto_longo",
     porque: "depende de quantas mensagens ainda cabem na resposta e da configuração da organização",
   },

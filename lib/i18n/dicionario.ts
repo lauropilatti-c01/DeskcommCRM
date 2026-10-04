@@ -11281,6 +11281,15 @@ export const DICIONARIO: Traducoes = {
   "Esconder que é um assistente é enganar o cliente.": {
     es: "Ocultar que es un asistente es engañar al cliente.",
   },
+  "Só mandar link que tem de onde vir": {
+    es: "Solo enviar enlaces que tengan de dónde venir",
+  },
+  "Barra o link que o assistente montou ou alterou: só sai o endereço que a sua base devolveu, que já foi mandado nesta conversa ou que é de um domínio que você liberou.": {
+    es: "Bloquea el enlace que el asistente armó o modificó: solo sale la dirección que devolvió tu base, que ya se envió en esta conversación o que es de un dominio que habilitaste.",
+  },
+  "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.": {
+    es: "Depende de la lista de dominios de cada negocio. Si el asistente insiste tres veces con un enlace sin origen, la conversación pasa a una persona del equipo y el enlace no sale.",
+  },
   "Vem desligada; liga-se na configuração da organização.": {
     es: "Viene desactivada; se activa en la configuración de la organización.",
   },

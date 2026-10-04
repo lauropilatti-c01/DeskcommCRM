@@ -74,6 +74,7 @@ import {
   TRAVAS_DESLIGADAS,
   type TravasArmadas,
 } from '../guardrails/travas-de-envio';
+import { lerLinksJaEnviados, linksNoTexto, normalizarLink } from '../guardrails/link-permitido';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
@@ -518,6 +519,8 @@ export const MAX_VETOS_DE_VOCABULARIO_INTERNO = 3;
  */
 export const TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE: Readonly<Record<string, string>> = {
   promise_semantic: 'promessa sem respaldo',
+  // (C01, -c01.3, item 3a) Ver `link-permitido.ts`.
+  link_nao_permitido: 'link que não veio da base',
 };
 
 /** (C01, -c01.3) O limite das travas de conteúdo: o mesmo da de vocabulário interno. */
@@ -3174,6 +3177,21 @@ async function executarTurnoDoAgente(
   if (travasDaOrg.leituraFalhou) {
     runLog.warn('travas de envio: leitura de organizations.settings falhou ou JSON inválido — todas desligadas');
   }
+  // (C01, -c01.3, item 3a) Os links já mandados nesta conversa, lidos uma vez, só com a
+  // trava de link ligada. Leitura que falha (`null`) desarma a trava no turno, com aviso.
+  const linksJaEnviados = travasDaOrg.travas.linkPermitido
+    ? await lerLinksJaEnviados(pool, { tenantId, conversationId: input.conversationId })
+    : null;
+  if (travasDaOrg.travas.linkPermitido && linksJaEnviados === null) {
+    runLog.warn('trava de link: leitura dos links já enviados falhou — trava desarmada neste turno');
+  }
+  /** Os links liberados AGORA: os da base neste turno, os já enviados e os deste turno. */
+  const linksLiberados = (): Set<string> => {
+    const liberados = new Set(linksJaEnviados ?? []);
+    for (const url of urlsDaBase) liberados.add(normalizarLink(url));
+    for (const corpo of corposEnviados) for (const l of linksNoTexto(corpo)) liberados.add(normalizarLink(l));
+    return liberados;
+  };
   // (C01, -c01.3) Os contadores das travas de estilo (`TRAVAS_DE_ESTILO`), um por código,
   // por turno. No limite a trava fica desarmada pelo resto do turno.
   const vetosDeEstilo = new Map<string, number>();
@@ -3184,6 +3202,14 @@ async function executarTurnoDoAgente(
    * ainda cabem), menos as de estilo já desarmadas no turno.
    */
   const travasArmadas = (): TravasArmadas => ({
+    ...(travasDaOrg.travas.linkPermitido && linksJaEnviados !== null
+      ? {
+          linkPermitido: {
+            liberados: linksLiberados(),
+            dominios: travasDaOrg.travas.dominiosLiberados,
+          },
+        }
+      : {}),
     ...(travasDaOrg.travas.textoLongo &&
     (agentConfig?.splitMessages ?? false) &&
     !estiloDesarmado('texto_longo')

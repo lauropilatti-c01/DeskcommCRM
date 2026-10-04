@@ -77,6 +77,7 @@ import type { ChannelProvider } from '@/lib/channels/capabilities';
 import { aplicarAjustesDeEstilo, lerAjustesDeEstiloDaOrg } from './ajustes-de-estilo-da-org';
 import type { AjusteDeEstilo, LeituraDosAjustes } from './ajustes-de-estilo-da-org';
 // (C01, -c01.3) As travas novas, cada uma em arquivo próprio, ligadas por organização.
+import { linkPermitidoGate } from './link-permitido';
 import { textoLongoGate } from './texto-longo';
 import type { TravasArmadas } from './travas-de-envio';
 
@@ -840,8 +841,12 @@ const spinningGate: Gate = {
  * resposta que viraria mais mensagens do que cabem no turno volta ao modelo para ficar
  * mais curta. Nasce DESARMADO (ver `GateContext.travasDeEnvio`): só o `send_message` o
  * arma, com a trava ligada na organização e o divisor ligado.
+ * v9 (C01, -c01.3) = insere `linkPermitidoGate` entre `agenda_stall` e `texto_longo` —
+ * só sai link que a base devolveu, que já foi mandado na conversa ou que é de domínio
+ * liberado pela organização. Conteúdo antes de estilo: o link errado é consertado
+ * antes do tamanho. Nasce DESARMADO, como o `texto_longo`.
  */
-export const BEFORE_SEND_CHAIN_VERSION = 8;
+export const BEFORE_SEND_CHAIN_VERSION = 9;
 
 /**
  * Ordem FINAL da cadeia (F4-08/F4-09; edge-contract §before_send / blueprint órgão 5) — DADO
@@ -858,6 +863,7 @@ export const BEFORE_SEND_CHAIN_VERSION = 8;
  *         `separacao-fala-e-operacao.md`); antes do disclosure porque ele pode emendar o corpo;
  *   (6.9) agenda_stall — "vou verificar/confirmar horário" sem ter chamado a ferramenta de
  *         agenda neste turno; antes do disclosure pelo mesmo motivo do internal_vocabulary;
+ *   (7.1) link_permitido (C01) — só link da base, já enviado ou de domínio liberado;
  *   (7.4) texto_longo (C01) — a resposta cabe nas mensagens do turno; antes do disclosure
  *         (julga o texto do modelo, não o emendado);
  *   (8) disclosure — 1ª mensagem se apresenta como assistente virtual (F4-05).
@@ -874,6 +880,7 @@ export const BEFORE_SEND_GATES: readonly Gate[] = [
   casePromiseGate,
   internalVocabularyGate,
   agendaStallGate,
+  linkPermitidoGate,
   textoLongoGate,
   disclosureGate,
 ];

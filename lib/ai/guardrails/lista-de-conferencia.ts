@@ -179,6 +179,19 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     camada: null,
   },
   {
+    nome: "link_permitido",
+    rotulo: "Só mandar link que tem de onde vir",
+    oQueProtege:
+      "Barra o link que o assistente montou ou alterou: só sai o endereço que a sua base devolveu, " +
+      "que já foi mandado nesta conversa ou que é de um domínio que você liberou.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link " +
+      "sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
     nome: "texto_longo",
     rotulo: "Resposta que cabe nas mensagens desta vez",
     oQueProtege:

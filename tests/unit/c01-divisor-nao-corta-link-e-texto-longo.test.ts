@@ -171,11 +171,11 @@ describe("(C01) a configuração por organização (`settings.travas_de_envio`)"
 
   it("ausente = desligada; ligada só com `ligada: true`; JSON inválido = tudo desligado, com aviso", async () => {
     const { interpretarTravasDeEnvio } = await modulo();
-    expect(interpretarTravasDeEnvio(undefined)).toEqual({ travas: { textoLongo: false }, invalida: false });
-    expect(interpretarTravasDeEnvio({})).toEqual({ travas: { textoLongo: false }, invalida: false });
+    expect(interpretarTravasDeEnvio(undefined)).toMatchObject({ travas: { textoLongo: false }, invalida: false });
+    expect(interpretarTravasDeEnvio({})).toMatchObject({ travas: { textoLongo: false }, invalida: false });
     expect(interpretarTravasDeEnvio({ texto_longo: { ligada: true } }).travas.textoLongo).toBe(true);
     expect(interpretarTravasDeEnvio({ texto_longo: { ligada: false } }).travas.textoLongo).toBe(false);
-    expect(interpretarTravasDeEnvio({ texto_longo: { ligada: "sim" } })).toEqual({
+    expect(interpretarTravasDeEnvio({ texto_longo: { ligada: "sim" } })).toMatchObject({
       travas: { textoLongo: false },
       invalida: true,
     });
@@ -191,14 +191,14 @@ describe("(C01) a configuração por organização (`settings.travas_de_envio`)"
         return { rows: [{ travas: { texto_longo: { ligada: true } } }] };
       },
     };
-    expect(await lerTravasDeEnvioDaOrg(db, "org-1")).toEqual({
+    expect(await lerTravasDeEnvioDaOrg(db, "org-1")).toMatchObject({
       travas: { textoLongo: true },
       leituraFalhou: false,
     });
     expect(consultas[0]?.sql).toMatch(/settings->'travas_de_envio'/);
     expect(consultas[0]?.params).toEqual(["org-1"]);
     const quebrado = { query: async () => Promise.reject(new Error("conexão caiu")) };
-    expect(await lerTravasDeEnvioDaOrg(quebrado, "org-1")).toEqual({
+    expect(await lerTravasDeEnvioDaOrg(quebrado, "org-1")).toMatchObject({
       travas: { textoLongo: false },
       leituraFalhou: true,
     });
@@ -215,7 +215,7 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
 
   it("a cadeia arma a trava pelo contexto, lido na hora de cada execução", () => {
     expect(CADEIA).toMatch(/travasDeEnvio: args\.travasDeEnvio\(\)/);
-    expect(CADEIA).toMatch(/agendaStallGate,\s*textoLongoGate,\s*disclosureGate,/);
+    expect(CADEIA).toMatch(/textoLongoGate,\s*disclosureGate,/);
   });
 
   it("o turno lê a configuração uma vez, antes das ferramentas; arma só com o divisor ligado", () => {
