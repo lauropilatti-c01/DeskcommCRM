@@ -11290,6 +11290,15 @@ export const DICIONARIO: Traducoes = {
   "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.": {
     es: "Depende de la lista de dominios de cada negocio. Si el asistente insiste tres veces con un enlace sin origen, la conversación pasa a una persona del equipo y el enlace no sale.",
   },
+  "Valor em dinheiro só na página de matrícula": {
+    es: "Valores en dinero solo en la página de matrícula",
+  },
+  "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que traz os valores certos, em vez de escrever um número que pode estar errado.": {
+    es: "Bloquea el mensaje con precio, cuota, intereses o descuento: el asistente envía la página, que tiene los valores correctos, en lugar de escribir un número que puede estar equivocado.",
+  },
+  "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
+    es: "Cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
+  },
   "Vem desligada; liga-se na configuração da organização.": {
     es: "Viene desactivada; se activa en la configuración de la organización.",
   },

@@ -5,8 +5,9 @@
  * `organizations.settings.travas_de_envio`, uma chave por trava:
  *
  *   { "travas_de_envio": {
- *       "texto_longo":    { "ligada": true },
- *       "link_permitido": { "ligada": true, "dominios": ["c01.com.br"] } } }
+ *       "texto_longo":       { "ligada": true },
+ *       "link_permitido":    { "ligada": true, "dominios": ["c01.com.br"] },
+ *       "valor_em_dinheiro": { "ligada": true } } }
  *
  * O turno do agente lê a configuração UMA vez e arma, no `send_message` (o único
  * corpo escrito pelo modelo), as travas ligadas — com o que cada uma precisa saber do
@@ -28,6 +29,7 @@ const travasDeEnvioSchema = z
     texto_longo: travaSimples.optional(),
     // `dominios`: os domínios cujo link sai sempre (o domínio e os subdomínios dele).
     link_permitido: travaSimples.extend({ dominios: z.array(z.string()).optional() }).optional(),
+    valor_em_dinheiro: travaSimples.optional(),
   })
   .passthrough();
 
@@ -37,12 +39,14 @@ export interface TravasDeEnvioDaOrg {
   linkPermitido: boolean;
   /** Os domínios liberados da trava de link, já normalizados (`c01.com.br`). */
   dominiosLiberados: readonly string[];
+  valorEmDinheiro: boolean;
 }
 
 export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
   textoLongo: false,
   linkPermitido: false,
   dominiosLiberados: [],
+  valorEmDinheiro: false,
 };
 
 /**
@@ -57,6 +61,8 @@ export interface TravasArmadas {
   textoLongo?: { maxChars: number; restantes: number };
   /** Link permitido: os links e os domínios liberados neste momento do turno. */
   linkPermitido?: LinkPermitidoArmado;
+  /** Valor em dinheiro: só liga ou desliga; não depende do turno. */
+  valorEmDinheiro?: true;
 }
 
 /** Pura: o valor de `settings.travas_de_envio` (qualquer coisa) → o que está ligado. */
@@ -74,6 +80,7 @@ export function interpretarTravasDeEnvio(valor: unknown): {
       dominiosLiberados: (lido.data.link_permitido?.dominios ?? [])
         .map(normalizarDominio)
         .filter((d) => d.length > 0),
+      valorEmDinheiro: lido.data.valor_em_dinheiro?.ligada ?? false,
     },
     invalida: false,
   };

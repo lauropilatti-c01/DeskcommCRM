@@ -521,6 +521,8 @@ export const TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE: Readonly<Record<string, string>> 
   promise_semantic: 'promessa sem respaldo',
   // (C01, -c01.3, item 3a) Ver `link-permitido.ts`.
   link_nao_permitido: 'link que não veio da base',
+  // (C01, -c01.3, item 3b) Ver `valor-em-dinheiro.ts`.
+  valor_em_dinheiro: 'valor em dinheiro na conversa',
 };
 
 /** (C01, -c01.3) O limite das travas de conteúdo: o mesmo da de vocabulário interno. */
@@ -3210,6 +3212,7 @@ async function executarTurnoDoAgente(
           },
         }
       : {}),
+    ...(travasDaOrg.travas.valorEmDinheiro ? { valorEmDinheiro: true as const } : {}),
     ...(travasDaOrg.travas.textoLongo &&
     (agentConfig?.splitMessages ?? false) &&
     !estiloDesarmado('texto_longo')

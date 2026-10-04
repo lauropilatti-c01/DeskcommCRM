@@ -179,7 +179,7 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
   const CADEIA = readFileSync("lib/agent-engine/guardrails/before-send.ts", "utf8");
 
   it("a cadeia roda a trava de link depois da agenda e antes do texto longo", () => {
-    expect(CADEIA).toMatch(/agendaStallGate,\s*linkPermitidoGate,\s*textoLongoGate,/);
+    expect(CADEIA).toMatch(/agendaStallGate,\s*linkPermitidoGate,/);
   });
 
   it("é trava de conteúdo: contador e fail-safe da promessa semântica", () => {

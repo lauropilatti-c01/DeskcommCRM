@@ -192,6 +192,19 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     opcionalNaConfiguracao: true,
   },
   {
+    nome: "valor_em_dinheiro",
+    rotulo: "Valor em dinheiro só na página de matrícula",
+    oQueProtege:
+      "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que " +
+      "traz os valores certos, em vez de escrever um número que pode estar errado.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três " +
+      "vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
     nome: "texto_longo",
     rotulo: "Resposta que cabe nas mensagens desta vez",
     oQueProtege:

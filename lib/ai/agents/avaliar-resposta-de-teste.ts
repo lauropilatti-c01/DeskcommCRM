@@ -77,6 +77,10 @@ const NAO_AVALIAVEIS_SEM_TURNO: ReadonlyArray<{ gate: string; porque: string }> 
     porque: "depende dos links que a base devolveu e dos já mandados nesta conversa",
   },
   {
+    gate: "valor_em_dinheiro",
+    porque: "depende da configuração da organização, que o teste não lê",
+  },
+  {
     gate: "texto_longo",
     porque: "depende de quantas mensagens ainda cabem na resposta e da configuração da organização",
   },
