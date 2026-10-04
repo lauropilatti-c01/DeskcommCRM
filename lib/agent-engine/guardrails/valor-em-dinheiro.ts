@@ -3,17 +3,18 @@
  *
  * A regra da C01 (M1 do `docs/comercial/04`, 30/09): valor, parcela, juros e desconto
  * ficam na página de matrícula; a conversa manda a página, sem número de dinheiro. Só o
- * texto pedia isso, e o modelo escrevia "21x de R$ 192,76" assim mesmo (C10, C41).
+ * texto pedia isso, e o modelo escrevia parcela e preço (na forma "18x de R$ 157,30")
+ * assim mesmo (C10, C41).
  *
  * Ligada por organização (a decisão do Lauro pode mudar), a trava veta:
  * - o que `extractPromises` já lê (R$, reais, euro, desconto em %, "em 12x", "12x sem
  *   juros");
  * - as formas que escapavam e que a régua do laboratório pega (`DINHEIRO_M1` de
- *   `lab/simulacao/raio_x.py`): "21x 192,76", "21 vezes de", "parcelas de", "mensais",
- *   "no Pix", "à vista", "entrada de", "em até 21x", "uns 3 mil", "juros".
+ *   `lab/simulacao/raio_x.py`): "18x 157,30", "18 vezes de", "parcelas de", "mensais",
+ *   "no Pix", "à vista", "entrada de", "em até 18x", "uns 3 mil", "juros".
  *
  * Não pega: data, "2 fases", "60 metas", "67 dias", "12 meses", "6/12", "14x14" (escala),
- * vaga, "100% online", "37% das vagas", "3 mil questões" — o "%" só conta com desconto
+ * vaga, "100% online", "30% das vagas", "3 mil questões" — o "%" só conta com desconto
  * ou "off"; o "mil" não conta antes de questões, inscritos, vagas e afins. O salário e
  * os benefícios do cargo (fato da base que a régua isenta) também passam: o valor logo
  * depois de "salário", "remuneração", "benefício"… na mesma frase não conta.

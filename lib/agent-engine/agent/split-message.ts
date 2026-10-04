@@ -55,9 +55,9 @@ export function splitIntoBubbles(text: string, maxChars: number): string[] {
 
 /**
  * (C01, -c01.3, item 2) Os trechos que o divisor NUNCA parte: link (com esquema ou
- * `www.`), e-mail e domínio solto (`lp.c01.com.br/...`, em caixa baixa, com sufixo de
+ * `www.`), e-mail e domínio solto (`lp.exemplo.com.br/...`, em caixa baixa, com sufixo de
  * uma lista curta). Antes, todo "." e todo "?" partiam sentença — inclusive os de dentro
- * de um link: a página de matrícula saía como "https://lp. c01. com. br/vitalicio/?
+ * de um link: a página de matrícula saía como "https://lp. exemplo. com. br/plano-completo/?
  * nivel=…" espalhada por bolhas (C10 e C41 da volta 19), e o `split_max_chars` do
  * laboratório teve de subir para 2.000 para o link sair inteiro. A pontuação logo
  * DEPOIS do trecho (o ponto final da frase) fica fora dele e continua partindo.

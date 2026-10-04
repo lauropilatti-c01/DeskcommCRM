@@ -3,7 +3,7 @@
  *
  * O defeito: o divisor de bolhas tratava todo "." e todo "?" como fim de frase — os
  * de dentro de um link também. Com `split_max_chars` 300–350, a página de matrícula da
- * C10 e da C41 (volta 19) saía como "https://lp. c01. com. br/vitalicio/? nivel=…",
+ * C10 e da C41 (volta 19) saía como "https://lp. exemplo. com. br/plano-completo/? nivel=…",
  * espalhada por bolhas e com espaços no meio: link quebrado. O laboratório teve de
  * subir o teto por bolha para 2.000, e as respostas passaram a sair em blocos enormes.
  *
@@ -15,8 +15,9 @@
  *    organização); é trava de estilo: no 2º veto se desarma e a mensagem sai dividida
  *    como hoje.
  *
- * O divisor e a trava se provam por comportamento (os links reais da base e os textos
- * da C10 e da C41); a ligação no turno, por leitura do código. Os módulos novos entram
+ * O divisor e a trava se provam por comportamento (links na forma dos da base e os
+ * textos da C10 e da C41, com nomes, links e valores fictícios: regra do C01.md, nada
+ * da C01 no código); a ligação no turno, por leitura do código. Os módulos novos entram
  * por import dinâmico: sem a mudança, só os casos deles falham, e os do divisor medem
  * o defeito de verdade.
  */
@@ -26,24 +27,24 @@ import { describe, expect, it } from "vitest";
 import { splitIntoBubbles } from "@/lib/agent-engine/agent/split-message";
 
 const LINKS_DA_BASE = [
-  "https://lp.c01.com.br/vitalicio/?nivel=superior",
-  "https://lp.c01.com.br/vitalicio-pix-parcelado?nivel=tecnico",
+  "https://lp.exemplo.com.br/plano-completo/?nivel=superior",
+  "https://lp.exemplo.com.br/plano-completo-pix-parcelado?nivel=tecnico",
   "https://player-vz-5f18b79a-58d.tv.pandavideo.com.br/embed/?v=dd8b6425-0048-4707-bb7b-9f6fece1187b",
-  "https://matricula.concurseirozero1.com.br/pay/petrobras-transpetro-platinum-administracao-vitalicio-21x",
-  "https://boleto.c01.com.br/petrobras-platinum-engenharia-civil-12-meses",
+  "https://matricula.escolaexemplo.com.br/pay/concurso-estatal-premium-administracao-completo-18x",
+  "https://boleto.exemplo.com.br/concurso-premium-engenharia-civil-12-meses",
 ];
 
 const C10 =
-  "Pra Manutenção – Mecânica, eu iria no Projeto Petrobras Vitalício porque o acesso não expira. " +
-  "No cartão fica em 21x de R$ 128,45, com juros de 1,67% ao mês; no Pix à vista, R$ 1.997, sem juros. " +
+  "Pra Manutenção – Mecânica, eu iria no Plano Completo porque o acesso não expira. " +
+  "No cartão fica em 18x de R$ 104,20, com juros de 1,67% ao mês; no Pix à vista, R$ 1.690, sem juros. " +
   "Também existe parcelado sem cartão, caso precise. " +
-  "A página de matrícula é https://lp.c01.com.br/vitalicio/?nivel=tecnico.";
+  "A página de matrícula é https://lp.exemplo.com.br/plano-completo/?nivel=tecnico.";
 
 const C41 =
-  "Pra vc eu iria no Projeto Petrobras Vitalício, porque o acesso não expira. " +
-  "No cartão fica em 21 parcelas de R$ 192,76, com juros de 1,67% ao mês. " +
-  "No Pix à vista, R$ 2.997, sem juros. " +
-  "A matrícula pra Engenharia de Equipamentos – Elétrica é por aqui https://lp.c01.com.br/vitalicio/?nivel=superior .";
+  "Pra vc eu iria no Plano Completo, porque o acesso não expira. " +
+  "No cartão fica em 18 parcelas de R$ 157,30, com juros de 1,67% ao mês. " +
+  "No Pix à vista, R$ 2.490, sem juros. " +
+  "A matrícula pra Engenharia de Equipamentos – Elétrica é por aqui https://lp.exemplo.com.br/plano-completo/?nivel=superior .";
 
 /** Nenhuma bolha passa do limite — salvo a que é um link sozinho, que não se parte. */
 function semBolhaAcimaDoLimite(bolhas: string[], limite: number): void {
@@ -66,35 +67,35 @@ describe("(C01) o divisor não parte link, e-mail nem domínio", () => {
   });
 
   it.each([
-    ["C10", C10, "https://lp.c01.com.br/vitalicio/?nivel=tecnico"],
-    ["C41", C41, "https://lp.c01.com.br/vitalicio/?nivel=superior"],
+    ["C10", C10, "https://lp.exemplo.com.br/plano-completo/?nivel=tecnico"],
+    ["C41", C41, "https://lp.exemplo.com.br/plano-completo/?nivel=superior"],
   ])("%s (volta 19) com 300 e 350 por bolha: o link de matrícula chega inteiro", (_, texto, link) => {
     for (const limite of [200, 300, 350]) {
       const bolhas = splitIntoBubbles(texto, limite);
       expect(bolhas.join(" ")).toContain(link);
-      expect(bolhas.join(" ")).not.toMatch(/https:\/\/lp\. c01\./);
+      expect(bolhas.join(" ")).not.toMatch(/https:\/\/lp\. exemplo\./);
       semBolhaAcimaDoLimite(bolhas, limite);
     }
   });
 
   it("domínio sem esquema e e-mail também não se partem", () => {
     const dominio = splitIntoBubbles(
-      "A página é lp.c01.com.br/vitalicio/?nivel=superior e lá tem tudo. Qualquer coisa, me chama.",
+      "A página é lp.exemplo.com.br/plano-completo/?nivel=superior e lá tem tudo. Qualquer coisa, me chama.",
       40,
     );
-    expect(dominio.join(" | ")).toContain("lp.c01.com.br/vitalicio/?nivel=superior");
-    const email = splitIntoBubbles("Escreva para contato@c01.com.br. Respondo por lá mesmo, tá?", 30);
-    expect(email.join(" | ")).toContain("contato@c01.com.br.");
-    expect(email.some((b) => b.includes("contato@c01.com.br"))).toBe(true);
+    expect(dominio.join(" | ")).toContain("lp.exemplo.com.br/plano-completo/?nivel=superior");
+    const email = splitIntoBubbles("Escreva para contato@exemplo.com.br. Respondo por lá mesmo, tá?", 30);
+    expect(email.join(" | ")).toContain("contato@exemplo.com.br.");
+    expect(email.some((b) => b.includes("contato@exemplo.com.br"))).toBe(true);
   });
 
   it("controle: o ponto final logo depois do link ainda encerra a frase", () => {
     const bolhas = splitIntoBubbles(
-      "Veja em https://lp.c01.com.br/vitalicio/?nivel=superior. Depois me conta o que achou.",
+      "Veja em https://lp.exemplo.com.br/plano-completo/?nivel=superior. Depois me conta o que achou.",
       70,
     );
     expect(bolhas).toEqual([
-      "Veja em https://lp.c01.com.br/vitalicio/?nivel=superior.",
+      "Veja em https://lp.exemplo.com.br/plano-completo/?nivel=superior.",
       "Depois me conta o que achou.",
     ]);
   });
@@ -122,10 +123,10 @@ async function trava(): Promise<(body: string, armada?: { maxChars: number; rest
 }
 
 const QUATRO_PARAGRAFOS = [
-  "Pra Manutenção – Mecânica, eu iria no Projeto Petrobras Vitalício porque o acesso não expira.",
-  "No cartão fica em 21x de R$ 128,45, com juros de 1,67% ao mês; no Pix à vista, R$ 1.997, sem juros.",
+  "Pra Manutenção – Mecânica, eu iria no Plano Completo porque o acesso não expira.",
+  "No cartão fica em 18x de R$ 104,20, com juros de 1,67% ao mês; no Pix à vista, R$ 1.690, sem juros.",
   "Também existe parcelado sem cartão, caso precise.",
-  "A página de matrícula é https://lp.c01.com.br/vitalicio/?nivel=tecnico.",
+  "A página de matrícula é https://lp.exemplo.com.br/plano-completo/?nivel=tecnico.",
 ].join("\n\n");
 
 describe("(C01) a trava 'texto longo'", () => {
@@ -144,7 +145,7 @@ describe("(C01) a trava 'texto longo'", () => {
     expect(v.reason).toMatch(/Reescreva mais curta/);
     expect(v.reason).toMatch(/sem mudar nenhum link/);
     expect(v.detail).toEqual({ bolhas: 4, restantes: 3, max_chars: 300 });
-    expect(JSON.stringify(v.detail)).not.toMatch(/Petrobras/);
+    expect(JSON.stringify(v.detail)).not.toMatch(/Plano Completo/);
   });
 
   it("cabe → passa; o link longo não infla a conta (vira uma bolha só)", async () => {

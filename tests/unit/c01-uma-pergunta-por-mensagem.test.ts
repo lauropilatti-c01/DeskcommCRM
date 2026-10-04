@@ -6,7 +6,8 @@
  *
  * A trava `uma_pergunta` (ligada por organização) conta os "?" do texto inteiro, fora
  * dos links; acima de 1, veta com erro de ensino. Pergunta retórica conta. Trava de
- * estilo: 1º veto ensina; no 2º se desarma no turno e a mensagem passa.
+ * estilo: 1º veto ensina; no 2º se desarma no turno e a mensagem passa. Nomes e links
+ * são fictícios (regra do C01.md: nada da C01 no código).
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -29,7 +30,7 @@ describe("(C01) a trava 'uma pergunta por mensagem'", () => {
   });
 
   it("duas perguntas vetam, com o número e o que fazer", async () => {
-    const v = await avaliar("Qual é a sua ênfase? E você já estudou para a Petrobras antes?");
+    const v = await avaliar("Qual é a sua ênfase? E você já estudou para concurso antes?");
     expect(v.pass).toBe(false);
     expect(v.code).toBe("uma_pergunta");
     expect(v.reason).toMatch(/faz 2 perguntas/);
@@ -47,18 +48,18 @@ describe("(C01) a trava 'uma pergunta por mensagem'", () => {
     expect((await avaliar("Perfeito.\n\nQual é a sua ênfase??")).pass).toBe(true);
     expect((await avaliar("O curso é online e o acesso não expira.")).pass).toBe(true);
     expect(
-      (await avaliar("Pra Elétrica eu iria no Vitalício.\n\nO acesso não expira.\n\nQuer a página?")).pass,
+      (await avaliar("Pra Elétrica eu iria no Plano Completo.\n\nO acesso não expira.\n\nQuer a página?")).pass,
     ).toBe(true);
   });
 
   it("o '?' dentro do link não é pergunta", async () => {
     expect(
-      (await avaliar("A página é https://lp.c01.com.br/vitalicio/?nivel=superior. Ficou alguma dúvida?")).pass,
+      (await avaliar("A página é https://lp.exemplo.com.br/plano-completo/?nivel=superior. Ficou alguma dúvida?")).pass,
     ).toBe(true);
     expect(
       (
         await avaliar(
-          "Vê o vídeo: https://player-vz-5f18b79a-58d.tv.pandavideo.com.br/embed/?v=dd8b6425-0048-4707-bb7b-9f6fece1187b e lp.c01.com.br/vitalicio/?nivel=tecnico",
+          "Vê o vídeo: https://player-vz-5f18b79a-58d.tv.pandavideo.com.br/embed/?v=dd8b6425-0048-4707-bb7b-9f6fece1187b e lp.exemplo.com.br/plano-completo/?nivel=tecnico",
         )
       ).pass,
     ).toBe(true);

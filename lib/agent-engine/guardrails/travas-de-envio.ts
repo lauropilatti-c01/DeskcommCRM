@@ -6,7 +6,7 @@
  *
  *   { "travas_de_envio": {
  *       "texto_longo":       { "ligada": true },
- *       "link_permitido":    { "ligada": true, "dominios": ["c01.com.br"] },
+ *       "link_permitido":    { "ligada": true, "dominios": ["exemplo.com.br"] },
  *       "valor_em_dinheiro": { "ligada": true },
  *       "uma_pergunta":      { "ligada": true } } }
  *
@@ -39,7 +39,7 @@ const travasDeEnvioSchema = z
 export interface TravasDeEnvioDaOrg {
   textoLongo: boolean;
   linkPermitido: boolean;
-  /** Os domínios liberados da trava de link, já normalizados (`c01.com.br`). */
+  /** Os domínios liberados da trava de link, já normalizados (`exemplo.com.br`). */
   dominiosLiberados: readonly string[];
   valorEmDinheiro: boolean;
   umaPergunta: boolean;

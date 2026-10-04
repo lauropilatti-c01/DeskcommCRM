@@ -11,7 +11,8 @@
  * conteúdo: contador e fail-safe da promessa semântica.
  *
  * A trava e a leitura dos links já enviados se provam por comportamento; a ligação no
- * turno, por leitura do código. O módulo novo entra por import dinâmico.
+ * turno, por leitura do código. O módulo novo entra por import dinâmico. Domínios e
+ * links são fictícios, na forma dos reais (regra do C01.md: nada da C01 no código).
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -33,7 +34,7 @@ async function modulo(): Promise<Modulo> {
   return (await import(/* @vite-ignore */ CAMINHO_DA_TRAVA)) as Modulo;
 }
 
-const DA_BASE = "https://lp.c01.com.br/vitalicio/?nivel=superior";
+const DA_BASE = "https://lp.exemplo.com.br/plano-completo/?nivel=superior";
 const PANDA =
   "https://player-vz-5f18b79a-58d.tv.pandavideo.com.br/embed/?v=dd8b6425-0048-4707-bb7b-9f6fece1187b";
 
@@ -66,19 +67,19 @@ describe("(C01) a trava 'link permitido'", () => {
   it("o link exato da base passa — também sem esquema, com ponto final e domínio em maiúsculas", async () => {
     const trava = { liberados: [DA_BASE, PANDA] };
     expect((await avaliar(`A matrícula é por aqui: ${DA_BASE}.`, trava)).pass).toBe(true);
-    expect((await avaliar("Vê em lp.c01.com.br/vitalicio/?nivel=superior, tá?", trava)).pass).toBe(true);
-    expect((await avaliar("Link: HTTPS://LP.C01.COM.BR/vitalicio/?nivel=superior", trava)).pass).toBe(true);
+    expect((await avaliar("Vê em lp.exemplo.com.br/plano-completo/?nivel=superior, tá?", trava)).pass).toBe(true);
+    expect((await avaliar("Link: HTTPS://LP.EXEMPLO.COM.BR/plano-completo/?nivel=superior", trava)).pass).toBe(true);
     expect((await avaliar(`Assiste aqui (${PANDA})`, trava)).pass).toBe(true);
   });
 
   it("o link montado volta: outro `nivel`, outro caminho, domínio parecido", async () => {
     const trava = { liberados: [DA_BASE] };
     for (const inventado of [
-      "https://lp.c01.com.br/vitalicio/?nivel=tecnico",
-      "https://lp.c01.com.br/vitalicio-engenharia",
-      "https://lp.c01.com.br.pagamento.io/vitalicio",
-      "https://matricula.concurseirozero1.com.br/pay/petrobras-vitalicio-21x",
-      "lp.c01.com.br/vitalicio/?nivel=tecnico",
+      "https://lp.exemplo.com.br/plano-completo/?nivel=tecnico",
+      "https://lp.exemplo.com.br/plano-completo-engenharia",
+      "https://lp.exemplo.com.br.pagamento.io/plano-completo",
+      "https://matricula.escolaexemplo.com.br/pay/concurso-completo-18x",
+      "lp.exemplo.com.br/plano-completo/?nivel=tecnico",
     ]) {
       const v = await avaliar(`A matrícula é por aqui: ${inventado}.`, trava);
       expect(v.pass, inventado).toBe(false);
@@ -89,32 +90,32 @@ describe("(C01) a trava 'link permitido'", () => {
   });
 
   it("domínio liberado pela organização passa (o domínio e os subdomínios dele), e só ele", async () => {
-    const trava = { dominios: ["c01.com.br", "concurseirozero1.com.br"] };
-    expect((await avaliar("https://lp.c01.com.br/qualquer-pagina", trava)).pass).toBe(true);
-    expect((await avaliar("https://c01.com.br", trava)).pass).toBe(true);
-    expect((await avaliar("https://matricula.concurseirozero1.com.br/pay/x", trava)).pass).toBe(true);
-    expect((await avaliar("https://outroc01.com.br/x", trava)).pass).toBe(false);
-    expect((await avaliar("https://c01.com.br.golpe.io/x", trava)).pass).toBe(false);
+    const trava = { dominios: ["exemplo.com.br", "escolaexemplo.com.br"] };
+    expect((await avaliar("https://lp.exemplo.com.br/qualquer-pagina", trava)).pass).toBe(true);
+    expect((await avaliar("https://exemplo.com.br", trava)).pass).toBe(true);
+    expect((await avaliar("https://matricula.escolaexemplo.com.br/pay/x", trava)).pass).toBe(true);
+    expect((await avaliar("https://outroexemplo.com.br/x", trava)).pass).toBe(false);
+    expect((await avaliar("https://exemplo.com.br.golpe.io/x", trava)).pass).toBe(false);
   });
 
   it("e-mail, valor e frase comum não são link", async () => {
     const trava = { liberados: [] };
-    expect((await avaliar("Escreva para contato@c01.com.br e a equipe responde.", trava)).pass).toBe(true);
-    expect((await avaliar("Fica com. Brasil inteiro tem isso. No Pix, R$ 1.997.", trava)).pass).toBe(true);
-    expect((await avaliar("São 21x de R$ 128,45 e 1,67% ao mês.", trava)).pass).toBe(true);
+    expect((await avaliar("Escreva para contato@exemplo.com.br e a equipe responde.", trava)).pass).toBe(true);
+    expect((await avaliar("Fica com. Brasil inteiro tem isso. No Pix, R$ 1.690.", trava)).pass).toBe(true);
+    expect((await avaliar("São 18x de R$ 104,20 e 1,67% ao mês.", trava)).pass).toBe(true);
   });
 
   it("o trace leva só a contagem e o domínio, nunca o caminho", async () => {
-    const v = await avaliar("Pague em https://boleto.c01.com.br/petrobras-xyz?cpf=123", { liberados: [] });
-    expect(v.detail).toEqual({ links: 1, dominios: "boleto.c01.com.br" });
+    const v = await avaliar("Pague em https://boleto.exemplo.com.br/concurso-xyz?cpf=123", { liberados: [] });
+    expect(v.detail).toEqual({ links: 1, dominios: "boleto.exemplo.com.br" });
   });
 
   it("acha cada link uma vez só (o domínio dentro do link não conta de novo)", async () => {
     const m = await modulo();
-    expect(m.linksNoTexto(`Veja ${DA_BASE}. E também www.c01.com.br/blog e lp.c01.com.br.`)).toEqual([
+    expect(m.linksNoTexto(`Veja ${DA_BASE}. E também www.exemplo.com.br/blog e lp.exemplo.com.br.`)).toEqual([
       DA_BASE,
-      "www.c01.com.br/blog",
-      "lp.c01.com.br",
+      "www.exemplo.com.br/blog",
+      "lp.exemplo.com.br",
     ]);
   });
 });
@@ -144,12 +145,12 @@ describe("(C01) os links já mandados na conversa", () => {
   });
 
   it("o link já mandado passa; o vizinho dele, não", async () => {
-    const trava = { liberados: ["https://boleto.c01.com.br/petrobras-platinum-engenharia-civil-12-meses"] };
+    const trava = { liberados: ["https://boleto.exemplo.com.br/concurso-premium-engenharia-civil-12-meses"] };
     expect(
-      (await avaliar("De novo: https://boleto.c01.com.br/petrobras-platinum-engenharia-civil-12-meses", trava)).pass,
+      (await avaliar("De novo: https://boleto.exemplo.com.br/concurso-premium-engenharia-civil-12-meses", trava)).pass,
     ).toBe(true);
     expect(
-      (await avaliar("De novo: https://boleto.c01.com.br/petrobras-platinum-engenharia-civil-6-meses", trava)).pass,
+      (await avaliar("De novo: https://boleto.exemplo.com.br/concurso-premium-engenharia-civil-6-meses", trava)).pass,
     ).toBe(false);
   });
 });
@@ -164,11 +165,11 @@ describe("(C01) a configuração (`settings.travas_de_envio.link_permitido`)", (
     };
     expect(interpretarTravasDeEnvio({}).travas.linkPermitido).toBe(false);
     const lido = interpretarTravasDeEnvio({
-      link_permitido: { ligada: true, dominios: ["C01.com.br", "https://www.concurseirozero1.com.br/", " "] },
+      link_permitido: { ligada: true, dominios: ["Exemplo.com.br", "https://www.escolaexemplo.com.br/", " "] },
     });
     expect(lido.travas.linkPermitido).toBe(true);
-    expect(lido.travas.dominiosLiberados).toEqual(["c01.com.br", "concurseirozero1.com.br"]);
-    const errado = interpretarTravasDeEnvio({ link_permitido: { ligada: true, dominios: "c01.com.br" } });
+    expect(lido.travas.dominiosLiberados).toEqual(["exemplo.com.br", "escolaexemplo.com.br"]);
+    const errado = interpretarTravasDeEnvio({ link_permitido: { ligada: true, dominios: "exemplo.com.br" } });
     expect(errado.invalida).toBe(true);
     expect(errado.travas.linkPermitido).toBe(false);
   });

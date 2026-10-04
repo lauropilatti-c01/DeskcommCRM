@@ -18,7 +18,7 @@
  * `inbound-turn.ts`) — no limite, o texto não sai e a conversa passa à equipe.
  *
  * Conta como link: com esquema (`https://`), com `www.` e domínio solto em caixa baixa
- * com sufixo conhecido (`lp.c01.com.br/...`, que o WhatsApp transforma em link).
+ * com sufixo conhecido (`lp.exemplo.com.br/...`, que o WhatsApp transforma em link).
  * E-mail não é link. A comparação ignora o esquema, o `www.`, a caixa do domínio, a
  * pontuação final e a barra final; caminho e parâmetros contam como estão.
  */
@@ -70,7 +70,7 @@ export function dominioDoLink(link: string): string {
   return partes(link).host;
 }
 
-/** O domínio como a organização escreveu → a forma de comparar (`c01.com.br`). */
+/** O domínio como a organização escreveu → a forma de comparar (`exemplo.com.br`). */
 export function normalizarDominio(dominio: string): string {
   return dominioDoLink(dominio.trim()).replace(/^\*\./, '');
 }

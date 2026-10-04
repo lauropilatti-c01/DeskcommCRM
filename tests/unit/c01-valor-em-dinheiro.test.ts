@@ -3,7 +3,7 @@
  *
  * O defeito: a regra da C01 (M1 do `docs/comercial/04`) manda deixar valor, parcela,
  * juros e desconto na página de matrícula, mas só o texto pedia isso, e o modelo
- * escrevia "21x de R$ 192,76" assim mesmo (C10, C41 da volta 19).
+ * escrevia parcela e preço (na forma "18x de R$ 157,30") assim mesmo (C10, C41 da volta 19).
  *
  * A trava `valor_em_dinheiro` (ligada por organização) veta o que `extractPromises` lê
  * e as formas da M1 que a régua do laboratório pega (`DINHEIRO_M1` de
@@ -13,6 +13,8 @@
  *
  * Os casos que TÊM de vetar são as frases do raio-x M1 (verificador de 30/09); os que
  * não podem vetar são os falsos positivos conhecidos. A ligação no turno, pelo código.
+ * Nomes, links e valores são fictícios, na forma dos reais (regra do C01.md: nada da
+ * C01 no código).
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -30,22 +32,22 @@ async function avaliar(body: string, ligada = true): Promise<Veredito> {
 }
 
 const TEM_DE_VETAR = [
-  "O Vitalício sai por R$ 2.997 à vista.",
-  "Fica em 21x de 192,76 no cartão.",
+  "O Plano Completo sai por R$ 2.490 à vista.",
+  "Fica em 18x de 157,30 no cartão.",
   "Em torno de 4 mil reais.",
-  "Dá 141,31 por mês.",
+  "Dá 118,90 por mês.",
   "São 12 parcelas no Pix.",
   "No cartão é sem juros.",
-  "À vista sai 2.997.",
+  "À vista sai 2.490.",
   "Tem 10% de desconto até hoje.",
-  "Fica em 21x 192,76 no cartão.",
-  "São 21 vezes de 192,76.",
-  "Parcelas de 192,76 no cartão.",
-  "Dá 192,76 mensais.",
-  "Fica 1.997 no Pix.",
-  "Entrada de 599,40 e o resto parcelado.",
-  "Em até 21x no cartão.",
-  "1.997 à vista.",
+  "Fica em 18x 157,30 no cartão.",
+  "São 18 vezes de 157,30.",
+  "Parcelas de 157,30 no cartão.",
+  "Dá 157,30 mensais.",
+  "Fica 1.690 no Pix.",
+  "Entrada de 480,00 e o resto parcelado.",
+  "Em até 18x no cartão.",
+  "1.690 à vista.",
   "Uns 3 mil no total.",
   "Os juros são de 1,67% ao mês.",
   "Dá pra parcelar em 12 vezes.",
@@ -58,8 +60,8 @@ const NAO_PODE_VETAR = [
   "Com escala 14x14 fica corrido mesmo.",
   "O curso é 100% online, no seu ritmo.",
   "São mais de 3 mil questões no aplicativo.",
-  "Foram 92 aprovados, 37% das vagas nas ênfases com preparação.",
-  "Os valores e o parcelamento estão na página: https://lp.c01.com.br/vitalicio/?nivel=superior",
+  "Foram 80 aprovados, 30% das vagas nas ênfases com preparação.",
+  "Os valores e o parcelamento estão na página: https://lp.exemplo.com.br/plano-completo/?nivel=superior",
   "A prova tem 2 fases.",
   "O plano tem 60 metas de estudo.",
   "O acesso do plano de 12 meses começa na matrícula.",
@@ -69,14 +71,14 @@ const NAO_PODE_VETAR = [
   "Há equiparação de 50% por gênero nas vagas.",
   "Só 1% dos inscritos chega à segunda fase.",
   "Concorreram mais de 60 mil candidatos.",
-  "O salário inicial de técnico é de R$ 6.300, fora os benefícios.",
-  "A página do 21x é https://matricula.concurseirozero1.com.br/pay/petrobras-transpetro-platinum-administracao-vitalicio-21x",
-  "Os planos são o Vitalício e o de 12 meses; a diferença é o tempo de acesso.",
+  "O salário inicial de técnico é de R$ 5.800, fora os benefícios.",
+  "A página do 18x é https://matricula.escolaexemplo.com.br/pay/concurso-estatal-premium-administracao-completo-18x",
+  "Os planos são o Plano Completo e o de 12 meses; a diferença é o tempo de acesso.",
 ];
 
 describe("(C01) a trava 'valor em dinheiro'", () => {
   it("desarmada (sem a chave), passa qualquer valor", async () => {
-    expect((await avaliar("O Vitalício sai por R$ 2.997.", false)).pass).toBe(true);
+    expect((await avaliar("O Plano Completo sai por R$ 2.490.", false)).pass).toBe(true);
   });
 
   it.each(TEM_DE_VETAR)("veta (forma da M1): %s", async (frase) => {
@@ -96,21 +98,21 @@ describe("(C01) a trava 'valor em dinheiro'", () => {
     expect(
       (
         await avaliar(
-          "No cartão fica em 21x de R$ 128,45, com juros de 1,67% ao mês; no Pix à vista, R$ 1.997, sem juros.",
+          "No cartão fica em 18x de R$ 104,20, com juros de 1,67% ao mês; no Pix à vista, R$ 1.690, sem juros.",
         )
       ).pass,
     ).toBe(false);
-    expect((await avaliar("No cartão fica em 21 parcelas de R$ 192,76, com juros de 1,67% ao mês.")).pass).toBe(
+    expect((await avaliar("No cartão fica em 18 parcelas de R$ 157,30, com juros de 1,67% ao mês.")).pass).toBe(
       false,
     );
   });
 
   it("o salário não abre brecha para o preço do curso na mesma frase", async () => {
-    expect((await avaliar("O salário é de R$ 6.300,00 e o curso sai por R$ 2.997.")).pass).toBe(false);
+    expect((await avaliar("O salário é de R$ 5.800,00 e o curso sai por R$ 2.490.")).pass).toBe(false);
   });
 
   it("o trace leva só a contagem", async () => {
-    const v = await avaliar("Fica em 21x de 192,76 no cartão.");
+    const v = await avaliar("Fica em 18x de 157,30 no cartão.");
     expect(v.detail).toEqual({ trechos: 1 });
   });
 });
