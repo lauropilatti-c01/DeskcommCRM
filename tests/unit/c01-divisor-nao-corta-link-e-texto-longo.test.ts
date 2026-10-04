@@ -89,6 +89,46 @@ describe("(C01) o divisor não parte link, e-mail nem domínio", () => {
     expect(email.some((b) => b.includes("contato@exemplo.com.br"))).toBe(true);
   });
 
+  it("(rodada 2) domínio sem barra com parâmetro não se parte: o parágrafo acima de 300 sai com o endereço inteiro", () => {
+    // Achado 4 da 1ª revisão da -c01.3: o divisor protegia só o domínio e partia no "?",
+    // e a bolha saía com "lp.exemplo.com.br? nivel=superior".
+    const link = "lp.exemplo.com.br?nivel=superior";
+    const texto =
+      "Pra Engenharia de Equipamentos eu iria no Plano Completo, porque o acesso não expira e dá pra " +
+      "estudar no seu ritmo, com as metas da semana e o simulado do fim do mês. " +
+      `A página de matrícula é ${link} e lá estão as formas de pagamento. ` +
+      "Qualquer dúvida sobre o edital ou sobre a rotina de estudo, me chama por aqui que eu te explico.";
+    expect(texto.length).toBeGreaterThan(300);
+    for (const limite of [80, 120, 300]) {
+      const bolhas = splitIntoBubbles(texto, limite);
+      expect(bolhas.some((b) => b.includes(link)), `limite ${limite}: ${JSON.stringify(bolhas)}`).toBe(true);
+      expect(bolhas.join(" | ")).not.toMatch(/lp\.exemplo\.com\.br\?(?: | \| )nivel/);
+    }
+  });
+
+  it("(rodada 2) um reconhecedor de link só: o divisor protege cada link que a trava vê, com a mesma extensão", async () => {
+    const { linksNoTexto } = await import("@/lib/agent-engine/guardrails/link-permitido");
+    const { trechosIndivisiveis } = await import("@/lib/agent-engine/agent/split-message");
+    const texto =
+      "Veja https://lp.exemplo.com.br/plano-completo/?nivel=superior, www.exemplo.com.br/blog e " +
+      "lp.exemplo.com.br?nivel=tecnico#planos. Link:boleto.exemplo.com.br/x. Escreva para contato@exemplo.com.br.";
+    const protegidos = trechosIndivisiveis(texto).map(([ini, fim]) => texto.slice(ini, fim));
+    const links = linksNoTexto(texto);
+    expect(links).toEqual([
+      "https://lp.exemplo.com.br/plano-completo/?nivel=superior",
+      "www.exemplo.com.br/blog",
+      "lp.exemplo.com.br?nivel=tecnico#planos",
+      "boleto.exemplo.com.br/x",
+    ]);
+    for (const link of links) expect(protegidos).toContain(link);
+    // O e-mail não é link (a trava não o confere), mas o divisor também não o parte.
+    expect(protegidos).toContain("contato@exemplo.com.br");
+    // E o divisor não tem reconhecedor de link próprio.
+    const divisor = readFileSync("lib/agent-engine/agent/split-message.ts", "utf8");
+    expect(divisor).toMatch(/import \{ trechosDeLink \} from ["']\.\.\/guardrails\/link-permitido["'];/);
+    expect(divisor).not.toMatch(/https\?:/);
+  });
+
   it("controle: o ponto final logo depois do link ainda encerra a frase", () => {
     const bolhas = splitIntoBubbles(
       "Veja em https://lp.exemplo.com.br/plano-completo/?nivel=superior. Depois me conta o que achou.",

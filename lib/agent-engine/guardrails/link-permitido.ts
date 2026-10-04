@@ -20,7 +20,15 @@
  * Conta como link: com esquema (`https://`), com `www.` e domínio solto em caixa baixa
  * com sufixo conhecido (`lp.exemplo.com.br/...`, que o WhatsApp transforma em link).
  * E-mail não é link. A comparação ignora o esquema, o `www.`, a caixa do domínio, a
- * pontuação final e a barra final; caminho e parâmetros contam como estão.
+ * pontuação final, a barra final e a barra da raiz antes de `?` ou `#`; caminho,
+ * parâmetros e fragmento contam como estão.
+ *
+ * (Rodada 2) O reconhecedor (`trechosDeLink`) é um só para esta trava e para o divisor
+ * de mensagens (`split-message.ts`): o que a trava confere é exatamente o que o divisor
+ * não parte. O domínio solto leva o caminho, os parâmetros e o fragmento também sem
+ * barra depois do domínio (`lp.exemplo.com.br?nivel=…`): antes a trava via só o domínio,
+ * e a raiz liberada pela base liberava o parâmetro inventado, e o divisor partia o
+ * endereço no `?` (achado 4 da 1ª revisão adversarial da -c01.3).
  */
 import type { Queryable } from '../queue/queue';
 import type { Gate } from './before-send';
@@ -28,27 +36,40 @@ import type { Gate } from './before-send';
 const SUFIXOS = 'com|net|org|br|io|app|tv|me|info|biz|edu|gov|co|link|site|online|store|shop|dev|ai|ly';
 const RE_COM_ESQUEMA = /\bhttps?:\/\/[^\s<>"]+/gi;
 const RE_WWW = /(?<![\w.@/-])www\.[^\s<>"]+/gi;
+// O domínio não começa no meio de outro (letra, ponto, hífen) nem depois de `@` (e-mail).
 const RE_DOMINIO_SOLTO = new RegExp(
-  `(?<![\\w.@/:=-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:${SUFIXOS})\\b(?:\\/[^\\s<>"]*)?`,
+  `(?<![\\w.@-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:${SUFIXOS})\\b(?:[/?#][^\\s<>"]*)?`,
   'g',
 );
 const PONTUACAO_FINAL = /[.,;:!?)\]}'"»]+$/;
 
-/** Os links do texto, na ordem, sem a pontuação colada no fim. */
-export function linksNoTexto(texto: string): string[] {
-  const achados: Array<{ ini: number; fim: number; link: string }> = [];
+/** Um link no texto: o intervalo [ini, fim) e o endereço, sem a pontuação colada no fim. */
+export interface LinkNoTexto {
+  ini: number;
+  fim: number;
+  link: string;
+}
+
+/** Os links do texto, na ordem, com o lugar de cada um — o reconhecedor da trava e do divisor. */
+export function trechosDeLink(texto: string): LinkNoTexto[] {
+  const achados: Array<LinkNoTexto & { fimDoAchado: number }> = [];
   for (const re of [RE_COM_ESQUEMA, RE_WWW, RE_DOMINIO_SOLTO]) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(texto)) !== null) {
       const ini = m.index;
       // Pedaço de um link já achado (o domínio dentro do `https://...`): não conta de novo.
-      if (achados.some((a) => ini >= a.ini && ini < a.fim)) continue;
+      if (achados.some((a) => ini >= a.ini && ini < a.fimDoAchado)) continue;
       const link = m[0].replace(PONTUACAO_FINAL, '');
-      if (link.length > 0) achados.push({ ini, fim: ini + m[0].length, link });
+      if (link.length > 0) achados.push({ ini, fim: ini + link.length, fimDoAchado: ini + m[0].length, link });
     }
   }
-  return achados.sort((a, b) => a.ini - b.ini).map((a) => a.link);
+  return achados.sort((a, b) => a.ini - b.ini).map(({ ini, fim, link }) => ({ ini, fim, link }));
+}
+
+/** Os links do texto, na ordem, sem a pontuação colada no fim. */
+export function linksNoTexto(texto: string): string[] {
+  return trechosDeLink(texto).map((t) => t.link);
 }
 
 function partes(link: string): { host: string; resto: string } {
@@ -56,7 +77,9 @@ function partes(link: string): { host: string; resto: string } {
   const corte = semEsquema.search(/[/?#]/);
   const host = (corte === -1 ? semEsquema : semEsquema.slice(0, corte)).toLowerCase().replace(/^www\./, '');
   const resto = corte === -1 ? '' : semEsquema.slice(corte);
-  return { host, resto: resto.replace(/\/+$/, '') };
+  // A barra da raiz antes de `?` ou `#` não muda o endereço (`exemplo.com.br/?x=1` é
+  // `exemplo.com.br?x=1`); a de um caminho (`/plano/?x=1`) fica.
+  return { host, resto: resto.replace(/\/+$/, '').replace(/^\/+(?=[?#])/, '') };
 }
 
 /** A forma de comparar: sem esquema, sem `www.`, domínio em minúsculas, sem barra final. */

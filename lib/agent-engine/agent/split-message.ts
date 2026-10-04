@@ -1,3 +1,5 @@
+import { trechosDeLink } from "../guardrails/link-permitido";
+
 /**
  * Quebra o texto da resposta em "bolhas" curtas (Onda 4). Puro. Usado no send
  * do agente quando split_messages está on; o pacing anti-ban espaça cada bolha.
@@ -56,34 +58,29 @@ export function splitIntoBubbles(text: string, maxChars: number): string[] {
 /**
  * (C01, -c01.3, item 2) Os trechos que o divisor NUNCA parte: link (com esquema ou
  * `www.`), e-mail e domínio solto (`lp.exemplo.com.br/...`, em caixa baixa, com sufixo de
- * uma lista curta). Antes, todo "." e todo "?" partiam sentença — inclusive os de dentro
+ * uma lista curta). (Rodada 2) Os links vêm do MESMO reconhecedor da trava
+ * `link_permitido` (`trechosDeLink`): o divisor não parte exatamente o que a trava
+ * confere, e o domínio sem barra leva junto os parâmetros (`lp.exemplo.com.br?nivel=…`,
+ * que antes saía "lp.exemplo.com.br? nivel=…" — achado 4 da 1ª revisão da -c01.3). Antes, todo "." e todo "?" partiam sentença — inclusive os de dentro
  * de um link: a página de matrícula saía como "https://lp. exemplo. com. br/plano-completo/?
  * nivel=…" espalhada por bolhas (C10 e C41 da volta 19), e o `split_max_chars` do
  * laboratório teve de subir para 2.000 para o link sair inteiro. A pontuação logo
  * DEPOIS do trecho (o ponto final da frase) fica fora dele e continua partindo.
  */
-const TRECHOS_INDIVISIVEIS = [
-  // Link com esquema ou www.
-  /\b(?:https?:\/\/|www\.)[^\s<>"]+/gi,
-  // E-mail.
-  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g,
-  // Domínio solto, em caixa baixa (não pega "com. Brasil" nem "Fica.Com"), com o caminho.
-  /\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|br|io|app|tv|me|info|biz|edu|gov|co|link|site|online|store|shop|dev|ai|ly)\b(?:\/[^\s<>"]*)?/g,
-];
+/** E-mail: não é link (a trava não o confere), mas o divisor também não o parte. */
+const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
 /** Pontuação que encerra a frase quando vem colada no fim de um link. */
 const PONTUACAO_FINAL_DO_TRECHO = /[.,;:!?)\]}'"»]+$/;
 
 /** Os intervalos [início, fim) do texto que o divisor não parte. */
 export function trechosIndivisiveis(text: string): Array<[number, number]> {
-  const intervalos: Array<[number, number]> = [];
-  for (const re of TRECHOS_INDIVISIVEIS) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      const sobra = PONTUACAO_FINAL_DO_TRECHO.exec(m[0])?.[0].length ?? 0;
-      const fim = m.index + m[0].length - sobra;
-      if (fim > m.index) intervalos.push([m.index, fim]);
-    }
+  const intervalos: Array<[number, number]> = trechosDeLink(text).map((t) => [t.ini, t.fim]);
+  EMAIL.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = EMAIL.exec(text)) !== null) {
+    const sobra = PONTUACAO_FINAL_DO_TRECHO.exec(m[0])?.[0].length ?? 0;
+    const fim = m.index + m[0].length - sobra;
+    if (fim > m.index) intervalos.push([m.index, fim]);
   }
   return intervalos;
 }

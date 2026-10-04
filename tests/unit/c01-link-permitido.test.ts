@@ -110,6 +110,28 @@ describe("(C01) a trava 'link permitido'", () => {
     expect(v.detail).toEqual({ links: 1, dominios: "boleto.exemplo.com.br" });
   });
 
+  it("(rodada 2) link sem barra depois do domínio: parâmetro e fragmento contam, e a trava compara o endereço inteiro", async () => {
+    // Achado 4 da 1ª revisão da -c01.3: o reconhecedor pegava só o domínio, e a raiz
+    // liberada pela base liberava o parâmetro inventado.
+    const m = await modulo();
+    expect(m.linksNoTexto("A página é lp.exemplo.com.br?nivel=errado, tá?")).toEqual([
+      "lp.exemplo.com.br?nivel=errado",
+    ]);
+    expect(m.linksNoTexto("Veja lp.exemplo.com.br#planos.")).toEqual(["lp.exemplo.com.br#planos"]);
+    const raiz = { liberados: ["https://lp.exemplo.com.br"] };
+    for (const inventado of ["lp.exemplo.com.br?nivel=errado", "lp.exemplo.com.br#planos-baratos"]) {
+      const v = await avaliar(`A página é ${inventado}.`, raiz);
+      expect(v.pass, inventado).toBe(false);
+      expect(v.reason).toContain(`"${inventado}"`);
+    }
+    expect((await avaliar("A página é lp.exemplo.com.br.", raiz)).pass).toBe(true);
+    // A barra da raiz antes de `?` ou `#` é o mesmo endereço: com ou sem ela, passa.
+    const comParametro = { liberados: ["https://lp.exemplo.com.br/?nivel=superior"] };
+    expect((await avaliar("A página é lp.exemplo.com.br?nivel=superior.", comParametro)).pass).toBe(true);
+    expect((await avaliar("A página é https://lp.exemplo.com.br?nivel=superior", comParametro)).pass).toBe(true);
+    expect((await avaliar("A página é lp.exemplo.com.br?nivel=tecnico.", comParametro)).pass).toBe(false);
+  });
+
   it("acha cada link uma vez só (o domínio dentro do link não conta de novo)", async () => {
     const m = await modulo();
     expect(m.linksNoTexto(`Veja ${DA_BASE}. E também www.exemplo.com.br/blog e lp.exemplo.com.br.`)).toEqual([
