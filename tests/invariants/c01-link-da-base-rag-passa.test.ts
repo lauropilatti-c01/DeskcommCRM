@@ -58,6 +58,9 @@ const MENSAGEM_DO_CLIENTE_EM = "2026-07-30T14:55:00Z";
 /** O link que está no material da base RAG, e o vizinho que o modelo inventaria. */
 const LINK_DA_BASE = "https://lp.exemplo.com.br/plano-completo/?nivel=superior";
 const LINK_ALTERADO = "https://lp.exemplo.com.br/plano-completo/?nivel=tecnico";
+/** (Rodada 3) O link da base com parênteses no caminho, e o vizinho dele. */
+const LINK_COM_PARENTESES = "https://lp.exemplo.com.br/Plano_(Completo)/matricula";
+const LINK_COM_PARENTESES_ALTERADO = "https://lp.exemplo.com.br/Plano_(Anual)/matricula";
 
 type Modules = {
   turno: typeof InboundTurn;
@@ -264,7 +267,14 @@ beforeAll(async () => {
   ]);
   await pool.query(
     "insert into ai_chunks(id,organization_id,knowledge_source_id,kb_version_id,position,content,content_hash,token_count,embedding,metadata) values($1::uuid,$2,$3,$4,0,$5,$1::text,12,array_fill(0.1::real,array[1536])::vector,'{}')",
-    [TRECHO, ORG, FONTE, VERSAO_DA_BASE, `A matrícula do Plano Completo (nível superior) é feita em ${LINK_DA_BASE}.`],
+    [
+      TRECHO,
+      ORG,
+      FONTE,
+      VERSAO_DA_BASE,
+      `A matrícula do Plano Completo (nível superior) é feita em ${LINK_DA_BASE}. ` +
+        `O passo a passo está em ${LINK_COM_PARENTESES}.`,
+    ],
   );
   await pool.query(
     `insert into ai_agent_versions (id, organization_id, agent_id, version_number, system_prompt,
@@ -314,6 +324,27 @@ describe("(C01, -c01.3, rodada 2) o link que a base RAG devolveu passa pela trav
 
   it("o modelo consulta e manda o link ALTERADO (outro `nivel`): vetado, nada sai", async () => {
     const mod = modelo(LINK_ALTERADO, true);
+    const erro = await rodaTurno(montaHandler(mod.doGenerate));
+
+    expect(erro).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(mod.estado.prompts[2]).toContain("link_nao_permitido");
+  });
+
+  it("(rodada 3) o link da base com parênteses no caminho: a cópia EXATA sai", async () => {
+    // Achado 6 da 2ª revisão da -c01.3: a extração das URLs do resultado parava no `)`,
+    // e a cópia exata era vetada como `link_nao_permitido`.
+    const mod = modelo(LINK_COM_PARENTESES, true);
+    const erro = await rodaTurno(montaHandler(mod.doGenerate));
+
+    expect(erro).toBeNull();
+    expect(mod.estado.prompts[1]).toContain(LINK_COM_PARENTESES);
+    expect(enviados.map((e) => e.body)).toEqual([`A matrícula é por aqui: ${LINK_COM_PARENTESES}`]);
+    expect(mod.estado.prompts.join("\n")).not.toContain("link_nao_permitido");
+  });
+
+  it("(rodada 3) o link com parênteses ALTERADO: vetado, nada sai", async () => {
+    const mod = modelo(LINK_COM_PARENTESES_ALTERADO, true);
     const erro = await rodaTurno(montaHandler(mod.doGenerate));
 
     expect(erro).toBeNull();

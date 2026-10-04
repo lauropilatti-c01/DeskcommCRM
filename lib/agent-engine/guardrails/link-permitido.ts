@@ -40,6 +40,10 @@
  * o caminho, os parâmetros e o fragmento; é link quando um rótulo depois do primeiro é
  * um sufixo conhecido em caixa baixa (`isso.Com certeza` continua frase). A porta faz
  * parte do domínio: endereço com porta só passa se veio exato da base ou da conversa.
+ * E o fecha-parêntese (colchete, chave) no fim só sai quando não fecha um aberto dentro
+ * do link: `…/Plano_(Completo)` fica inteiro, `(…/plano)` perde o de fora. É também por
+ * este reconhecedor que o turno extrai as URLs da base (`urlsNoResultado`), e a cópia
+ * exata de uma URL com parênteses passa (achado 6 da 2ª revisão).
  */
 import type { Queryable } from '../queue/queue';
 import type { Gate } from './before-send';
@@ -56,7 +60,28 @@ const RE_DOMINIO_SOLTO = new RegExp(
 );
 /** Um rótulo depois do primeiro é sufixo conhecido, em caixa baixa: é domínio, não frase. */
 const RE_TEM_SUFIXO = new RegExp(`\\.(?:${SUFIXOS})(?=\\.|$)`);
-const PONTUACAO_FINAL = /[.,;:!?)\]}'"»]+$/;
+const PONTUACAO_FINAL = '.,;:!?)]}\'"»';
+const ABRE_DO_QUE_FECHA: Readonly<Record<string, string>> = { ')': '(', ']': '[', '}': '{' };
+
+function quantos(texto: string, c: string): number {
+  return texto.split(c).length - 1;
+}
+
+/**
+ * O link sem a pontuação colada no fim. (Rodada 3) O fecha-parêntese, o fecha-colchete e
+ * o fecha-chave só saem quando não fecham um aberto dentro do link.
+ */
+export function semPontuacaoFinal(link: string): string {
+  let fim = link.length;
+  while (fim > 0) {
+    const c = link[fim - 1]!;
+    if (!PONTUACAO_FINAL.includes(c)) break;
+    const abre = ABRE_DO_QUE_FECHA[c];
+    if (abre !== undefined && quantos(link.slice(0, fim), abre) >= quantos(link.slice(0, fim), c)) break;
+    fim -= 1;
+  }
+  return link.slice(0, fim);
+}
 
 /** Um link no texto: o intervalo [ini, fim) e o endereço, sem a pontuação colada no fim. */
 export interface LinkNoTexto {
@@ -77,7 +102,7 @@ export function trechosDeLink(texto: string): LinkNoTexto[] {
       if (achados.some((a) => ini >= a.ini && ini < a.fimDoAchado)) continue;
       // (Rodada 3) Domínio solto sem sufixo conhecido (`certo.vamos`, `1.690`) é frase.
       if (re === RE_DOMINIO_SOLTO && !RE_TEM_SUFIXO.test(m[1] ?? '')) continue;
-      const link = m[0].replace(PONTUACAO_FINAL, '');
+      const link = semPontuacaoFinal(m[0]);
       if (link.length > 0) achados.push({ ini, fim: ini + link.length, fimDoAchado: ini + m[0].length, link });
     }
   }
@@ -90,7 +115,7 @@ export function linksNoTexto(texto: string): string[] {
 }
 
 function partes(link: string): { host: string; resto: string } {
-  const semEsquema = link.replace(PONTUACAO_FINAL, '').replace(/^https?:\/\//i, '');
+  const semEsquema = semPontuacaoFinal(link).replace(/^https?:\/\//i, '');
   const corte = semEsquema.search(/[/?#]/);
   const host = (corte === -1 ? semEsquema : semEsquema.slice(0, corte)).toLowerCase().replace(/^www\./, '');
   const resto = corte === -1 ? '' : semEsquema.slice(corte);

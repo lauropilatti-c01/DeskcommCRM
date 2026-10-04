@@ -1759,16 +1759,20 @@ export function blocosDeAgendaResidentes(toolIds: readonly string[]): string[] {
  * base RAG, `search_knowledge`) são as únicas liberadas no gate de vocabulário.
  */
 const FERRAMENTA_DA_BASE = 'crm_query_external_data';
-const RE_URL = /https?:\/\/[^\s"'<>\\)\]]+/g;
 /**
  * (C01) Toda URL em qualquer string do resultado da ferramenta, em profundidade.
  * Exportada para o teste; não interpreta o formato do resultado de propósito —
  * o que vale é o texto exato que o modelo pode copiar.
+ *
+ * (C01, -c01.3, rodada 3) Pelo mesmo reconhecedor da trava de link e do divisor
+ * (`linksNoTexto`): a regex própria parava no `)`, a URL da base com parênteses
+ * chegava truncada a `urlsDaBase`, e a cópia exata era vetada (achado 6 da 2ª
+ * revisão do Codex).
  */
 export function urlsNoResultado(valor: unknown, achadas: Set<string> = new Set(), profundidade = 0): Set<string> {
   if (profundidade > 8 || valor === null || valor === undefined) return achadas;
   if (typeof valor === 'string') {
-    for (const m of valor.matchAll(RE_URL)) achadas.add(m[0].replace(/[.,;:!?]+$/, ''));
+    for (const link of linksNoTexto(valor)) achadas.add(link);
     return achadas;
   }
   if (Array.isArray(valor)) {

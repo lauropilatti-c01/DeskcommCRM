@@ -158,6 +158,37 @@ describe("(C01) o turno: as URLs do resultado da base chegam ao gate", () => {
     expect(urlsNoResultado(undefined).size).toBe(0);
   });
 
+  it("(-c01.3, rodada 3) a URL com parênteses chega inteira, pelo mesmo reconhecedor da trava de link", async () => {
+    // Achado 6 da 2ª revisão da -c01.3: `urlsNoResultado` tinha regex própria, que
+    // parava no `)`; a URL da base chegava truncada a `urlsDaBase`, e a cópia exata
+    // que o modelo mandava era vetada pela trava de link.
+    const { linkPermitidoGate, linksNoTexto, normalizarLink } = await import(
+      "@/lib/agent-engine/guardrails/link-permitido"
+    );
+    const comParenteses = "https://lp.exemplo.com.br/Plano_(Completo)/matricula";
+    const noFim = "https://lp.exemplo.com.br/wiki/Plano_(Completo)";
+    const resultado = {
+      results: [
+        { content: `A matrícula é em ${comParenteses}.` },
+        { content: `Veja o resumo (${noFim}), ou a página ${noFim}.` },
+      ],
+    };
+    const urls = urlsNoResultado(resultado);
+    expect([...urls].sort()).toEqual([comParenteses, noFim].sort());
+    // O mesmo que a trava vê no texto da base.
+    for (const r of resultado.results) for (const l of linksNoTexto(r.content)) expect(urls).toContain(l);
+    // Cópia exata passa; alterada veta.
+    const trava = { liberados: new Set([...urls].map(normalizarLink)), dominios: [] as string[] };
+    const avaliar = (body: string) =>
+      linkPermitidoGate.evaluate({ body, travasDeEnvio: { linkPermitido: trava } } as never);
+    expect(avaliar(`A matrícula é por aqui: ${comParenteses}`).pass).toBe(true);
+    expect(avaliar(`Veja (${noFim}).`).pass).toBe(true);
+    expect(avaliar("A matrícula é por aqui: https://lp.exemplo.com.br/Plano_(Anual)/matricula").pass).toBe(false);
+    expect(avaliar("A matrícula é por aqui: https://lp.exemplo.com.br/Plano_/matricula").pass).toBe(false);
+    // E o detector de vocabulário mascara a URL inteira, não o pedaço até o `(`.
+    expect(mascararUrlsDaBase(`Segue: ${comParenteses}`, urls)).toBe(`Segue: ${MASCARA_DE_URL_DA_BASE}`);
+  });
+
   it("a fiação: o turno embrulha crm_query_external_data, guarda as URLs e passa `urlsDaBase` ao gate", () => {
     const turno = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
     expect(turno).toMatch(/const FERRAMENTA_DA_BASE = 'crm_query_external_data';/);
