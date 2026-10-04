@@ -79,6 +79,7 @@ import type { AjusteDeEstilo, LeituraDosAjustes } from './ajustes-de-estilo-da-o
 // (C01, -c01.3) As travas novas, cada uma em arquivo próprio, ligadas por organização.
 import { linkPermitidoGate } from './link-permitido';
 import { textoLongoGate } from './texto-longo';
+import { umaPerguntaGate } from './uma-pergunta';
 import { valorEmDinheiroGate } from './valor-em-dinheiro';
 import type { TravasArmadas } from './travas-de-envio';
 
@@ -849,8 +850,11 @@ const spinningGate: Gate = {
  * v10 (C01, -c01.3) = insere `valorEmDinheiroGate` entre `link_permitido` e
  * `texto_longo` — nenhum valor, parcela, juros ou desconto em dinheiro na conversa (a
  * página de matrícula traz os valores). Nasce DESARMADO.
+ * v11 (C01, -c01.3) = insere `umaPerguntaGate` entre `valor_em_dinheiro` e
+ * `texto_longo` — no máximo uma pergunta por mensagem. Estilo: no limite de vetos
+ * se desarma no turno. Nasce DESARMADO.
  */
-export const BEFORE_SEND_CHAIN_VERSION = 10;
+export const BEFORE_SEND_CHAIN_VERSION = 11;
 
 /**
  * Ordem FINAL da cadeia (F4-08/F4-09; edge-contract §before_send / blueprint órgão 5) — DADO
@@ -869,6 +873,7 @@ export const BEFORE_SEND_CHAIN_VERSION = 10;
  *         agenda neste turno; antes do disclosure pelo mesmo motivo do internal_vocabulary;
  *   (7.1) link_permitido (C01) — só link da base, já enviado ou de domínio liberado;
  *   (7.2) valor_em_dinheiro (C01) — nenhum valor em dinheiro do curso na conversa;
+ *   (7.3) uma_pergunta (C01) — no máximo uma pergunta por mensagem;
  *   (7.4) texto_longo (C01) — a resposta cabe nas mensagens do turno; antes do disclosure
  *         (julga o texto do modelo, não o emendado);
  *   (8) disclosure — 1ª mensagem se apresenta como assistente virtual (F4-05).
@@ -887,6 +892,7 @@ export const BEFORE_SEND_GATES: readonly Gate[] = [
   agendaStallGate,
   linkPermitidoGate,
   valorEmDinheiroGate,
+  umaPerguntaGate,
   textoLongoGate,
   disclosureGate,
 ];

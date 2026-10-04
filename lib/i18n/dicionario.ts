@@ -11299,6 +11299,15 @@ export const DICIONARIO: Traducoes = {
   "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
     es: "Cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
   },
+  "Uma pergunta por mensagem": {
+    es: "Una pregunta por mensaje",
+  },
+  "Quando a mensagem faz mais de uma pergunta, ela volta para ser reescrita com uma só, para o cliente saber o que responder.": {
+    es: "Cuando el mensaje hace más de una pregunta, vuelve para reescribirse con una sola, para que el cliente sepa qué responder.",
+  },
+  "É ajuste de estilo, e cada negócio decide se quer. Se a mensagem voltar duas vezes, ela sai como está: nunca deixa o cliente sem resposta.": {
+    es: "Es un ajuste de estilo, y cada negocio decide si lo quiere. Si el mensaje vuelve dos veces, sale tal como está: nunca deja al cliente sin respuesta.",
+  },
   "Vem desligada; liga-se na configuração da organização.": {
     es: "Viene desactivada; se activa en la configuración de la organización.",
   },

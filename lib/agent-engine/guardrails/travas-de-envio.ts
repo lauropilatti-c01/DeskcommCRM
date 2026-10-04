@@ -7,7 +7,8 @@
  *   { "travas_de_envio": {
  *       "texto_longo":       { "ligada": true },
  *       "link_permitido":    { "ligada": true, "dominios": ["c01.com.br"] },
- *       "valor_em_dinheiro": { "ligada": true } } }
+ *       "valor_em_dinheiro": { "ligada": true },
+ *       "uma_pergunta":      { "ligada": true } } }
  *
  * O turno do agente lê a configuração UMA vez e arma, no `send_message` (o único
  * corpo escrito pelo modelo), as travas ligadas — com o que cada uma precisa saber do
@@ -30,6 +31,7 @@ const travasDeEnvioSchema = z
     // `dominios`: os domínios cujo link sai sempre (o domínio e os subdomínios dele).
     link_permitido: travaSimples.extend({ dominios: z.array(z.string()).optional() }).optional(),
     valor_em_dinheiro: travaSimples.optional(),
+    uma_pergunta: travaSimples.optional(),
   })
   .passthrough();
 
@@ -40,6 +42,7 @@ export interface TravasDeEnvioDaOrg {
   /** Os domínios liberados da trava de link, já normalizados (`c01.com.br`). */
   dominiosLiberados: readonly string[];
   valorEmDinheiro: boolean;
+  umaPergunta: boolean;
 }
 
 export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
@@ -47,6 +50,7 @@ export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
   linkPermitido: false,
   dominiosLiberados: [],
   valorEmDinheiro: false,
+  umaPergunta: false,
 };
 
 /**
@@ -63,6 +67,8 @@ export interface TravasArmadas {
   linkPermitido?: LinkPermitidoArmado;
   /** Valor em dinheiro: só liga ou desliga; não depende do turno. */
   valorEmDinheiro?: true;
+  /** Uma pergunta por mensagem: só liga ou desliga (some no turno ao chegar no limite de vetos). */
+  umaPergunta?: true;
 }
 
 /** Pura: o valor de `settings.travas_de_envio` (qualquer coisa) → o que está ligado. */
@@ -81,6 +87,7 @@ export function interpretarTravasDeEnvio(valor: unknown): {
         .map(normalizarDominio)
         .filter((d) => d.length > 0),
       valorEmDinheiro: lido.data.valor_em_dinheiro?.ligada ?? false,
+      umaPergunta: lido.data.uma_pergunta?.ligada ?? false,
     },
     invalida: false,
   };

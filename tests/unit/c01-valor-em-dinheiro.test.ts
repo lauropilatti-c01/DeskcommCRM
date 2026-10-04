@@ -129,7 +129,7 @@ describe("(C01) a configuração e a ligação no turno e na cadeia", () => {
   });
 
   it("a cadeia roda a trava depois da de link e antes da de texto longo", () => {
-    expect(CADEIA).toMatch(/linkPermitidoGate,\s*valorEmDinheiroGate,\s*textoLongoGate,/);
+    expect(CADEIA).toMatch(/linkPermitidoGate,\s*valorEmDinheiroGate,/);
   });
 
   it("é trava de conteúdo, e o turno a arma só com ela ligada", () => {

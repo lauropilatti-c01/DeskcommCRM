@@ -536,6 +536,8 @@ export const MAX_VETOS_DE_CONTEUDO = MAX_VETOS_DE_VOCABULARIO_INTERNO;
  */
 export const TRAVAS_DE_ESTILO: Readonly<Record<string, keyof TravasArmadas>> = {
   texto_longo: 'textoLongo',
+  // (C01, -c01.3, item 3c) Ver `uma-pergunta.ts`.
+  uma_pergunta: 'umaPergunta',
 };
 
 /** (C01, -c01.3) O limite das travas de estilo: no 2º veto a trava se desarma. */
@@ -3213,6 +3215,9 @@ async function executarTurnoDoAgente(
         }
       : {}),
     ...(travasDaOrg.travas.valorEmDinheiro ? { valorEmDinheiro: true as const } : {}),
+    ...(travasDaOrg.travas.umaPergunta && !estiloDesarmado('uma_pergunta')
+      ? { umaPergunta: true as const }
+      : {}),
     ...(travasDaOrg.travas.textoLongo &&
     (agentConfig?.splitMessages ?? false) &&
     !estiloDesarmado('texto_longo')

@@ -205,6 +205,19 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     opcionalNaConfiguracao: true,
   },
   {
+    nome: "uma_pergunta",
+    rotulo: "Uma pergunta por mensagem",
+    oQueProtege:
+      "Quando a mensagem faz mais de uma pergunta, ela volta para ser reescrita com uma só, para o " +
+      "cliente saber o que responder.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "É ajuste de estilo, e cada negócio decide se quer. Se a mensagem voltar duas vezes, ela sai " +
+      "como está: nunca deixa o cliente sem resposta.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
     nome: "texto_longo",
     rotulo: "Resposta que cabe nas mensagens desta vez",
     oQueProtege:
