@@ -30,6 +30,16 @@
  * barra depois do domínio (`lp.exemplo.com.br?nivel=…`): antes a trava via só o domínio,
  * e a raiz liberada pela base liberava o parâmetro inventado, e o divisor partia o
  * endereço no `?` (achado 4 da 1ª revisão adversarial da -c01.3).
+ *
+ * (Rodada 3) O domínio solto é a AUTORIDADE INTEIRA: todos os rótulos e a porta, nunca
+ * um prefixo. Antes o reconhecedor parava no primeiro sufixo conhecido —
+ * `lp.exemplo.com.br.fake.xyz/pagamento` virava `lp.exemplo.com.br`, e
+ * `lp.exemplo.com.br:8080/?nivel=inventado` perdia a porta e o parâmetro, e passavam
+ * pela raiz liberada ou pelo domínio da organização (achado 4 da 2ª revisão). Agora o
+ * reconhecedor toma todos os rótulos separados por ponto (em qualquer caixa), a porta,
+ * o caminho, os parâmetros e o fragmento; é link quando um rótulo depois do primeiro é
+ * um sufixo conhecido em caixa baixa (`isso.Com certeza` continua frase). A porta faz
+ * parte do domínio: endereço com porta só passa se veio exato da base ou da conversa.
  */
 import type { Queryable } from '../queue/queue';
 import type { Gate } from './before-send';
@@ -37,11 +47,15 @@ import type { Gate } from './before-send';
 const SUFIXOS = 'com|net|org|br|io|app|tv|me|info|biz|edu|gov|co|link|site|online|store|shop|dev|ai|ly';
 const RE_COM_ESQUEMA = /\bhttps?:\/\/[^\s<>"]+/gi;
 const RE_WWW = /(?<![\w.@/-])www\.[^\s<>"]+/gi;
+const ROTULO = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
 // O domínio não começa no meio de outro (letra, ponto, hífen) nem depois de `@` (e-mail).
+// (Rodada 3) Todos os rótulos (grupo 1), a porta e o resto do endereço.
 const RE_DOMINIO_SOLTO = new RegExp(
-  `(?<![\\w.@-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:${SUFIXOS})\\b(?:[/?#][^\\s<>"]*)?`,
-  'g',
+  `(?<![\\w.@-])(${ROTULO}(?:\\.${ROTULO})+)(?::\\d{1,5})?(?:[/?#][^\\s<>"]*)?`,
+  'gi',
 );
+/** Um rótulo depois do primeiro é sufixo conhecido, em caixa baixa: é domínio, não frase. */
+const RE_TEM_SUFIXO = new RegExp(`\\.(?:${SUFIXOS})(?=\\.|$)`);
 const PONTUACAO_FINAL = /[.,;:!?)\]}'"»]+$/;
 
 /** Um link no texto: o intervalo [ini, fim) e o endereço, sem a pontuação colada no fim. */
@@ -61,6 +75,8 @@ export function trechosDeLink(texto: string): LinkNoTexto[] {
       const ini = m.index;
       // Pedaço de um link já achado (o domínio dentro do `https://...`): não conta de novo.
       if (achados.some((a) => ini >= a.ini && ini < a.fimDoAchado)) continue;
+      // (Rodada 3) Domínio solto sem sufixo conhecido (`certo.vamos`, `1.690`) é frase.
+      if (re === RE_DOMINIO_SOLTO && !RE_TEM_SUFIXO.test(m[1] ?? '')) continue;
       const link = m[0].replace(PONTUACAO_FINAL, '');
       if (link.length > 0) achados.push({ ini, fim: ini + link.length, fimDoAchado: ini + m[0].length, link });
     }
@@ -109,6 +125,8 @@ export interface LinkPermitidoArmado {
 export function linkLiberado(link: string, trava: LinkPermitidoArmado): boolean {
   if (trava.liberados.has(normalizarLink(link))) return true;
   const host = dominioDoLink(link);
+  // (Rodada 3) A lista de domínios libera o domínio, não uma porta qualquer dele.
+  if (/:\d*$/.test(host)) return false;
   return trava.dominios.some((d) => d.length > 0 && (host === d || host.endsWith(`.${d}`)));
 }
 

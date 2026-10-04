@@ -132,6 +132,42 @@ describe("(C01) a trava 'link permitido'", () => {
     expect((await avaliar("A página é lp.exemplo.com.br?nivel=tecnico.", comParametro)).pass).toBe(false);
   });
 
+  it("(rodada 3) o domínio solto é a autoridade inteira: todos os rótulos e a porta, com caminho, parâmetros e fragmento", async () => {
+    // Achado 4 da 2ª revisão da -c01.3: o reconhecedor parava no primeiro sufixo
+    // conhecido, e o domínio falso no fim ou a porta com parâmetro inventado passavam
+    // pela raiz liberada ou pelo domínio da organização.
+    const m = await modulo();
+    expect(m.linksNoTexto("Pague em lp.exemplo.com.br.fake.xyz/pagamento.")).toEqual([
+      "lp.exemplo.com.br.fake.xyz/pagamento",
+    ]);
+    expect(m.linksNoTexto("Veja lp.exemplo.com.br:8080/?nivel=inventado")).toEqual([
+      "lp.exemplo.com.br:8080/?nivel=inventado",
+    ]);
+    expect(m.linksNoTexto("Veja lp.exemplo.com.br.FAKE.xyz/pagamento#topo, tá?")).toEqual([
+      "lp.exemplo.com.br.FAKE.xyz/pagamento#topo",
+    ]);
+    const raizEDominio = { liberados: ["https://lp.exemplo.com.br"], dominios: ["exemplo.com.br"] };
+    for (const inventado of [
+      "lp.exemplo.com.br.fake.xyz/pagamento",
+      "lp.exemplo.com.br:8080/?nivel=inventado",
+      "https://lp.exemplo.com.br:8080/?nivel=inventado",
+      "www.exemplo.com.br.fake.xyz/pagamento",
+      "lp.exemplo.com.brasil/pagamento",
+    ]) {
+      const v = await avaliar(`A página é ${inventado}.`, raizEDominio);
+      expect(v.pass, inventado).toBe(false);
+      expect(v.reason).toContain(`"${inventado}"`);
+    }
+    // Controles: o domínio da organização, sem porta, continua passando; a frase também.
+    expect((await avaliar("A página é lp.exemplo.com.br/plano-completo.", raizEDominio)).pass).toBe(true);
+    expect((await avaliar("A página é lp.exemplo.com.br.", raizEDominio)).pass).toBe(true);
+    expect(m.linksNoTexto("Fiz isso.Com certeza, certo.vamos lá. No Pix, R$ 1.690.")).toEqual([]);
+    // Com porta, só o endereço exato que veio da base.
+    const comPorta = { liberados: ["https://lp.exemplo.com.br:8080/?nivel=superior"] };
+    expect((await avaliar("A página é lp.exemplo.com.br:8080/?nivel=superior.", comPorta)).pass).toBe(true);
+    expect((await avaliar("A página é lp.exemplo.com.br:8080/?nivel=tecnico.", comPorta)).pass).toBe(false);
+  });
+
   it("acha cada link uma vez só (o domínio dentro do link não conta de novo)", async () => {
     const m = await modulo();
     expect(m.linksNoTexto(`Veja ${DA_BASE}. E também www.exemplo.com.br/blog e lp.exemplo.com.br.`)).toEqual([

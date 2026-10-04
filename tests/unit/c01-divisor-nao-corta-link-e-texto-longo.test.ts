@@ -129,6 +129,37 @@ describe("(C01) o divisor não parte link, e-mail nem domínio", () => {
     expect(divisor).not.toMatch(/https\?:/);
   });
 
+  it.each(["lp.exemplo.com.br.fake.xyz/pagamento", "lp.exemplo.com.br:8080/?nivel=inventado"])(
+    "(rodada 3) a autoridade inteira não se parte, e a trava vê o endereço inteiro em cada bolha: %s",
+    async (link) => {
+      // Achado 4 da 2ª revisão da -c01.3: o divisor protegia só `lp.exemplo.com.br` e
+      // partia no ponto do domínio falso ou no `?` depois da porta.
+      const { linkPermitidoGate, normalizarLink } = await import("@/lib/agent-engine/guardrails/link-permitido");
+      const texto =
+        "Pra Engenharia de Equipamentos eu iria no Plano Completo, porque o acesso não expira e dá pra " +
+        "estudar no seu ritmo, com as metas da semana e o simulado do fim do mês. " +
+        `A página de matrícula é ${link} e lá estão as formas de pagamento. ` +
+        "Qualquer dúvida sobre o edital ou sobre a rotina de estudo, me chama por aqui que eu te explico.";
+      const trava = {
+        liberados: new Set([normalizarLink("https://lp.exemplo.com.br")]),
+        dominios: ["exemplo.com.br"],
+      };
+      // Sem divisor: o texto inteiro volta.
+      const inteiro = linkPermitidoGate.evaluate({ body: texto, travasDeEnvio: { linkPermitido: trava } } as never);
+      expect(inteiro.pass).toBe(false);
+      for (const limite of [80, 120, 300]) {
+        const bolhas = splitIntoBubbles(texto, limite);
+        expect(bolhas.some((b) => b.includes(link)), `limite ${limite}: ${JSON.stringify(bolhas)}`).toBe(true);
+        // Com divisor: a bolha do link volta, com o endereço inteiro no erro de ensino.
+        const vetadas = bolhas
+          .map((b) => linkPermitidoGate.evaluate({ body: b, travasDeEnvio: { linkPermitido: trava } } as never))
+          .filter((v) => !v.pass);
+        expect(vetadas, `limite ${limite}`).toHaveLength(1);
+        expect(vetadas[0]!.reason).toContain(`"${link}"`);
+      }
+    },
+  );
+
   it("controle: o ponto final logo depois do link ainda encerra a frase", () => {
     const bolhas = splitIntoBubbles(
       "Veja em https://lp.exemplo.com.br/plano-completo/?nivel=superior. Depois me conta o que achou.",
