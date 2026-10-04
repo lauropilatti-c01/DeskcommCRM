@@ -40,6 +40,7 @@ import {
 import { costCents } from './pricing';
 import { chaveDeOrcamentoDaInstalacao } from '../../../instalacao/comportamento';
 import { createDefaultRegistry, type ProviderRegistry } from './providers';
+import { comPrazoPorRequisicao, PRAZO_POR_REQUISICAO_PADRAO_MS } from './prazo-por-requisicao';
 import { buildStablePrefix } from './stable-prefix';
 import {
   degrauDoEnderecoProprio,
@@ -763,7 +764,16 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
       // `config.baseUrl` é o da PRÓPRIA credencial e só o provedor personalizado
       // (#1642) tem um: o endereço nasce junto da chave, então o agente
       // publicado nele alcança o mesmo gateway que a tela testou ao salvar.
-      model: factory(config.apiKey, model, decisao.baseUrl ?? config.baseUrl ?? undefined),
+      //
+      // (C01, -c01.3) Cada requisição ao provedor tem prazo próprio
+      // (`LLM_REQUEST_TIMEOUT_MS`, padrão 120 s), combinado com `abortSignal` abaixo
+      // (o do chamador e o da execução): a que pendura cai no prazo dela e o job
+      // re-tenta, em vez de esperar o prazo da execução inteira. Ver
+      // `./prazo-por-requisicao.ts`.
+      model: comPrazoPorRequisicao(
+        factory(config.apiKey, model, decisao.baseUrl ?? config.baseUrl ?? undefined),
+        cfg.prazoPorRequisicaoMs ?? PRAZO_POR_REQUISICAO_PADRAO_MS,
+      ),
       system: prefix.system,
       messages: input.messages,
       abortSignal,

@@ -168,6 +168,11 @@ const envSchema = z.object({
   // 'disabled' injeta o desligamento no corpo das chamadas — e SÓ nas da
   // DeepSeek (a fábrica é dela; ver providers.ts).
   DEEPSEEK_THINKING: z.enum(['provider', 'disabled']).default('provider'),
+  // (C01, -c01.3) Prazo de CADA requisição ao provedor de IA (cada etapa do laço de
+  // ferramentas é uma), em ms. Vencido, a requisição é abortada e o job segue o caminho
+  // de nova tentativa — em vez de esperar o prazo da execução inteira (lease − 60 s).
+  // Ver lib/agent-engine/edge/llm/prazo-por-requisicao.ts.
+  LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   // Esforço de raciocínio das chamadas diretas à OpenAI (só modelos o*, gpt-5*,
   // gpt-6*). Opcional; validado AQUI, pela mesma função que o lê em runtime, para
   // um erro de grafia derrubar o boot com o nome da variável — e não cada turno
