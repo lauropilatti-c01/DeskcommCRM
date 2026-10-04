@@ -233,7 +233,7 @@ describe("(C01) a ligação no turno, pelo código", () => {
 
   it("(ii) o bloco do corte chama a sequência comum com `turn.corte` (que agora traz o limite de etapas e o teto de saída)", () => {
     expect(TURNO).toMatch(
-      /turn\.corte !== null &&\s*seq === 0 &&[\s\S]{0,200}\) \{\s*await passarAoHumanoSemResposta\(turn\.corte\);\s*\}/,
+      /turn\.corte !== null &&\s*!leadTemResposta &&[\s\S]{0,200}\) \{\s*await passarAoHumanoSemResposta\(turn\.corte\);\s*\}/,
     );
   });
 
@@ -258,7 +258,7 @@ describe("(C01) a ligação no turno, pelo código", () => {
     expect(i).toBeGreaterThan(-1);
     const bloco = TURNO.slice(TURNO.lastIndexOf("} catch (err) {", i), TURNO.indexOf("} finally {", i));
     expect(bloco).toMatch(
-      /if \(\s*!preview &&\s*seq === 0 &&\s*!passadoAoHumano &&\s*!turnoDescartado &&\s*turnoVaiFalarComOLead\(liveJob\(\)\) &&\s*falhaEsgotaAsTentativas\(liveJob\(\), err\)\s*\) \{/,
+      /if \(\s*!preview &&\s*!leadTemResposta &&\s*!passadoAoHumano &&\s*!turnoDescartado &&\s*turnoVaiFalarComOLead\(liveJob\(\)\) &&\s*falhaEsgotaAsTentativas\(liveJob\(\), err\)\s*\) \{/,
     );
     expect(bloco).toMatch(
       /await passarAoHumanoSemResposta\(\{\s*motivo: 'falha_na_ultima_tentativa',[\s\S]*?tentativa: liveJob\(\)\.attempts,\s*tentativas: liveJob\(\)\.max_attempts,\s*\}\);/,

@@ -237,12 +237,12 @@ describe("(C01) a ligação pelo código", () => {
     expect(SEAM).toMatch(/stepCountIs\(input\.maxSteps\),/);
   });
 
-  it("o turno: corte nosso + zero mensagens ao lead + sem erro + sem passagem + turno que fala com o lead → caso, frase pelo `send` exclusivo, passagem gravada", () => {
+  it("o turno: corte nosso + zero mensagens ao lead + sem erro nem envio 'failed' + sem passagem + turno que fala com o lead → caso, frase pelo `send` exclusivo, passagem gravada", () => {
     const i = TURNO.indexOf("turn.corte !== null &&");
     expect(i).toBeGreaterThan(-1);
     const condicao = TURNO.slice(i - 200, TURNO.indexOf("if (runError !== null) {", i));
     expect(condicao).toMatch(
-      /if \(\s*!preview &&\s*turn\.corte !== null &&\s*seq === 0 &&\s*runError === null &&\s*!passadoAoHumano &&\s*!turnoDescartado &&\s*turnoVaiFalarComOLead\(liveJob\(\)\)\s*\) \{\s*await passarAoHumanoSemResposta\(turn\.corte\);\s*\}/,
+      /if \(\s*!preview &&\s*turn\.corte !== null &&\s*!leadTemResposta &&\s*runError === null &&\s*!outcomes\.some\(\(o\) => o\.kind === 'failed'\) &&\s*!passadoAoHumano &&\s*!turnoDescartado &&\s*turnoVaiFalarComOLead\(liveJob\(\)\)\s*\) \{\s*await passarAoHumanoSemResposta\(turn\.corte\);\s*\}/,
     );
     // (-c01.3) A sequência mora em `passarAoHumanoSemResposta`; os textos vêm de
     // `textosDoFimSemResposta` (o corte pelo teto de tokens: os constantes de sempre).

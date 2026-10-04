@@ -3080,6 +3080,15 @@ async function executarTurnoDoAgente(
     : await estadoInicialDoJob(pool, { tenantId, jobId: liveJob().id });
   let posicao = estadoInicial.posicao;
   let seq = estadoInicial.enviadas;
+  // (C01, -c01.3, rodada 2) O lead tem resposta deste job? `seq` é o contador do TETO e
+  // conta também o envio que não chegou ('failed', 'unavailable'): como evidência de
+  // resposta, ele barrava o fail-safe do turno sem resposta com o lead mudo (achado 2 da
+  // 1ª revisão adversarial da -c01.3). A evidência é outra: o que a execução anterior
+  // deixou aceito ou com o canal (`enviadas`: aceitas e pendentes que o canal vai
+  // entregar) e, nesta execução, o que o canal aceitou ou segura (`sent`, `queued`,
+  // `already_sent`). `blocked` também conta, como contava em `seq`: é o opt-out
+  // irrevogável, e a frase de espera não vai a quem pediu para parar.
+  let leadTemResposta = estadoInicial.enviadas > 0;
   // (C01, rodada 7) As posições que a execução anterior deixou com recibo 'failed',
   // por ordem. Cada envio FÍSICO desta execução recebe a primeira delas como dica de
   // posição, em vez de `posicao + 1`, e o ledger a rotaciona como sempre rotacionou
@@ -3158,6 +3167,7 @@ async function executarTurnoDoAgente(
       }
       if (contaNoTeto(resultado)) seq += 1;
     }
+    if (resultado.kind !== 'failed' && resultado.kind !== 'unavailable') leadTemResposta = true;
     // (C01, rodada 6) A pendência da recuperação que esta chave retomou sai da lista.
     if (resultado.kind !== 'unavailable') porRetomar.delete(resultado.idempotencyKey);
     return resultado;
@@ -4933,8 +4943,9 @@ async function executarTurnoDoAgente(
    * O mesmo caminho do fail-safe de vocabulário interno: caso aberto para uma pessoa da
    * equipe, frase de espera pelo `send` exclusivo dela, passagem ao humano GRAVADA. Só
    * os textos mudam conforme o fim (`textosDoFimSemResposta`); nenhuma frase nova ao
-   * cliente. Quem chama confere as condições (sem preview, nenhuma mensagem contada em
-   * `seq`, sem passagem, turno não descartado, turno que fala com o lead).
+   * cliente. Quem chama confere as condições (sem preview, nenhuma resposta ao lead
+   * neste job — `leadTemResposta` —, sem passagem, turno não descartado, turno que fala
+   * com o lead).
    */
   const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {
     const textos = textosDoFimSemResposta(fim);
@@ -5488,8 +5499,10 @@ async function executarTurnoDoAgente(
     // concluía o job com zero envios — o lead ficava mudo, sem retry nem
     // encaminhamento, e o job "ok" (achado 1 da sétima revisão adversarial; é o
     // sintoma da C54, cuja chamada de 66 mil tokens cairia neste corte). Agora o corte
-    // volta em `turn.corte` e, se NENHUMA mensagem física saiu ao lead neste job (`seq`
-    // conta as desta execução e as recuperadas das anteriores), o turno segue o mesmo
+    // volta em `turn.corte` e, se NENHUMA mensagem saiu ao lead neste job
+    // (`leadTemResposta`: as desta execução e as recuperadas das anteriores que o canal
+    // aceitou ou segura; até a rodada 2 da -c01.3 era `seq`, que conta também o envio
+    // que falhou), o turno segue o mesmo
     // caminho do fail-safe de vocabulário interno: caso aberto para uma pessoa da
     // equipe, frase de espera pelo `send` exclusivo dela, passagem ao humano GRAVADA.
     // Com pelo menos um envio feito nada muda: o lead recebeu algo, o corte só encerra
@@ -5498,13 +5511,15 @@ async function executarTurnoDoAgente(
     // e passam por aqui; o prazo das chamadas aborta com exceção e o job re-tenta (na
     // última tentativa, o `catch` do turno faz a mesma passagem). Preview não tem lead;
     // turno de retaguarda não fala com ele; turno descartado (#1943) deixa a resposta
-    // para o turno da mensagem nova; `runError` já vai falhar o job, e o retry roda o
-    // modelo de novo. A sequência está em `passarAoHumanoSemResposta`.
+    // para o turno da mensagem nova; `runError` e o envio 'failed' já vão falhar o job, e
+    // o retry roda o modelo de novo (na última tentativa, o `catch` passa à equipe). A
+    // sequência está em `passarAoHumanoSemResposta`.
     if (
       !preview &&
       turn.corte !== null &&
-      seq === 0 &&
+      !leadTemResposta &&
       runError === null &&
+      !outcomes.some((o) => o.kind === 'failed') &&
       !passadoAoHumano &&
       !turnoDescartado &&
       turnoVaiFalarComOLead(liveJob())
@@ -5952,10 +5967,11 @@ async function executarTurnoDoAgente(
     // `falhaEsgotaAsTentativas` espelha a disposição do worker (o que não gasta
     // tentativa, o que cancela, o que já foi resolvido, o teto de orçamento). (Rodada 2)
     // A falha da compactação na última tentativa também chega aqui (ver
-    // `adiarFalhaDaUltimaTentativa`).
+    // `adiarFalhaDaUltimaTentativa`); e "nada tinha saído" é `leadTemResposta`, não `seq`:
+    // o envio que o canal devolveu 'failed' ou 'unavailable' não é resposta.
     if (
       !preview &&
-      seq === 0 &&
+      !leadTemResposta &&
       !passadoAoHumano &&
       !turnoDescartado &&
       turnoVaiFalarComOLead(liveJob()) &&
