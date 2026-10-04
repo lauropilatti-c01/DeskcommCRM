@@ -11,6 +11,7 @@ export function turnKnobsFromEnv(env: Env): InboundTurnKnobs {
     maxContextTokens: env.LEAD_CONTEXT_MAX_TOKENS,
     notesIndexMaxTokens: env.LEAD_NOTES_INDEX_MAX_TOKENS,
     maxSteps: env.AGENT_MAX_STEPS,
+    maxOutputTokens: env.AGENT_MAX_OUTPUT_TOKENS,
     maxSendsPerTurn: env.MAX_SENDS_PER_TURN,
     ...(env.AGENT_FRASE_DE_ESPERA !== undefined ? { fraseDeEspera: env.AGENT_FRASE_DE_ESPERA } : {}),
     queuedRetryDelayMs: env.SEND_QUEUED_RETRY_MS,

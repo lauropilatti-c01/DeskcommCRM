@@ -67,8 +67,22 @@ export function baseDaApiDoJev(): string {
  * calibrado sobre esta — a régua se deslocaria sem deploy e sem rastro. O
  * próprio fornecedor recomenda fixar quando há limiar ajustado. Se ela for
  * aposentada, a API responde 400, que vira `contrato_invalido` com `exigeAcao`.
+ *
+ * (C01, -c01.3, item 6) Esta é a versão PADRÃO; a pedida à API é a de `modeloDoJev()`.
  */
 export const MODELO_DO_JEV = "jev-1.13.0";
+
+/**
+ * (C01, -c01.3, item 6) A versão pedida à API: `JEV_MODEL` do ambiente, ou
+ * `MODELO_DO_JEV`. Pelo OpenRouter o nome válido é `jev-1.13`, e trocar exigia mudar o
+ * código. Vazio é ausente (`||`, não `??`), como em `baseDaApiDoJev`. Continua sendo
+ * versão fixada: quem troca escolhe a versão, e a régua não anda sozinha. Função, e
+ * não constante, pela mesma razão de `baseDaApiDoJev`: o `env` é lido na hora do uso,
+ * nunca na carga do módulo.
+ */
+export function modeloDoJev(): string {
+  return (env.JEV_MODEL ?? "").trim() || MODELO_DO_JEV;
+}
 
 // ── As três primitivas, e só elas ────────────────────────────────────────────
 
@@ -264,7 +278,7 @@ export async function decidir(
         Authorization: `Bearer ${entrada.chave}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ model: MODELO_DO_JEV, state: entrada.estado, questions }),
+      body: JSON.stringify({ model: modeloDoJev(), state: entrada.estado, questions }),
       signal: abortador.signal,
     });
 
@@ -308,7 +322,7 @@ export async function decidir(
     return {
       ok: true,
       respostas,
-      modelo: lido.data.model ?? MODELO_DO_JEV,
+      modelo: lido.data.model ?? modeloDoJev(),
       latenciaMs,
       uso: {
         tokensDeEntrada: lido.data.usage?.input_tokens ?? 0,

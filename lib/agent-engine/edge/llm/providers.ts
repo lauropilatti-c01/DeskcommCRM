@@ -212,6 +212,39 @@ function comEsforcoDeRaciocinio(inner: typeof fetch, esforco: EsforcoDeRaciocini
 }
 
 /**
+ * (C01, -c01.3, item 5) O que a fábrica do OpenRouter acrescenta ao corpo da chamada,
+ * lido de `organizations.settings.llm.params` (`run-model-call.ts`, `paramsSchema`).
+ *
+ * Por que existe: o modelo em uso no laboratório (`openai/gpt-6.1-sol`) não aceita
+ * temperatura — a lista pública da OpenRouter (04/10/2026) dá, para ele,
+ * `reasoning_effort`, `seed`, `verbosity` e `max_tokens`. Sem temperatura, o que fixa
+ * o comportamento entre rodadas é o esforço de raciocínio, a semente e a verbosidade,
+ * e nenhum dos três chegava à requisição. Os nomes são os do corpo da API; ausente =
+ * não vai (o padrão do modelo vale).
+ */
+export interface ParametrosDoOpenRouter {
+  reasoning_effort?: EsforcoDeRaciocinioOpenAI;
+  seed?: number;
+  verbosity?: 'low' | 'medium' | 'high';
+}
+
+/** Acrescenta campos ao corpo JSON da chamada, preservando o resto. */
+function comCamposNoCorpo(inner: typeof fetch, campos: Record<string, unknown>): typeof fetch {
+  return (input, init) => {
+    const corpo = init?.body;
+    if (typeof corpo === 'string') {
+      try {
+        const json = JSON.parse(corpo) as Record<string, unknown>;
+        return inner(input, { ...init, body: JSON.stringify({ ...json, ...campos }) });
+      } catch {
+        // Corpo não-JSON: repassa intacto — um ajuste de tuning nunca derruba a chamada.
+      }
+    }
+    return inner(input, init);
+  };
+}
+
+/**
  * Providers reais do lançamento. Sonnet (Anthropic) é o default RECOMENDADO —
  * recomendação vive em .env.example/docs; o id do modelo é sempre config da org.
  *
@@ -231,6 +264,8 @@ export function createDefaultRegistry(opts?: {
   deepseekThinking?: RaciocinioDeepseek;
   /** Knob OPENAI_REASONING_EFFORT; ausente = lido do ambiente. `null` = não injeta. */
   openaiReasoningEffort?: EsforcoDeRaciocinioOpenAI | null;
+  /** (C01, -c01.3) Ver `ParametrosDoOpenRouter`. Só a fábrica do OpenRouter lê. */
+  openrouterParams?: ParametrosDoOpenRouter;
 }): ProviderRegistry {
   const extra = opts?.allowedHosts ?? [];
   const esforcoOpenAI =
@@ -264,11 +299,17 @@ export function createDefaultRegistry(opts?: {
      */
     openrouter: (apiKey, modelId, baseUrl) => {
       const endpoint = baseUrl ?? OPENROUTER_ENDPOINT;
+      const camposExtras = Object.fromEntries(
+        Object.entries(opts?.openrouterParams ?? {}).filter(([, v]) => v !== undefined),
+      );
       const provider = createOpenAI({
         apiKey,
         baseURL: endpoint,
         headers: cabecalhosDeAtribuicaoOpenRouter(),
-        fetch: contain(endpoint),
+        fetch:
+          Object.keys(camposExtras).length > 0
+            ? comCamposNoCorpo(contain(endpoint), camposExtras)
+            : contain(endpoint),
       });
       // Chat Completions, NÃO Responses: a OpenRouter fala a API da OpenAI
       // (chat/completions). O `createOpenAI()(modelId)` desta versão do SDK usa

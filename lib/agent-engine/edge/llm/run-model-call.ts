@@ -40,6 +40,7 @@ import {
 import { costCents } from './pricing';
 import { chaveDeOrcamentoDaInstalacao } from '../../../instalacao/comportamento';
 import { createDefaultRegistry, type ProviderRegistry } from './providers';
+import { comPrazoPorRequisicao, PRAZO_POR_REQUISICAO_PADRAO_MS } from './prazo-por-requisicao';
 import { buildStablePrefix } from './stable-prefix';
 import {
   degrauDoEnderecoProprio,
@@ -175,6 +176,11 @@ const paramsSchema = z
     topP: z.number().optional(),
     topK: z.number().int().optional(),
     maxOutputTokens: z.number().int().positive().optional(),
+    // (C01, -c01.3, item 5) Só o OpenRouter os envia (ver `ParametrosDoOpenRouter` em
+    // `./providers.ts`); os nomes são os do corpo da API.
+    reasoning_effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+    seed: z.number().int().optional(),
+    verbosity: z.enum(['low', 'medium', 'high']).optional(),
   })
   .passthrough();
 
@@ -220,12 +226,19 @@ export interface RunModelCallInput {
    * reescrever na etapa seguinte, e parar ali entregava rascunho vazio.
    */
   pararQuando?: () => boolean;
-  /** Teto por chamada auxiliar; nunca aumenta o limite configurado pela organização. */
+  /**
+   * Teto de tokens de saída por requisição (auxiliares e, desde a -c01.3, o turno do
+   * agente — knob AGENT_MAX_OUTPUT_TOKENS); nunca aumenta o limite configurado pela
+   * organização.
+   */
   maxOutputTokens?: number;
   /**
-   * (C01) Teto de tokens (entrada + saída, somados pelas etapas) do laço de
-   * ferramentas desta chamada — o `token_budget` da versão publicada do agente,
-   * o mesmo que o runtime nativo (`lib/ai/runtime/agent.ts`) já aplica. Passado
+   * (C01) Teto de tokens do laço de ferramentas desta chamada — o `token_budget` da
+   * versão publicada do agente, o mesmo campo que o runtime nativo
+   * (`lib/ai/runtime/agent.ts`) já aplica. (C01, -c01.3) Conta só o que é NOVO em cada
+   * etapa: saída + entrada fora do cache (`tokensDasEtapas`). Cada etapa reenvia o
+   * prompt inteiro, e com a conta do autor (entrada + saída) um prompt de ~21.700
+   * tokens passava de 50.000 na 3ª etapa só relendo do cache (volta 19-A). Passado
    * o teto, o laço para ao fim da etapa corrente (`pararPorTetoDeTokens`); não é
    * erro: o que já saiu para o cliente fica, e o turno fecha com checkpoint.
    * (C01, rodada 8) O corte volta ao chamador em `corte` (ver `CorteDoLaco`): é
@@ -272,15 +285,26 @@ export function combinarSinais(
 
 /** Etapa do laço como o SDK a entrega — só o que a conta de tokens precisa. */
 export interface EtapaComUso {
-  usage?: { inputTokens?: number; outputTokens?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    inputTokenDetails?: { cacheReadTokens?: number };
+  };
 }
 
-/** (C01) Tokens de entrada + saída somados por todas as etapas até aqui. */
+/**
+ * (C01) Tokens NOVOS somados por todas as etapas até aqui: saída + entrada fora do
+ * cache. (-c01.3) A entrada lida do cache sai da conta: ela é o mesmo prompt relido a
+ * cada etapa, não trabalho novo — e é a parte que fazia o teto cortar turnos normais
+ * de prompt grande (C01.md, "Limite desta versão — o `token_budget`…"). Sem detalhe
+ * de cache (provedor que não informa), conta a entrada inteira, como antes.
+ */
 export function tokensDasEtapas(etapas: ReadonlyArray<EtapaComUso>): number {
-  return etapas.reduce(
-    (total, etapa) => total + (etapa.usage?.inputTokens ?? 0) + (etapa.usage?.outputTokens ?? 0),
-    0,
-  );
+  return etapas.reduce((total, etapa) => {
+    const entrada = etapa.usage?.inputTokens ?? 0;
+    const doCache = etapa.usage?.inputTokenDetails?.cacheReadTokens ?? 0;
+    return total + Math.max(0, entrada - doCache) + (etapa.usage?.outputTokens ?? 0);
+  }, 0);
 }
 
 /**
@@ -288,16 +312,55 @@ export function tokensDasEtapas(etapas: ReadonlyArray<EtapaComUso>): number {
  * Até aqui o corte só aparecia no log: `runModelCall` devolvia o resultado como o de
  * um laço que acabou sozinho, e o turno, sem saber que a resposta foi cortada antes
  * de sair, gravava o checkpoint e concluía o job com o lead sem nada (achado 1 da
- * sétima revisão adversarial — o sintoma da C54, agora com job "ok"). Só o teto de
- * tokens tem motivo: o prazo das chamadas (`prazoDasChamadas`) aborta a chamada com
- * exceção, o job falha e a fila re-tenta — não é corte silencioso, e não passa aqui.
- * O fim por etapas (`stepCountIs(maxSteps)`) é desenho do autor e fica como está.
+ * sétima revisão adversarial — o sintoma da C54, agora com job "ok"). O prazo das
+ * chamadas (`prazoDasChamadas`, e o por requisição) aborta a chamada com exceção, o
+ * job falha e a fila re-tenta — não é corte silencioso, e não passa aqui.
+ *
+ * (C01, -c01.3, item 1c) Mais dois fins do laço que deixam o turno sem resposta, com o
+ * mesmo tratamento: `limite_de_etapas` — o laço chegou ao teto de etapas
+ * (`stepCountIs(maxSteps)`, que fica como o autor desenhou) com a última etapa ainda
+ * pedindo ferramenta; e `teto_de_saida` — a última etapa parou no teto de tokens de
+ * saída por requisição (`finishReason` 'length', o `maxOutputTokens` da -c01.3). O
+ * laço que acaba sozinho ('stop') continua sem motivo: calar é decisão do modelo.
  */
 export interface CorteDoLaco {
-  motivo: 'corte_por_teto_de_tokens';
+  motivo: 'corte_por_teto_de_tokens' | 'limite_de_etapas' | 'teto_de_saida';
+  /** O teto que parou o laço: tokens do turno, etapas, ou tokens de saída por requisição. */
   teto: number;
+  /** O gasto na grandeza do teto: tokens novos, etapas feitas, ou a saída da última etapa. */
   gastos: number;
   etapas: number;
+}
+
+/**
+ * (C01, -c01.3, item 1c) O fim do laço por limite, quando não houve corte pelo teto de
+ * tokens: ver `CorteDoLaco`. Pura, sobre o resultado do `generateText`.
+ */
+export function fimDoLacoPorLimite(
+  resultado: {
+    finishReason: string;
+    steps: ReadonlyArray<{ usage?: { outputTokens?: number } }>;
+  },
+  limites: { maxSteps?: number; maxOutputTokens?: number },
+): CorteDoLaco | null {
+  const etapas = resultado.steps.length;
+  if (resultado.finishReason === 'length') {
+    return {
+      motivo: 'teto_de_saida',
+      // 0 = sem teto nosso: parou no máximo do próprio modelo.
+      teto: limites.maxOutputTokens ?? 0,
+      gastos: resultado.steps.at(-1)?.usage?.outputTokens ?? 0,
+      etapas,
+    };
+  }
+  if (
+    resultado.finishReason === 'tool-calls' &&
+    limites.maxSteps !== undefined &&
+    etapas >= limites.maxSteps
+  ) {
+    return { motivo: 'limite_de_etapas', teto: limites.maxSteps, gastos: etapas, etapas };
+  }
+  return null;
 }
 
 /**
@@ -595,9 +658,6 @@ async function registrarRecusaDeEnderecoSemChave(d: {
 }
 
 export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunModelCallInput, deps: RunModelCallDeps = {}) {
-  // O knob do raciocínio da DeepSeek entra pela fábrica: `deepseekThinking` só é
-  // lido pela fábrica `deepseek`, então os outros provedores não têm como mudar.
-  const registry = deps.registry ?? createDefaultRegistry({ deepseekThinking: cfg.deepseekThinking });
   const purpose = input.purpose ?? 'agent_turn';
 
   // A config da org é lida ANTES da decisão porque o resolvedor precisa dela
@@ -656,15 +716,29 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   if (config.enabledModels.length > 0 && !config.enabledModels.includes(model)) {
     throw new LlmModelNotEnabledError(model);
   }
-  const factory = registry[config.provider];
-  if (factory === undefined) {
-    throw new LlmProviderUnknownError(config.provider);
-  }
   const parsedParams = paramsSchema.safeParse(config.params);
   if (!parsedParams.success) {
     throw new Error('params inválidos em organizations.settings.llm.params — corrija a config da org');
   }
-  const { temperature, topP, topK, maxOutputTokens } = parsedParams.data;
+  const { temperature, topP, topK, maxOutputTokens, reasoning_effort, seed, verbosity } = parsedParams.data;
+  // O knob do raciocínio da DeepSeek entra pela fábrica: `deepseekThinking` só é
+  // lido pela fábrica `deepseek`, então os outros provedores não têm como mudar.
+  // (C01, -c01.3) Idem os parâmetros do OpenRouter, lidos dos params da org — por
+  // isso o registry nasce depois da leitura deles.
+  const registry =
+    deps.registry ??
+    createDefaultRegistry({
+      deepseekThinking: cfg.deepseekThinking,
+      openrouterParams: {
+        ...(reasoning_effort !== undefined ? { reasoning_effort } : {}),
+        ...(seed !== undefined ? { seed } : {}),
+        ...(verbosity !== undefined ? { verbosity } : {}),
+      },
+    });
+  const factory = registry[config.provider];
+  if (factory === undefined) {
+    throw new LlmProviderUnknownError(config.provider);
+  }
 
   // ═══ A CHAVE DA INSTALAÇÃO NÃO VAI PARA O ENDEREÇO DA EMPRESA ═══
   //
@@ -751,6 +825,10 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
   // vai ao chamador no retorno. Objeto, e não `let`: a atribuição acontece num
   // callback, que o fluxo de tipos não acompanha.
   const corte: { valor: CorteDoLaco | null } = { valor: null };
+  const tetoDeSaida =
+    input.maxOutputTokens === undefined
+      ? maxOutputTokens
+      : Math.min(maxOutputTokens ?? Infinity, input.maxOutputTokens);
   let result: Awaited<ReturnType<typeof generateText>>;
   try {
     abortSignal?.throwIfAborted();
@@ -763,7 +841,16 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
       // `config.baseUrl` é o da PRÓPRIA credencial e só o provedor personalizado
       // (#1642) tem um: o endereço nasce junto da chave, então o agente
       // publicado nele alcança o mesmo gateway que a tela testou ao salvar.
-      model: factory(config.apiKey, model, decisao.baseUrl ?? config.baseUrl ?? undefined),
+      //
+      // (C01, -c01.3) Cada requisição ao provedor tem prazo próprio
+      // (`LLM_REQUEST_TIMEOUT_MS`, padrão 120 s), combinado com `abortSignal` abaixo
+      // (o do chamador e o da execução): a que pendura cai no prazo dela e o job
+      // re-tenta, em vez de esperar o prazo da execução inteira. Ver
+      // `./prazo-por-requisicao.ts`.
+      model: comPrazoPorRequisicao(
+        factory(config.apiKey, model, decisao.baseUrl ?? config.baseUrl ?? undefined),
+        cfg.prazoPorRequisicaoMs ?? PRAZO_POR_REQUISICAO_PADRAO_MS,
+      ),
       system: prefix.system,
       messages: input.messages,
       abortSignal,
@@ -787,9 +874,7 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
       temperature,
       topP,
       topK,
-      maxOutputTokens: input.maxOutputTokens === undefined
-        ? maxOutputTokens
-        : Math.min(maxOutputTokens ?? Infinity, input.maxOutputTokens),
+      maxOutputTokens: tetoDeSaida,
     });
   } catch (err) {
     // ─── A LINHA QUE FALTAVA ────────────────────────────────────────────────
@@ -827,6 +912,12 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     throw err;
   }
   const latencyMs = Date.now() - startedAt;
+  // (C01, -c01.3, item 1c) O fim por limite (etapas ou teto de saída) também volta em
+  // `corte`; o corte pelo teto de tokens, quando houve, tem a precedência.
+  corte.valor ??= fimDoLacoPorLimite(result, {
+    maxSteps: input.maxSteps,
+    maxOutputTokens: tetoDeSaida,
+  });
 
   const usage = {
     inputTokens: result.usage.inputTokens ?? 0,
@@ -900,7 +991,8 @@ export async function runModelCall(db: pg.Pool, cfg: LlmEdgeConfig, input: RunMo
     avisos: decisao.avisos,
     /**
      * (C01, rodada 8) O corte NOSSO do laço, quando houve (`null` quando o laço
-     * acabou sozinho ou pelo teto de etapas do autor). A linha de `llm_calls` fica
+     * acabou sozinho). (-c01.3) Também o fim pelo teto de etapas ainda pedindo
+     * ferramenta, e pelo teto de saída (ver `CorteDoLaco`). A linha de `llm_calls` fica
      * 'ok' — a chamada ao provedor foi bem, e o CHECK da coluna só aceita 'ok' e
      * 'erro' —; o motivo vive aqui, no log e no que o chamador faz com ele.
      */

@@ -74,6 +74,13 @@ export interface LlmEdgeConfig {
    * exatamente onde a IA gasta.
    */
   budgetEnforcement?: ChaveDeOrcamento;
+  /**
+   * (C01, -c01.3) Prazo de CADA requisição ao provedor, em ms — knob
+   * `LLM_REQUEST_TIMEOUT_MS` do worker. Ausente = `PRAZO_POR_REQUISICAO_PADRAO_MS`
+   * (120 s), aplicado no seam: quem monta a config pelo `lib/env.ts` do app (que não
+   * declara o knob) também recebe o prazo. Ver `./prazo-por-requisicao.ts`.
+   */
+  prazoPorRequisicaoMs?: number;
 }
 
 /**
@@ -93,6 +100,7 @@ export function llmEdgeConfigFromEnv(env: {
   LLM_CACHE_TTL?: string;
   AI_BUDGET_ENFORCEMENT?: string;
   DEEPSEEK_THINKING?: string;
+  LLM_REQUEST_TIMEOUT_MS?: number;
 }): LlmEdgeConfig {
   const ttl = env.LLM_CACHE_TTL ?? '1h';
   if (ttl !== '5m' && ttl !== '1h') {
@@ -113,6 +121,7 @@ export function llmEdgeConfigFromEnv(env: {
     // opcional que some faria o seam ter de repetir o default, e dois defaults
     // é como um dos dois fica para trás.
     budgetEnforcement: normalizarChaveDeOrcamento(env.AI_BUDGET_ENFORCEMENT),
+    ...(env.LLM_REQUEST_TIMEOUT_MS !== undefined ? { prazoPorRequisicaoMs: env.LLM_REQUEST_TIMEOUT_MS } : {}),
   };
 }
 

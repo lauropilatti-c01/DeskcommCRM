@@ -11,7 +11,7 @@ import type pg from "pg";
 
 import { logger } from "@/lib/logger";
 
-import { MODELO_DO_JEV, type FalhaDaDecisao } from "./cliente";
+import { modeloDoJev, type FalhaDaDecisao } from "./cliente";
 import { lerConfigDoJev, type EstadoDaTarefa } from "./config";
 import { estadoEfetivoDaTarefa, type TarefaDoJev } from "./tarefas";
 import { codigoDoErroDoJev } from "./textos";
@@ -73,7 +73,7 @@ export async function registrarFalhaQuePedeAcao(
         entrada.contactId ?? null,
         entrada.jobId ?? null,
         entrada.purpose,
-        `typesafe/${MODELO_DO_JEV}`,
+        `typesafe/${modeloDoJev()}`,
         falha.latenciaMs ?? null,
         codigoDoErroDoJev(falha.motivo),
         falha.status,

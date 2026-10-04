@@ -94,6 +94,15 @@ const USD_PER_MTOK: Record<string, Preco> = {
   // Id exato de propósito: quando a versão fixada subir, esta linha sobe junto,
   // e até lá a versão nova sai com custo NULL — nunca com o preço de outra.
   'jev-1.13.0': { input: 0.042, output: 0, cacheRead: 0.042, cacheWrite5m: 0.042, cacheWrite1h: 0.042 },
+
+  // (C01, -c01.3, item 5) Os modelos em uso pelo OpenRouter, com o id COMPLETO
+  // (`provedor/modelo`): o preço é o da lista pública da OpenRouter (04/10/2026), que
+  // pode não ser o do provedor direto — por isso não entram sem o prefixo. Gravação de
+  // cache: a OpenAI não cobra (= entrada); a Anthropic cobra 1.25× (5m) e 2× (1h).
+  // ⚠️ A tabela `ai_pricing` do banco não tem estas linhas (mudá-la é migration).
+  'openai/gpt-6.1-sol': { input: 2, output: 10, cacheRead: 0.1, cacheWrite5m: 2, cacheWrite1h: 2 },
+  'openai/gpt-6-luna': { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0.1, cacheWrite1h: 0.1 },
+  'anthropic/claude-haiku-4.5': { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
 };
 
 export interface TokenUsage {

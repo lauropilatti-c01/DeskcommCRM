@@ -11281,6 +11281,45 @@ export const DICIONARIO: Traducoes = {
   "Esconder que é um assistente é enganar o cliente.": {
     es: "Ocultar que es un asistente es engañar al cliente.",
   },
+  "Só mandar link que tem de onde vir": {
+    es: "Solo enviar enlaces que tengan de dónde venir",
+  },
+  "Barra o link que o assistente montou ou alterou: só sai o endereço que a sua base devolveu, que já foi mandado nesta conversa ou que é de um domínio que você liberou.": {
+    es: "Bloquea el enlace que el asistente armó o modificó: solo sale la dirección que devolvió tu base, que ya se envió en esta conversación o que es de un dominio que habilitaste.",
+  },
+  "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.": {
+    es: "Depende de la lista de dominios de cada negocio. Si el asistente insiste tres veces con un enlace sin origen, la conversación pasa a una persona del equipo y el enlace no sale.",
+  },
+  "Valor em dinheiro só na página de matrícula": {
+    es: "Valores en dinero solo en la página de matrícula",
+  },
+  "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que traz os valores certos, em vez de escrever um número que pode estar errado.": {
+    es: "Bloquea el mensaje con precio, cuota, intereses o descuento: el asistente envía la página, que tiene los valores correctos, en lugar de escribir un número que puede estar equivocado.",
+  },
+  "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
+    es: "Cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
+  },
+  "Uma pergunta por mensagem": {
+    es: "Una pregunta por mensaje",
+  },
+  "Quando a mensagem faz mais de uma pergunta, ela volta para ser reescrita com uma só, para o cliente saber o que responder.": {
+    es: "Cuando el mensaje hace más de una pregunta, vuelve para reescribirse con una sola, para que el cliente sepa qué responder.",
+  },
+  "É ajuste de estilo, e cada negócio decide se quer. Se a mensagem voltar duas vezes, ela sai como está: nunca deixa o cliente sem resposta.": {
+    es: "Es un ajuste de estilo, y cada negocio decide si lo quiere. Si el mensaje vuelve dos veces, sale tal como está: nunca deja al cliente sin respuesta.",
+  },
+  "Vem desligada; liga-se na configuração da organização.": {
+    es: "Viene desactivada; se activa en la configuración de la organización.",
+  },
+  "Resposta que cabe nas mensagens desta vez": {
+    es: "Respuesta que cabe en los mensajes de esta vez",
+  },
+  "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, ela volta para ser reescrita mais curta, em vez de sair com a última mensagem enorme.": {
+    es: "Cuando la respuesta se convertiría en más mensajes de los que el asistente puede enviar de una vez, vuelve para reescribirse más corta, en lugar de salir con el último mensaje enorme.",
+  },
+  "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, ela sai dividida como sempre: nunca deixa o cliente sem resposta.": {
+    es: "Es un ajuste de estilo, y cada negocio decide si lo quiere. Si la respuesta vuelve dos veces, sale dividida como siempre: nunca deja al cliente sin respuesta.",
+  },
   "+1 consulta ao modelo por mensagem enviada": { es: "+1 consulta al modelo por mensaje enviado" },
   "+1 consulta ao modelo por mensagem recebida": { es: "+1 consulta al modelo por mensaje recibido" },
 

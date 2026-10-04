@@ -76,6 +76,12 @@ import { isWindowOpen } from './messaging-window';
 import type { ChannelProvider } from '@/lib/channels/capabilities';
 import { aplicarAjustesDeEstilo, lerAjustesDeEstiloDaOrg } from './ajustes-de-estilo-da-org';
 import type { AjusteDeEstilo, LeituraDosAjustes } from './ajustes-de-estilo-da-org';
+// (C01, -c01.3) As travas novas, cada uma em arquivo próprio, ligadas por organização.
+import { linkPermitidoGate } from './link-permitido';
+import { textoLongoGate } from './texto-longo';
+import { umaPerguntaGate } from './uma-pergunta';
+import { valorEmDinheiroGate } from './valor-em-dinheiro';
+import type { TravasArmadas } from './travas-de-envio';
 
 /** O que os gates enxergam — carregado UMA vez sob o lock, por tentativa de envio. */
 export interface GateContext {
@@ -226,7 +232,8 @@ export interface GateContext {
    */
   internalVocabularyEnforced?: boolean;
   /**
-   * (C01) URLs que a base da empresa devolveu NESTE turno (`crm_query_external_data`).
+   * (C01) URLs que a base da empresa devolveu NESTE turno (`crm_query_external_data`
+   * e, desde a rodada 2 da -c01.3, `search_knowledge`).
    * O `internalVocabularyGate` mascara a ocorrência exata de cada uma antes de
    * varrer: o link de vídeo legítimo carrega um UUID e caía como "identificador
    * interno". Ausente = nada liberado. Ver `OpcoesDeDeteccao.urlsPermitidas`.
@@ -278,6 +285,13 @@ export interface GateContext {
    * site, que é quem monta as tools).
    */
   agenda?: { active: boolean; ferramentas: readonly string[]; toolCalledThisTurn: boolean };
+  /**
+   * (C01, -c01.3) As travas novas (texto longo, …), armadas pelo `send_message` do agente
+   * conforme `organizations.settings.travas_de_envio` (ver `travas-de-envio.ts`).
+   * Ausente — ou a chave da trava ausente — = desarmada: a mesma direção segura de
+   * `internalVocabularyEnforced` (caller que não conhece o campo não arma nada).
+   */
+  travasDeEnvio?: TravasArmadas;
 }
 
 /**
@@ -826,8 +840,22 @@ const spinningGate: Gate = {
  * `GateContext.agenda`): só o caminho do agente o arma quando o agente publicado tem
  * `crm_book_appointment` nas tools, então a v7 também não muda o destino de nenhum envio que
  * já existia fora desse caso — muda o TRACE e passa a medir/impedir a promessa vazia.
+ * v8 (C01, -c01.3) = insere `textoLongoGate` entre `agenda_stall` e `disclosure` — a
+ * resposta que viraria mais mensagens do que cabem no turno volta ao modelo para ficar
+ * mais curta. Nasce DESARMADO (ver `GateContext.travasDeEnvio`): só o `send_message` o
+ * arma, com a trava ligada na organização e o divisor ligado.
+ * v9 (C01, -c01.3) = insere `linkPermitidoGate` entre `agenda_stall` e `texto_longo` —
+ * só sai link que a base devolveu, que já foi mandado na conversa ou que é de domínio
+ * liberado pela organização. Conteúdo antes de estilo: o link errado é consertado
+ * antes do tamanho. Nasce DESARMADO, como o `texto_longo`.
+ * v10 (C01, -c01.3) = insere `valorEmDinheiroGate` entre `link_permitido` e
+ * `texto_longo` — nenhum valor, parcela, juros ou desconto em dinheiro na conversa (a
+ * página de matrícula traz os valores). Nasce DESARMADO.
+ * v11 (C01, -c01.3) = insere `umaPerguntaGate` entre `valor_em_dinheiro` e
+ * `texto_longo` — no máximo uma pergunta por mensagem. Estilo: no limite de vetos
+ * se desarma no turno. Nasce DESARMADO.
  */
-export const BEFORE_SEND_CHAIN_VERSION = 7;
+export const BEFORE_SEND_CHAIN_VERSION = 11;
 
 /**
  * Ordem FINAL da cadeia (F4-08/F4-09; edge-contract §before_send / blueprint órgão 5) — DADO
@@ -844,6 +872,11 @@ export const BEFORE_SEND_CHAIN_VERSION = 7;
  *         `separacao-fala-e-operacao.md`); antes do disclosure porque ele pode emendar o corpo;
  *   (6.9) agenda_stall — "vou verificar/confirmar horário" sem ter chamado a ferramenta de
  *         agenda neste turno; antes do disclosure pelo mesmo motivo do internal_vocabulary;
+ *   (7.1) link_permitido (C01) — só link da base, já enviado ou de domínio liberado;
+ *   (7.2) valor_em_dinheiro (C01) — nenhum valor em dinheiro do curso na conversa;
+ *   (7.3) uma_pergunta (C01) — no máximo uma pergunta por mensagem;
+ *   (7.4) texto_longo (C01) — a resposta cabe nas mensagens do turno; antes do disclosure
+ *         (julga o texto do modelo, não o emendado);
  *   (8) disclosure — 1ª mensagem se apresenta como assistente virtual (F4-05).
  * (O anti-jailbreak F4-04 é INBOUND advisório, não gate de before_send — não entra aqui.)
  */
@@ -858,6 +891,10 @@ export const BEFORE_SEND_GATES: readonly Gate[] = [
   casePromiseGate,
   internalVocabularyGate,
   agendaStallGate,
+  linkPermitidoGate,
+  valorEmDinheiroGate,
+  umaPerguntaGate,
+  textoLongoGate,
   disclosureGate,
 ];
 
@@ -972,6 +1009,13 @@ export interface RunBeforeSendArgs {
   enforceInternalVocabulary?: boolean;
   /** (C01) Ver `GateContext.urlsDaBase`. Ausente = nenhuma URL liberada. */
   urlsDaBase?: ReadonlySet<string>;
+  /**
+   * (C01, -c01.3) Ver `GateContext.travasDeEnvio`. Ausente = travas novas desarmadas.
+   * Função, lida no momento da conferência: o que a trava precisa saber do turno
+   * (quantas mensagens ainda cabem, quais travas de estilo já se desarmaram, se quem
+   * sai é a frase de espera) muda entre a montagem dos args e cada execução da cadeia.
+   */
+  travasDeEnvio?: () => TravasArmadas;
   /**
    * Desarma o `spinningGate` para ESTA tentativa. Ausente = armado (ver
    * `GateContext.spinningEnforced` para a razão da assimetria e para a conta que
@@ -1262,6 +1306,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
       internalVocabularyEnforced: args.enforceInternalVocabulary ?? false,
       ...(args.urlsDaBase !== undefined ? { urlsDaBase: args.urlsDaBase } : {}),
       ...(args.agenda !== undefined ? { agenda: args.agenda } : {}),
+      ...(args.travasDeEnvio !== undefined ? { travasDeEnvio: args.travasDeEnvio() } : {}),
     };
 
     const { body: evaluatedBody, trace: traceDaCadeia, veto, throttleWaitMs } = evaluateBeforeSend(ctx, gates);

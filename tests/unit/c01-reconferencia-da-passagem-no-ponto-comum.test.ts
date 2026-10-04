@@ -81,15 +81,18 @@ describe("(C01) a reconferência no ponto comum e a tradução em veto", () => {
   });
 
   it("toda cadeia de ferramenta roda por `cadeiaDeEnvio`: template, send_message, re-run do caso e pergunta do roteiro; só a frase de espera vai direto", () => {
-    // Seis chamadas à cadeia no turno: quatro traduzidas por `cadeiaDeEnvio`…
-    expect(FONTE.match(/runBeforeSend\(/g)).toHaveLength(6);
-    expect(FONTE.match(/cadeiaDeEnvio\(\(\) =>\s*runBeforeSend\(/g)).toHaveLength(4);
+    // Sete chamadas à cadeia no turno: cinco traduzidas por `cadeiaDeEnvio` (a quinta,
+    // desde a -c01.3, é o re-run da trava de estilo desarmada no limite)…
+    expect(FONTE.match(/runBeforeSend\(/g)).toHaveLength(7);
+    expect(FONTE.match(/cadeiaDeEnvio\(\(\) =>\s*runBeforeSend\(/g)).toHaveLength(5);
     // …e as duas diretas são a frase de espera — a do fail-safe de vocabulário interno
     // (marcada imediatamente antes de sair) e, desde a rodada 8, a do fail-safe do
     // corte, que roda depois do laço do modelo com `passadoAoHumano` já ligado e sai
     // pelo mesmo `send` exclusivo (que leva a marca).
     expect(FONTE.match(/^\s*const espera = await runBeforeSend\(\{/gm)).toHaveLength(2);
-    const corte = corpo("turn.corte !== null &&", "const desfecho = desfechoDaFraseDeEspera(");
+    // (-c01.3) A do corte mora em `passarAoHumanoSemResposta`, que o bloco do corte e o
+    // `catch` da última tentativa chamam.
+    const corte = corpo("const passarAoHumanoSemResposta = async", "const desfecho = desfechoDaFraseDeEspera(");
     expect(corte).toMatch(
       /passadoAoHumano = true;[\s\S]*const espera = await runBeforeSend\(\{[\s\S]*send: enviarFraseDeEspera,/,
     );
@@ -104,9 +107,10 @@ describe("(C01) a reconferência no ponto comum e a tradução em veto", () => {
     expect(corpo("send_message: tool({", "update_lead_state: tool({")).toMatch(
       /let chain = await cadeiaDeEnvio\(\(\) => runBeforeSend\(beforeSendArgs\)\);/,
     );
+    // (-c01.3) O terceiro é o re-run da trava de estilo desarmada no limite de vetos.
     expect(
       corpo("send_message: tool({", "update_lead_state: tool({").match(/cadeiaDeEnvio\(\(\) =>/g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     const depoisDoModelo = FONTE.slice(FONTE.indexOf("pararQuando: () =>"));
     expect(depoisDoModelo.match(/cadeiaDeEnvio\(\(\) =>/g)).toHaveLength(1);
   });

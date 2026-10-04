@@ -85,7 +85,15 @@ function Conferencia({
       <div className="space-y-1">
         <p className="text-sm font-medium">{t(c.rotulo)}</p>
         <p className="text-xs text-muted-foreground">{t(c.oQueProtege)}</p>
-        {c.escolha === null ? (
+        {c.escolha === null && c.opcionalNaConfiguracao === true ? (
+          // (C01, -c01.3) Opcional por organização: não é fixa nem tem interruptor aqui.
+          <p data-testid={`conferencia-${c.nome}-opcional`} className="text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">
+              {t("Vem desligada; liga-se na configuração da organização.")}
+            </span>{" "}
+            {t(c.porQueNaoSeDesliga)}
+          </p>
+        ) : c.escolha === null ? (
           <p data-testid={`conferencia-${c.nome}-fixa`} className="text-xs text-muted-foreground">
             <span className="font-medium text-foreground">{t("Isto não se desliga.")}</span>{" "}
             {t(c.porQueNaoSeDesliga)}

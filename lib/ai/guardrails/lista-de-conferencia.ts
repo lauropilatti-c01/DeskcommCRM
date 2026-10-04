@@ -48,8 +48,20 @@ export interface ConferenciaDeSaida {
    * Objeto = há escolha real, e ela custa dinheiro — o custo vai na tela.
    */
   escolha: { custo: string } | null;
-  /** Por que não se desliga. Vazio quando há escolha. */
+  /**
+   * Por que não se desliga. Vazio quando há escolha. Nas opcionais da configuração
+   * (`opcionalNaConfiguracao`), por que ela vem desligada.
+   */
   porQueNaoSeDesliga: string;
+  /**
+   * (C01, -c01.3) As travas novas não são fixas nem têm interruptor aqui: nascem
+   * desligadas e se ligam por organização, na configuração
+   * (`organizations.settings.travas_de_envio`, ver
+   * `lib/agent-engine/guardrails/travas-de-envio.ts`). A tela não pode dizer "isto
+   * não se desliga" de uma conferência que vem desligada: diz que ela é opcional e
+   * onde se liga. Só com `escolha: null` e `camada: null`.
+   */
+  opcionalNaConfiguracao?: true;
   /**
    * A chave da camada em `org_guardrail_layers`, quando há escolha.
    *
@@ -165,6 +177,58 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
       "É a mesma promessa vazia do 'vou pedir pro responsável', só que sobre agenda: o cliente " +
       "fica esperando uma confirmação que nunca foi checada. Regra fixa, sem custo.",
     camada: null,
+  },
+  {
+    nome: "link_permitido",
+    rotulo: "Só mandar link que tem de onde vir",
+    oQueProtege:
+      "Barra o link que o assistente montou ou alterou: só sai o endereço que a sua base devolveu, " +
+      "que já foi mandado nesta conversa ou que é de um domínio que você liberou.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link " +
+      "sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
+    nome: "valor_em_dinheiro",
+    rotulo: "Valor em dinheiro só na página de matrícula",
+    oQueProtege:
+      "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que " +
+      "traz os valores certos, em vez de escrever um número que pode estar errado.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três " +
+      "vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
+    nome: "uma_pergunta",
+    rotulo: "Uma pergunta por mensagem",
+    oQueProtege:
+      "Quando a mensagem faz mais de uma pergunta, ela volta para ser reescrita com uma só, para o " +
+      "cliente saber o que responder.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "É ajuste de estilo, e cada negócio decide se quer. Se a mensagem voltar duas vezes, ela sai " +
+      "como está: nunca deixa o cliente sem resposta.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
+    nome: "texto_longo",
+    rotulo: "Resposta que cabe nas mensagens desta vez",
+    oQueProtege:
+      "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, " +
+      "ela volta para ser reescrita mais curta, em vez de sair com a última mensagem enorme.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, " +
+      "ela sai dividida como sempre: nunca deixa o cliente sem resposta.",
+    camada: null,
+    opcionalNaConfiguracao: true,
   },
   {
     nome: "disclosure",

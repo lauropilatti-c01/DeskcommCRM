@@ -50,7 +50,7 @@ import { costCents } from "@/lib/agent-engine/edge/llm/pricing";
 import { logger } from "@/lib/logger";
 import { scrubMessage } from "@/lib/sentry/scrub";
 
-import { MODELO_DO_JEV, type MotivoDaAusencia, type Pergunta } from "./cliente";
+import { modeloDoJev, type MotivoDaAusencia, type Pergunta } from "./cliente";
 import type { EstadoDaTarefa, EstadoQuePergunta } from "./config";
 import { podeTentar, registrarFalha, registrarSucesso } from "./disjuntor";
 import { estadoDaTarefaNoPool, registrarFalhaQuePedeAcao } from "./pool";
@@ -241,7 +241,7 @@ async function registrarCobertura(pool: pg.Pool, entrada: EntradaDoRoteador, fal
         entrada.organizationId,
         entrada.contactId,
         entrada.jobId,
-        `typesafe/${MODELO_DO_JEV}`,
+        `typesafe/${modeloDoJev()}`,
         falha.latenciaMs,
         codigoDoErroDoJev(falha.motivo),
         falha.status,

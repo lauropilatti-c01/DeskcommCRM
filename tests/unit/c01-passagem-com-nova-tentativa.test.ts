@@ -153,9 +153,13 @@ describe("(C01) a ligação no fail-safe e os fatos do autor que fazem a nova te
   });
 
   it("neste caminho 'ninguém avisado' não é o cenário: o caso `guardrail_autofallback` é aberto antes da frase de espera e da passagem", () => {
-    const caso = TURNO.indexOf("source: 'guardrail_autofallback'");
-    const frase = TURNO.indexOf("body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO");
-    const passagem = TURNO.indexOf("await gravarPassagemComNovaTentativa(");
+    // Dentro do turno: a escolta da preparação (rodada 3 da -c01.3), antes dele no
+    // arquivo, tem a mesma ordem e é conferida em `c01-fim-sem-resposta-passa-ao-humano`.
+    const turno = TURNO.indexOf("async function executarTurnoDoAgente(");
+    expect(turno).toBeGreaterThan(-1);
+    const caso = TURNO.indexOf("source: 'guardrail_autofallback'", turno);
+    const frase = TURNO.indexOf("body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO", turno);
+    const passagem = TURNO.indexOf("await gravarPassagemComNovaTentativa(", turno);
     expect(caso).toBeGreaterThan(-1);
     expect(frase).toBeGreaterThan(caso);
     expect(passagem).toBeGreaterThan(frase);

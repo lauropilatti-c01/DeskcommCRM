@@ -251,6 +251,10 @@ const schema = z.object({
   // daqui, é por organização (BYOK). Quem lê é `baseDaApiDoJev()`, em
   // lib/ai/decisao/cliente.ts.
   JEV_API_BASE_URL: z.string().optional().default(""),
+  // (C01, -c01.3) A versão do Jev pedida à API. Vazio = a versão FIXADA no código
+  // (`jev-1.13.0`). Pelo OpenRouter o nome válido é `jev-1.13`. Quem lê é
+  // `modeloDoJev()`, em lib/ai/decisao/cliente.ts.
+  JEV_MODEL: z.string().optional().default(""),
   // Destinos internos que o DONO DA INSTALAÇÃO autoriza (decisão 22-d, #1004):
   // IPv4 e faixas CIDR IPv4 que a saída pode alcançar mesmo sendo rede interna,
   // e só para destinos que a própria INSTALAÇÃO configura (nunca o endereço que
