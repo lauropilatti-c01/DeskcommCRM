@@ -68,6 +68,12 @@ import {
 } from '../edge/llm/run-model-call';
 // (C01, -c01.3) A falha que vai matar o job: o fail-safe do turno sem resposta roda antes.
 import { falhaEsgotaAsTentativas } from './ultima-tentativa';
+// (C01, -c01.3) As travas de envio novas, ligadas por organização.
+import {
+  lerTravasDeEnvioDaOrg,
+  TRAVAS_DESLIGADAS,
+  type TravasArmadas,
+} from '../guardrails/travas-de-envio';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
@@ -516,6 +522,19 @@ export const TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE: Readonly<Record<string, string>> 
 
 /** (C01, -c01.3) O limite das travas de conteúdo: o mesmo da de vocabulário interno. */
 export const MAX_VETOS_DE_CONTEUDO = MAX_VETOS_DE_VOCABULARIO_INTERNO;
+
+/**
+ * (C01, -c01.3, item 2) As travas de ESTILO, com o seu contador por turno: o 1º veto
+ * ensina; no 2º a trava se desarma no turno e a cadeia roda de novo — a mensagem sai
+ * como sairia sem ela (no texto longo, dividida como hoje). Estilo não vale o silêncio
+ * nem uma passagem à equipe. O valor é a chave da trava em `TravasArmadas`.
+ */
+export const TRAVAS_DE_ESTILO: Readonly<Record<string, keyof TravasArmadas>> = {
+  texto_longo: 'textoLongo',
+};
+
+/** (C01, -c01.3) O limite das travas de estilo: no 2º veto a trava se desarma. */
+export const MAX_VETOS_DE_ESTILO = 2;
 
 /**
  * (C01) O que o cliente lê quando a resposta do modelo não pôde sair (3 vetos de
@@ -3146,6 +3165,36 @@ async function executarTurnoDoAgente(
   // incluídas), nunca em veto de gate. Checar `seq` antes de tentar o próximo envio
   // barra o modelo sem gastar uma chamada de before-send à toa.
   const maxSendsPerTurn = deps.knobs.maxSendsPerTurn ?? DEFAULT_MAX_SENDS_PER_TURN;
+  // (C01, -c01.3) As travas de envio que a organização ligou, lidas UMA vez por turno.
+  // Falhou a leitura (ou JSON inválido): todas desligadas, com o aviso no log — a trava
+  // é proteção a mais, não pode calar o agente. A prévia não as arma.
+  const travasDaOrg = preview
+    ? { travas: { ...TRAVAS_DESLIGADAS }, leituraFalhou: false }
+    : await lerTravasDeEnvioDaOrg(pool, tenantId);
+  if (travasDaOrg.leituraFalhou) {
+    runLog.warn('travas de envio: leitura de organizations.settings falhou ou JSON inválido — todas desligadas');
+  }
+  // (C01, -c01.3) Os contadores das travas de estilo (`TRAVAS_DE_ESTILO`), um por código,
+  // por turno. No limite a trava fica desarmada pelo resto do turno.
+  const vetosDeEstilo = new Map<string, number>();
+  const estiloDesarmado = (codigo: string): boolean => (vetosDeEstilo.get(codigo) ?? 0) >= MAX_VETOS_DE_ESTILO;
+  /**
+   * (C01, -c01.3) O que o `send_message` arma em cada tentativa: as travas ligadas na
+   * organização, com o que cada uma precisa saber do turno AGORA (quantas mensagens
+   * ainda cabem), menos as de estilo já desarmadas no turno.
+   */
+  const travasArmadas = (): TravasArmadas => ({
+    ...(travasDaOrg.travas.textoLongo &&
+    (agentConfig?.splitMessages ?? false) &&
+    !estiloDesarmado('texto_longo')
+      ? {
+          textoLongo: {
+            maxChars: agentConfig?.splitMaxChars ?? 600,
+            restantes: maxSendsPerTurn - seq,
+          },
+        }
+      : {}),
+  });
   // (C01, rodada 6) O teto vale para intenção NOVA. Com ele cheio, a ferramenta de
   // envio recusa de cara — a menos que a recuperação tenha contado pendências que esta
   // execução ainda não retomou (`porRetomar`): então ela segue até saber se o conteúdo
@@ -3884,6 +3933,10 @@ async function executarTurnoDoAgente(
             enforceInternalVocabulary: true,
             // (C01) As URLs que a base devolveu neste turno passam pelo gate acima.
             urlsDaBase,
+            // (C01, -c01.3) As travas novas ligadas na organização (só aqui: texto do
+            // modelo), lidas a cada execução da cadeia. A frase de espera do fail-safe
+            // abaixo herda estes args, mas é texto do sistema: sai sem elas.
+            travasDeEnvio: (): TravasArmadas => (enviandoFraseDeEspera ? {} : travasArmadas()),
             // Mesmo padrão do vocabulário interno: só o `send_message` arma — é o único
             // corpo escrito pelo modelo. `active` é ter QUALQUER ferramenta de agenda:
             // um agente que só CONSULTA promete "vou verificar" igual, e enquanto a
@@ -4067,6 +4120,28 @@ async function executarTurnoDoAgente(
                 ...beforeSendArgs,
                 hasOpenCase: true,
                 openedCaseThisTurn: true,
+              }),
+            );
+          }
+          // (C01, -c01.3, item 2) As travas de ESTILO (`TRAVAS_DE_ESTILO`): 1º veto ensina;
+          // no 2º a trava se desarma no turno e a cadeia roda de novo — a mensagem sai como
+          // sairia sem ela. Depois do caso, para valer também no re-run do fail-safe dele.
+          while (chain.status === 'vetoed' && Object.hasOwn(TRAVAS_DE_ESTILO, chain.code)) {
+            const vetos = (vetosDeEstilo.get(chain.code) ?? 0) + 1;
+            vetosDeEstilo.set(chain.code, vetos);
+            if (vetos < MAX_VETOS_DE_ESTILO) {
+              return { ok: false, error: { code: chain.code, message: chain.message } };
+            }
+            runLog.info('trava de estilo no limite: desarmada no turno, a mensagem sai sem ela', {
+              trava: chain.code,
+              vetos,
+            });
+            // `travasArmadas()` já não arma esta trava; o caso aberto pelo fail-safe
+            // acima segue valendo no re-run.
+            chain = await cadeiaDeEnvio(() =>
+              runBeforeSend({
+                ...beforeSendArgs,
+                ...(openedCaseThisTurn ? { hasOpenCase: true, openedCaseThisTurn: true } : {}),
               }),
             );
           }

@@ -145,7 +145,9 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
   it("cada conferência sem escolha DIZ por que não se desliga", () => {
     renderPainel();
 
-    const fixas = CONFERENCIAS_DE_SAIDA.filter((c) => c.escolha === null);
+    const fixas = CONFERENCIAS_DE_SAIDA.filter(
+      (c) => c.escolha === null && c.opcionalNaConfiguracao !== true,
+    );
     // 10 das 11 hoje (subiu de 9/10 quando `agenda_stall` entrou na cadeia — ver
     // `before-send.ts`). A contagem entra na asserção de propósito: se alguém tornar
     // uma delas "configurável", este número muda e a mudança tem de ser deliberada.
@@ -155,6 +157,21 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
       expect(linha.textContent).toContain("não se desliga");
       // Proibição sem razão é o que faz alguém procurar como contornar.
       expect(linha.textContent?.length ?? 0).toBeGreaterThan(50);
+    }
+  });
+
+  it("(C01, -c01.3) as opcionais da configuração dizem que vêm desligadas, e não que não se desligam", () => {
+    renderPainel();
+
+    const opcionais = CONFERENCIAS_DE_SAIDA.filter((c) => c.opcionalNaConfiguracao === true);
+    expect(opcionais.length).toBeGreaterThan(0);
+    for (const c of opcionais) {
+      expect(c.escolha).toBeNull();
+      expect(c.camada).toBeNull();
+      const linha = screen.getByTestId(`conferencia-${c.nome}-opcional`);
+      expect(linha.textContent).toContain("Vem desligada");
+      expect(linha.textContent).not.toContain("não se desliga");
+      expect(screen.queryByTestId(`conferencia-${c.nome}-fixa`)).toBeNull();
     }
   });
 

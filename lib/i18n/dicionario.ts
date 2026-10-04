@@ -11281,6 +11281,18 @@ export const DICIONARIO: Traducoes = {
   "Esconder que é um assistente é enganar o cliente.": {
     es: "Ocultar que es un asistente es engañar al cliente.",
   },
+  "Vem desligada; liga-se na configuração da organização.": {
+    es: "Viene desactivada; se activa en la configuración de la organización.",
+  },
+  "Resposta que cabe nas mensagens desta vez": {
+    es: "Respuesta que cabe en los mensajes de esta vez",
+  },
+  "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, ela volta para ser reescrita mais curta, em vez de sair com a última mensagem enorme.": {
+    es: "Cuando la respuesta se convertiría en más mensajes de los que el asistente puede enviar de una vez, vuelve para reescribirse más corta, en lugar de salir con el último mensaje enorme.",
+  },
+  "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, ela sai dividida como sempre: nunca deixa o cliente sem resposta.": {
+    es: "Es un ajuste de estilo, y cada negocio decide si lo quiere. Si la respuesta vuelve dos veces, sale dividida como siempre: nunca deja al cliente sin respuesta.",
+  },
   "+1 consulta ao modelo por mensagem enviada": { es: "+1 consulta al modelo por mensaje enviado" },
   "+1 consulta ao modelo por mensagem recebida": { es: "+1 consulta al modelo por mensaje recibido" },
 

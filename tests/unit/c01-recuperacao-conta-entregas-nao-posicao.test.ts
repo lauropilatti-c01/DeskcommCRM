@@ -382,7 +382,8 @@ describe("(C01) a ligação no turno", () => {
     // chegou ao lead neste job" lê a contagem, como os outros dois. (-c01.3) O quarto é
     // o da última tentativa que falhou (o `catch` do turno), pela mesma régua.
     expect(FONTE.match(/seq === 0/g)).toHaveLength(4);
-    expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(3);
+    // (-c01.3) O quarto `maxSendsPerTurn - seq` é o que resta para a trava de texto longo.
+    expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(4);
     expect(FONTE).toMatch(
       /perguntaDoRoteiroPodeSair\(\{ turnoDescartado: turnoDescartado \|\| passadoAoHumano, seq, maxSendsPerTurn \}\)/,
     );

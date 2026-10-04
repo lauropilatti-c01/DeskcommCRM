@@ -54,6 +54,41 @@ export function splitIntoBubbles(text: string, maxChars: number): string[] {
 }
 
 /**
+ * (C01, -c01.3, item 2) Os trechos que o divisor NUNCA parte: link (com esquema ou
+ * `www.`), e-mail e domínio solto (`lp.c01.com.br/...`, em caixa baixa, com sufixo de
+ * uma lista curta). Antes, todo "." e todo "?" partiam sentença — inclusive os de dentro
+ * de um link: a página de matrícula saía como "https://lp. c01. com. br/vitalicio/?
+ * nivel=…" espalhada por bolhas (C10 e C41 da volta 19), e o `split_max_chars` do
+ * laboratório teve de subir para 2.000 para o link sair inteiro. A pontuação logo
+ * DEPOIS do trecho (o ponto final da frase) fica fora dele e continua partindo.
+ */
+const TRECHOS_INDIVISIVEIS = [
+  // Link com esquema ou www.
+  /\b(?:https?:\/\/|www\.)[^\s<>"]+/gi,
+  // E-mail.
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g,
+  // Domínio solto, em caixa baixa (não pega "com. Brasil" nem "Fica.Com"), com o caminho.
+  /\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|br|io|app|tv|me|info|biz|edu|gov|co|link|site|online|store|shop|dev|ai|ly)\b(?:\/[^\s<>"]*)?/g,
+];
+/** Pontuação que encerra a frase quando vem colada no fim de um link. */
+const PONTUACAO_FINAL_DO_TRECHO = /[.,;:!?)\]}'"»]+$/;
+
+/** Os intervalos [início, fim) do texto que o divisor não parte. */
+export function trechosIndivisiveis(text: string): Array<[number, number]> {
+  const intervalos: Array<[number, number]> = [];
+  for (const re of TRECHOS_INDIVISIVEIS) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const sobra = PONTUACAO_FINAL_DO_TRECHO.exec(m[0])?.[0].length ?? 0;
+      const fim = m.index + m[0].length - sobra;
+      if (fim > m.index) intervalos.push([m.index, fim]);
+    }
+  }
+  return intervalos;
+}
+
+/**
  * Divide em sentenças mantendo a pontuação final (. ! ?).
  *
  * O "." NÃO conta como fim de frase quando está entre dois dígitos — separador
@@ -69,8 +104,12 @@ function splitSentences(text: string): string[] {
   const out: string[] = [];
   let start = 0;
   const re = /[.!?]+/g;
+  // (C01, -c01.3) Pontuação dentro de link, e-mail ou domínio não encerra frase.
+  const protegidos = trechosIndivisiveis(text);
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
+    const pos = m.index;
+    if (protegidos.some(([ini, fim]) => pos >= ini && pos < fim)) continue;
     const end = m.index + m[0].length;
     const prevChar = text[m.index - 1];
     const nextChar = text[end];

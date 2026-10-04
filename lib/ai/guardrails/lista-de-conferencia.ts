@@ -48,8 +48,20 @@ export interface ConferenciaDeSaida {
    * Objeto = há escolha real, e ela custa dinheiro — o custo vai na tela.
    */
   escolha: { custo: string } | null;
-  /** Por que não se desliga. Vazio quando há escolha. */
+  /**
+   * Por que não se desliga. Vazio quando há escolha. Nas opcionais da configuração
+   * (`opcionalNaConfiguracao`), por que ela vem desligada.
+   */
   porQueNaoSeDesliga: string;
+  /**
+   * (C01, -c01.3) As travas novas não são fixas nem têm interruptor aqui: nascem
+   * desligadas e se ligam por organização, na configuração
+   * (`organizations.settings.travas_de_envio`, ver
+   * `lib/agent-engine/guardrails/travas-de-envio.ts`). A tela não pode dizer "isto
+   * não se desliga" de uma conferência que vem desligada: diz que ela é opcional e
+   * onde se liga. Só com `escolha: null` e `camada: null`.
+   */
+  opcionalNaConfiguracao?: true;
   /**
    * A chave da camada em `org_guardrail_layers`, quando há escolha.
    *
@@ -165,6 +177,19 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
       "É a mesma promessa vazia do 'vou pedir pro responsável', só que sobre agenda: o cliente " +
       "fica esperando uma confirmação que nunca foi checada. Regra fixa, sem custo.",
     camada: null,
+  },
+  {
+    nome: "texto_longo",
+    rotulo: "Resposta que cabe nas mensagens desta vez",
+    oQueProtege:
+      "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, " +
+      "ela volta para ser reescrita mais curta, em vez de sair com a última mensagem enorme.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, " +
+      "ela sai dividida como sempre: nunca deixa o cliente sem resposta.",
+    camada: null,
+    opcionalNaConfiguracao: true,
   },
   {
     nome: "disclosure",
