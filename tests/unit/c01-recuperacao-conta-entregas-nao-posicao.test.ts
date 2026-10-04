@@ -382,12 +382,17 @@ describe("(C01) a ligação no turno", () => {
     // neste job"), e o da última tentativa (-c01.3) também. (-c01.3, rodada 2) Os dois
     // passaram a ler `leadTemResposta`: `seq` conta no teto também o envio 'failed' ou
     // 'unavailable', que não é resposta (ver
-    // `tests/invariants/c01-envio-falhado-nao-e-resposta.test.ts`). Ficam os dois do autor.
-    expect(FONTE.match(/seq === 0/g)).toHaveLength(2);
-    expect(FONTE.match(/!leadTemResposta &&/g)).toHaveLength(2);
+    // `tests/invariants/c01-envio-falhado-nao-e-resposta.test.ts`). (-c01.3, rodada 3) E
+    // os dois do autor também: a resposta obsoleta e o aviso da passagem pedida pelo
+    // modelo liam `seq === 0` como "o lead ainda não tem resposta", e depois de um envio
+    // que não chegou deixavam sair a resposta desatualizada ou pulavam o aviso (ver
+    // `tests/invariants/c01-handoff-depois-de-envio-falhado.test.ts`).
+    expect(FONTE).not.toMatch(/seq === 0/);
+    expect(FONTE.match(/!leadTemResposta &&/g)).toHaveLength(3);
+    expect(FONTE.match(/!leadTemResposta \|\| respostaAoLead === null/g)).toHaveLength(1);
     expect(FONTE).toMatch(/let seq = estadoInicial\.enviadas;\n(?: {2}\/\/.*\n)*\s*let leadTemResposta = estadoInicial\.enviadas > 0;/);
     expect(FONTE).toMatch(
-      /if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}\s*if \(resultado\.kind !== 'failed' && resultado\.kind !== 'unavailable'\) leadTemResposta = true;/,
+      /if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}\s*registrarRespostaAoLead\(resultado\.kind\);/,
     );
     expect(FONTE.match(/leadTemResposta = true/g)).toHaveLength(1);
     // (-c01.3) O quarto `maxSendsPerTurn - seq` é o que resta para a trava de texto longo.

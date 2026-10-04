@@ -681,6 +681,33 @@ export function avisoAoLeadPelaFraseDeEspera(espera: BeforeSendResult): Desfecho
   }
 }
 
+/**
+ * (C01, -c01.3, rodada 3) O que o lead tem deste job, pelo desfecho do canal: `aceita`
+ * (`sent`, `already_sent`), `na_fila` (`queued`: o CRM segura, a sessão está fora) ou
+ * `bloqueada` (`blocked`: opt-out). `failed` e `unavailable` não são resposta.
+ */
+export type RespostaAoLead = 'aceita' | 'na_fila' | 'bloqueada';
+
+/**
+ * (C01, -c01.3, rodada 3) O desfecho que a passagem pedida pelo modelo
+ * (`request_human_handoff`) grava quando NÃO manda aviso próprio porque o lead já tem
+ * resposta deste job. Era sempre `{ avisado: true }`; agora é o desfecho real, no
+ * vocabulário de `avisoAoLeadPelaFraseDeEspera`: a resposta aceita pelo canal é o lead
+ * avisado (a fala do modelo, como antes); a resposta só na fila do CRM é
+ * `na_fila_canal_fora` — o lead ainda não recebeu nada, e quem assume precisa saber
+ * disso; o opt-out fica sem par, como lá.
+ */
+export function avisoPelaRespostaDoTurno(resposta: RespostaAoLead): DesfechoDoAviso {
+  switch (resposta) {
+    case 'aceita':
+      return { avisado: true };
+    case 'na_fila':
+      return { avisado: false, porque: 'na_fila_canal_fora', motivoCodigo: 'na_fila_canal_fora' };
+    case 'bloqueada':
+      return { avisado: false, porque: 'contato_bloqueado' };
+  }
+}
+
 /** O que `gravarPassagemComNovaTentativa` conseguiu. */
 export type DesfechoDaGravacaoDaPassagem = 'gravada' | 'gravada_na_segunda' | 'falhou';
 
@@ -3092,6 +3119,23 @@ async function executarTurnoDoAgente(
   // `already_sent`). `blocked` também conta, como contava em `seq`: é o opt-out
   // irrevogável, e a frase de espera não vai a quem pediu para parar.
   let leadTemResposta = estadoInicial.enviadas > 0;
+  // (C01, -c01.3, rodada 3) A mesma evidência com o desfecho (`RespostaAoLead`): não
+  // nula exatamente quando `leadTemResposta` é verdadeira — as duas mudam juntas, em
+  // `registrarRespostaAoLead`. É o que a passagem pedida pelo modelo grava como aviso
+  // quando não manda o próprio (`avisoPelaRespostaDoTurno`).
+  let respostaAoLead: RespostaAoLead | null =
+    estadoInicial.enviadas > estadoInicial.pendentes.length
+      ? 'aceita'
+      : estadoInicial.pendentes.length > 0
+        ? 'na_fila'
+        : null;
+  const registrarRespostaAoLead = (kind: ChannelSendResult['kind']): void => {
+    if (kind === 'failed' || kind === 'unavailable') return;
+    leadTemResposta = true;
+    if (kind === 'sent' || kind === 'already_sent') respostaAoLead = 'aceita';
+    else if (kind === 'queued') respostaAoLead = respostaAoLead === 'aceita' ? 'aceita' : 'na_fila';
+    else respostaAoLead ??= 'bloqueada';
+  };
   // (C01, rodada 7) As posições que a execução anterior deixou com recibo 'failed',
   // por ordem. Cada envio FÍSICO desta execução recebe a primeira delas como dica de
   // posição, em vez de `posicao + 1`, e o ledger a rotaciona como sempre rotacionou
@@ -3171,10 +3215,29 @@ async function executarTurnoDoAgente(
       }
       if (contaNoTeto(resultado)) seq += 1;
     }
-    if (resultado.kind !== 'failed' && resultado.kind !== 'unavailable') leadTemResposta = true;
+    registrarRespostaAoLead(resultado.kind);
     // (C01, rodada 6) A pendência da recuperação que esta chave retomou sai da lista.
     if (resultado.kind !== 'unavailable') porRetomar.delete(resultado.idempotencyKey);
     return resultado;
+  };
+  /**
+   * (C01, -c01.3, rodada 3) O canal do aviso da passagem pedida pelo modelo: o aviso sai
+   * pelo canal direto, na posição própria (`SEQ_DO_AVISO`), fora de `enviarPeloCanal` —
+   * e o desfecho dele também é evidência de resposta ao lead.
+   */
+  const canalQueRegistraAResposta = (): ChannelAdapter => {
+    const canal = liveChannel();
+    return {
+      channel: canal.channel,
+      send: async (envio) => {
+        const resultado = await canal.send(envio);
+        registrarRespostaAoLead(resultado.kind);
+        return resultado;
+      },
+      sessionHealth: (id) => canal.sessionHealth(id),
+      capabilities: () => canal.capabilities(),
+      costPerMessage: () => canal.costPerMessage(),
+    };
   };
   /** (C01) O veto que a passagem ao humano devolve às ferramentas de envio (ensino da trava). */
   const vetoPorPassagemAoHumano = (trace: BeforeSendResult['trace'] = []): BeforeSendResult => ({
@@ -3899,9 +3962,14 @@ async function executarTurnoDoAgente(
         // Só antes do PRIMEIRO envio — cortar a meio uma resposta já começada é pior
         // que a duplicata. A mensagem nova tem job próprio, que lê a conversa inteira
         // e responde a tudo de uma vez. Ver `respostaFicouObsoleta`.
+        // (C01, -c01.3, rodada 3) "Antes do primeiro envio" é antes da primeira resposta
+        // que CHEGOU ao lead (`leadTemResposta`), não `seq` zerado: `seq` conta também o
+        // envio que o canal devolveu `failed` ou `unavailable`, e depois dele nenhuma
+        // resposta começou — a seguinte saía desatualizada. O mesmo erro do aviso da
+        // passagem (achado 1 da 2ª revisão adversarial da -c01.3).
         if (
           !preview &&
-          seq === 0 &&
+          !leadTemResposta &&
           (await respostaFicouObsoleta(
             pool,
             { organizationId: tenantId, conversationId: input.conversationId, jobId: liveJob().id },
@@ -4697,23 +4765,32 @@ async function executarTurnoDoAgente(
           // conclusão que fez `expectativaDeAtendimento` parar de esperar que
           // ele consultasse a disponibilidade sozinho.
           //
-          // `seq` é o contador de mensagens FÍSICAS já enviadas neste turno. Zero
-          // significa: o modelo decidiu passar a conversa sem dizer nada a
-          // ninguém — e depois desta tool ele não consegue mais falar, porque
-          // `force_human` arma o `stopGate`. Então o aviso determinístico sai
-          // AGORA, antes do handoff.
+          // Sem resposta ao lead neste job significa: o modelo decidiu passar a
+          // conversa sem dizer nada a ninguém — e depois desta tool ele não consegue
+          // mais falar, porque `force_human` arma o `stopGate`. Então o aviso
+          // determinístico sai AGORA, antes do handoff.
           //
-          // `seq > 0` significa que ele JÁ falou neste turno; mandar o aviso ali
-          // em cima seria o robô dizendo duas vezes a mesma coisa, com palavras
-          // diferentes. Confiamos na fala dele e registramos que o piso não foi
-          // preciso.
+          // Com resposta, ele JÁ falou; mandar o aviso ali em cima seria o robô
+          // dizendo duas vezes a mesma coisa, com palavras diferentes. Confiamos na
+          // fala dele e registramos o desfecho dela.
+          //
+          // (C01, -c01.3, rodada 3) "Já falou" é `leadTemResposta` (com o desfecho em
+          // `respostaAoLead`), não `seq`: `seq` é o contador do TETO e conta também o
+          // envio que o canal devolveu `failed` ou `unavailable`. Depois de um envio que
+          // não chegou, a passagem pulava o aviso e gravava `avisado: true` — o lead
+          // mudo e a equipe lendo que ele "JÁ foi avisado" (achado 1 da 2ª revisão
+          // adversarial da -c01.3). E o desfecho gravado é o real: a resposta só na fila
+          // do CRM não é lead avisado (`avisoPelaRespostaDoTurno`). O aviso que sai
+          // passa pelo canal que registra a evidência: aceito, o lead tem resposta, e o
+          // fail-safe da última tentativa não manda a frase de espera em dobro.
           const aviso =
-            seq === 0
+            !leadTemResposta || respostaAoLead === null
               ? await avisarLeadDaEscalacao(pool, avisoDaEscalacao().ids, {
                   ...avisoDaEscalacao().base,
+                  channel: canalQueRegistraAResposta(),
                   motivo: 'pediu_humano',
                 })
-              : ({ avisado: true } as const);
+              : avisoPelaRespostaDoTurno(respostaAoLead);
           // O contexto do TURNO vai junto, e sai da closure: `previous` é o
           // checkpoint durável e `inboundsPendentes` é o que o cliente disse e
           // ainda não foi respondido — os dois já estão em memória, então o
