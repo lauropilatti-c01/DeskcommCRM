@@ -12,12 +12,14 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type * as Cliente from "@/lib/ai/decisao/cliente";
+
 afterEach(() => {
   vi.doUnmock("@/lib/env");
   vi.resetModules();
 });
 
-async function clienteCom(jevModel: string | undefined): Promise<typeof import("@/lib/ai/decisao/cliente")> {
+async function clienteCom(jevModel: string | undefined): Promise<typeof Cliente> {
   vi.resetModules();
   vi.doMock("@/lib/env", () => ({ env: { JEV_API_BASE_URL: "", JEV_MODEL: jevModel } }));
   return import("@/lib/ai/decisao/cliente");
