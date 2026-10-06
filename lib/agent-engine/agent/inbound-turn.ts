@@ -116,7 +116,12 @@ import {
 } from "./abertura/checkpoint";
 import { buildOpeningMessage, ritualBlocks } from "./abertura/ritual";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
-import { rodarGanchoAntesDoTurno, trocarResumoNoContexto, type GanchoAntesDoTurnoConfig } from './gancho-antes-do-turno';
+import {
+  eReconsultaDoGancho,
+  rodarGanchoAntesDoTurno,
+  trocarResumoNoContexto,
+  type GanchoAntesDoTurnoConfig,
+} from './gancho-antes-do-turno';
 import { camposCompactosDoCard } from '../edge/crm/card-do-contato';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { applyScheduleFollowup, type FollowupWindowKnobs } from './schedule-followup';
@@ -3349,6 +3354,13 @@ async function executarTurnoDoAgente(
       trocarResumoNoContexto(openingContext.context.messages, { sentAt: resumo.sentAt, resumo: resumo.texto }, fusoDaOrg);
       if (resumo.mensagemId === input.inboundMessageId) currentInboundText = resumo.texto;
     }
+  }
+  // (C01, -c01.6) A reconsulta pedida pelo gancho não tem mensagem nova do cliente: o
+  // modelo nunca responde nela (nem com o gancho em falha, nem num turno em que o
+  // gancho não roda): responderia de novo ao que já foi respondido.
+  if (eReconsultaDoGancho(liveJob().payload)) {
+    runLog.info('reconsulta do gancho encerrada sem o modelo', { kind: liveJob().kind });
+    return;
   }
 
   // ROTEIRO DE ATENDIMENTO (módulo opcional `fluxos_atendimento`, #1130). Entra
@@ -6694,7 +6706,19 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
       conversationId: payload.conversation_id,
       jobId: job.id,
     };
-    if (await ultimaInboundJaRespondida(pool, alvo)) {
+    // (C01, -c01.6) A reconsulta que o gancho antes do turno pediu
+    // (`reconsultar_em_s`) roda sobre uma mensagem já respondida (pelo próprio
+    // gancho): não passa por esta checagem. Sem o gancho ligado, ela não roda (o
+    // modelo responderia de novo ao já respondido).
+    const reconsulta = eReconsultaDoGancho(job.payload);
+    if (reconsulta && deps.knobs.ganchoAntesDoTurno === undefined) {
+      deps.log.info('turno pulado — reconsulta do gancho com o gancho desligado', {
+        job_id: job.id,
+        conversation_id: payload.conversation_id,
+      });
+      return;
+    }
+    if (!reconsulta && (await ultimaInboundJaRespondida(pool, alvo))) {
       deps.log.info('turno pulado — outro turno já viu e respondeu a última mensagem do cliente', {
         job_id: job.id,
         conversation_id: payload.conversation_id,
