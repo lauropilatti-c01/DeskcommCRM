@@ -101,7 +101,10 @@ import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 import { chaveEDadoPessoal, lerCardDoContato, type CardDoContato } from '../edge/crm/card-do-contato';
 import { MARCA_DE_PROCESSADO, type LeadContextMessage } from '../edge/crm/get-lead-context';
 import { conteudoRegistradoNoJob } from '../edge/crm/send-ledger';
+import { scheduleCronJob } from '../cron/scheduler';
 import { runBeforeSend } from '../guardrails/before-send';
+import type { DesfechoDoAviso } from './aviso-de-escalacao';
+import { performHumanHandoff } from './human-handoff';
 import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
 import type { Logger } from '../obs/logger';
 import { claimOfJob } from '../queue/claim';
@@ -180,6 +183,11 @@ export interface PedidoDoGancho {
   lead: { id: string | null; etapa: string | null; campos: Record<string, unknown>; etiquetas: string[] };
   mensagens: MensagemDoPedido[];
   formulario?: FormularioDoPedido;
+  /**
+   * (C01, -c01.6) `true` só no turno que o próprio gancho pediu (`reconsultar_em_s`):
+   * não há mensagem nova do cliente. Ausente nos outros.
+   */
+  reconsulta?: true;
 }
 
 /** Quantas mensagens vão no pedido. */
@@ -277,6 +285,8 @@ export async function montarPedidoDoGancho(
     inboundMessageId: string | null;
     /** As etiquetas do CONTATO lidas no contexto do turno: o serviço vê as duas listas juntas. */
     etiquetasDoContato: readonly string[];
+    /** (C01, -c01.6) O turno é a reconsulta pedida pelo gancho. */
+    reconsulta?: boolean;
   },
 ): Promise<{ pedido: PedidoDoGancho; card: CardDoContato | null; formulario: FormularioDoTurno | null; canalEnviaInterativo: boolean }> {
   const { rows: conversas } = await db.query<{
@@ -315,7 +325,9 @@ export async function montarPedidoDoGancho(
       limit $3`,
     [alvo.organizationId, alvo.conversationId, MENSAGENS_NO_PEDIDO],
   );
-  const formulario = await formularioDoTurno(db, alvo);
+  // (C01, -c01.6) A reconsulta não atende formulário: a resposta que chegar enquanto
+  // ela espera é do turno da própria mensagem (marcá-la aqui a tiraria dele).
+  const formulario = alvo.reconsulta === true ? null : await formularioDoTurno(db, alvo);
 
   const pedido: PedidoDoGancho = {
     versao: 1,
@@ -345,6 +357,7 @@ export async function montarPedidoDoGancho(
       ...(m.erro ? { erro: m.erro.slice(0, 40) } : {}),
     })),
     ...(formulario !== null ? { formulario: formulario.pedido } : {}),
+    ...(alvo.reconsulta === true ? { reconsulta: true as const } : {}),
   };
   return { pedido, card, formulario, canalEnviaInterativo: canalEnviaInterativo(conversa?.provider) };
 }
@@ -371,6 +384,18 @@ const TETO_DA_RESPOSTA = 64_000;
 export const TETO_DO_RESUMO = 4096;
 /** Teto do `motivo` (vai ao log): o que passa é cortado. */
 export const TETO_DO_MOTIVO = 200;
+/** (C01, -c01.6) Limites de `reconsultar_em_s`, em segundos. */
+export const RECONSULTA_MINIMA_S = 30;
+export const RECONSULTA_MAXIMA_S = 900;
+
+/**
+ * (C01, -c01.6) Marca no payload do job da reconsulta. O job é um `inbound_turn`
+ * agendado pelo cron de uma vez (`cron_jobs`, kind `at`) com os mesmos ponteiros do
+ * turno que pediu, mais esta marca e `reconsulta_de` (o job que pediu: é por ele que
+ * a re-execução não agenda duas vezes).
+ */
+export const MARCA_DA_RECONSULTA = 'gancho_reconsulta';
+export const eReconsultaDoGancho = (payload: unknown): boolean => objeto(payload)?.[MARCA_DA_RECONSULTA] === true;
 
 /** `resumo` vazio ou só espaço vale ausente; longo demais, cortado. */
 const resumoTolerante = z
@@ -398,6 +423,10 @@ export const respostaDoGanchoSchema = z
       .string()
       .nullish()
       .transform((v) => (typeof v === 'string' ? v.slice(0, TETO_DO_MOTIVO) : v)),
+    /** (C01, -c01.6) Rodar um turno marcado `reconsulta` daqui a N segundos. */
+    reconsultar_em_s: z.number().int().min(RECONSULTA_MINIMA_S).max(RECONSULTA_MAXIMA_S).nullish(),
+    /** (C01, -c01.6) Só com `segurar`: depois dos envios, passa a conversa à equipe. */
+    passar_a_equipe: z.boolean().nullish(),
   })
   .refine((r) => r.acao !== 'segurar' || Array.isArray(r.enviar), {
     message: 'segurar sem a lista enviar (para não enviar nada, enviar: [])',
@@ -406,6 +435,10 @@ export const respostaDoGanchoSchema = z
   .refine((r) => JSON.stringify(r.gravar?.campos ?? {}).length <= TETO_DOS_CAMPOS_GRAVADOS, {
     message: 'gravar.campos grande demais',
     path: ['gravar', 'campos'],
+  })
+  .refine((r) => r.passar_a_equipe !== true || r.acao === 'segurar', {
+    message: 'passar_a_equipe só com segurar',
+    path: ['passar_a_equipe'],
   });
 
 export type RespostaDoGancho = z.infer<typeof respostaDoGanchoSchema>;
@@ -652,6 +685,7 @@ export type DesfechoDoGancho =
 export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<DesfechoDoGancho> {
   const { pool, log, job } = ctx;
   const alvo = { organizationId: ctx.tenantId, conversationId: ctx.conversationId };
+  const reconsulta = eReconsultaDoGancho(job.payload);
 
   // 1. A anotação de uma execução anterior deste job. Mensagem nova do cliente depois
   //    dela (a rajada cresceu) a invalida, seja a decisão, seja o "segue para o modelo".
@@ -692,6 +726,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
         agentId: ctx.agentId,
         inboundMessageId: ctx.inboundMessageId,
         etiquetasDoContato: ctx.etiquetasDoContato,
+        reconsulta,
       });
     } catch (err) {
       if (eDeFronteira(err)) throw err;
@@ -742,6 +777,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     const gravou = await aplicarGravar(ctx, card, resposta.gravar);
     const relido = gravou ? await lerCardComCuidado(ctx) : null;
     const campos = relido !== null ? { camposDoCard: relido.campos } : {};
+    await agendarReconsulta(ctx, resposta.reconsultar_em_s);
     const f = decisao.formulario;
     if (f !== null) {
       const resumo = resposta.resumo ?? null;
@@ -807,13 +843,24 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
   await aplicarGravar(ctx, card, resposta.gravar);
   if (decisao.formulario !== null) {
     try {
-      await marcarFormularioProcessado(pool, { ...alvo, mensagemId: decisao.formulario.mensagem_id }, null);
+      // (C01, -c01.6) O resumo vale também no `segurar`: o modelo do turno seguinte
+      // lê o resumo, não o texto neutro do formulário.
+      await marcarFormularioProcessado(
+        pool,
+        { ...alvo, mensagemId: decisao.formulario.mensagem_id },
+        resposta.resumo ?? null,
+      );
     } catch (err) {
       if (eDeFronteira(err)) throw err;
       log.warn('gancho antes do turno: formulário não marcado como processado', {
         erro: err instanceof Error ? err.name : 'desconhecido',
       });
     }
+  }
+  if (resposta.passar_a_equipe === true) {
+    await passarAEquipe(ctx, resposta, enviadas);
+  } else {
+    await agendarReconsulta(ctx, resposta.reconsultar_em_s);
   }
   log.info(
     itens.length === 0
@@ -822,6 +869,101 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     { enviadas },
   );
   return { fim: true };
+}
+
+/**
+ * (C01, -c01.6) `reconsultar_em_s`: um `inbound_turn` marcado (`MARCA_DA_RECONSULTA`)
+ * pelo cron de uma vez, sem espalhamento (o cron confere a cada ~30 s: chega entre N
+ * e N+30 s). Idempotente por `reconsulta_de`: a re-execução deste job não agenda de
+ * novo. Passagem à equipe e opt-out cancelam o agendado (`cancelPendingCronsForLead`).
+ * Falhar aqui não desfaz o que saiu: fica no log.
+ */
+async function agendarReconsulta(ctx: ContextoDoGancho, segundos: number | null | undefined): Promise<void> {
+  if (segundos === null || segundos === undefined) return;
+  const p = ctx.job.payload ?? {};
+  try {
+    const { rowCount } = await ctx.pool.query(
+      `select 1 from cron_jobs
+        where organization_id = $1 and contact_id = $2 and payload->>'reconsulta_de' = $3`,
+      [ctx.tenantId, ctx.contactId, ctx.job.id],
+    );
+    if (rowCount !== null && rowCount > 0) return;
+    const agora = ctx.now().getTime();
+    await scheduleCronJob(ctx.pool, ctx.tenantId, {
+      leadId: ctx.contactId,
+      spec: { kind: 'at', at: new Date(agora + segundos * 1000) },
+      jobKind: 'inbound_turn',
+      payload: {
+        conversation_id: p.conversation_id ?? ctx.conversationId,
+        contact_id: p.contact_id ?? ctx.contactId,
+        channel_session_id: p.channel_session_id ?? ctx.channelSessionId,
+        inbound_message_id: p.inbound_message_id ?? ctx.inboundMessageId,
+        crm_event_id: p.crm_event_id,
+        [MARCA_DA_RECONSULTA]: true,
+        reconsulta_de: ctx.job.id,
+      },
+      maxAttempts: 3,
+      staggerWindowMs: 0,
+      now: () => agora,
+    });
+    ctx.log.info('gancho antes do turno: reconsulta agendada', { segundos });
+  } catch (err) {
+    if (eDeFronteira(err)) throw err;
+    ctx.log.warn('gancho antes do turno: reconsulta não agendada', {
+      erro: err instanceof Error ? err.name : 'desconhecido',
+    });
+  }
+}
+
+/**
+ * (C01, -c01.6) `passar_a_equipe`: a mesma passagem da palavra "atendente"
+ * (`performHumanHandoff`: a IA fica calada, os agendados caem e abre um aviso na
+ * Central), sem a linha de passagem (como o fail-safe). O aviso ao cliente é o que o
+ * gancho já enviou. Idempotente: a re-execução não passa duas vezes.
+ */
+/**
+ * (C01, -c01.6) O motivo e o título da passagem pedida pelo gancho. Frase legível, não
+ * código (a mesma régua de `MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO`): sem linha de
+ * `passagens_de_atendimento`, o motivo é o que a Central mostra (`Motivo: …`) e o que fica
+ * em `conversations.last_handoff_reason`. O `motivo` da resposta do gancho é código do
+ * serviço de fora e vai só para o log.
+ */
+export const MOTIVO_DA_PASSAGEM_PELO_GANCHO =
+  'O atendimento de entrada passou a conversa para uma pessoa antes de a IA responder';
+export const TITULO_DA_PASSAGEM_PELO_GANCHO = 'Passado à equipe na entrada — assumir a conversa';
+
+async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho, enviadas: number): Promise<void> {
+  const motivo = (resposta.motivo ?? '').trim().slice(0, 60);
+  // O aviso ao cliente é o que o próprio serviço de entrada mandou neste turno: a Central
+  // diz à pessoa que assume se o cliente já sabe que alguém vai falar com ele.
+  const avisoAoLead: DesfechoDoAviso =
+    enviadas > 0 ? { avisado: true } : { avisado: false, porque: 'gancho_sem_envio' };
+  try {
+    await performHumanHandoff(
+      ctx.pool,
+      { tenantId: ctx.tenantId, leadId: ctx.contactId, conversationId: ctx.conversationId },
+      {
+        reason: MOTIVO_DA_PASSAGEM_PELO_GANCHO,
+        conversationSummary: resposta.resumo ?? MOTIVO_DA_PASSAGEM_PELO_GANCHO,
+        inboxTitle: TITULO_DA_PASSAGEM_PELO_GANCHO,
+        avisoAoLead,
+        log: ctx.log,
+      },
+    );
+    ctx.log.info('gancho antes do turno: conversa passada à equipe', { motivo });
+  } catch (err) {
+    // A pessoa já leu que vai falar com alguém: engolir o erro deixaria a IA ligada e a
+    // Central sem aviso. Sobe, como na passagem por pedido explícito (`inbound-turn.ts`),
+    // e o job tenta de novo: a re-execução repete a decisão anotada, os envios voltam
+    // `already_sent` pelo ledger do job e `performHumanHandoff` é idempotente.
+    if (!eDeFronteira(err)) {
+      ctx.log.error('gancho antes do turno: passagem à equipe falhou — o job tenta de novo', {
+        erro: err instanceof Error ? err.name : 'desconhecido',
+        motivo,
+      });
+    }
+    throw err;
+  }
 }
 
 async function anotarComCuidado(ctx: ContextoDoGancho, d: DecisaoAnotada): Promise<void> {

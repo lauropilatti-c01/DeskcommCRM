@@ -314,12 +314,14 @@ describe("(C01) a ligação no turno, pelo código", () => {
     // As marcas: o agente fala logo depois da guarda do modo; os desvios conferidos logo
     // depois do último desvio determinístico; o corpo na primeira linha do `try`.
     expect(TURNO).toMatch(
-      /agentConfig\.operationMode === 'assisted'\)\)\n {4}return;\n(?: {2}\/\/.*\n)* {2}marca\.agenteFala = true;/,
+      /agentConfig\.operationMode === 'assisted'\)\)\n {4}return;\n(?: {2}\/\/.*\n)* {2}marca\.agenteFala = preview !== undefined \|\| !eReconsultaDoGancho\(liveJob\(\)\.payload\);/,
     );
     expect(TURNO).toMatch(
       /return; \/\/ bot silencia: a confirmação já saiu, e nada mais sai neste turno\n {2}\}\n(?: {2}\/\/.*\n)* {2}marca\.desviosConferidos = true;/,
     );
-    expect(TURNO.match(/marca\.(?:agenteFala|desviosConferidos|corpoComecou) = true;/g)).toHaveLength(3);
+    // (C01, -c01.6) O agente fala, menos na reconsulta do gancho antes do turno.
+    expect(TURNO.match(/marca\.(?:desviosConferidos|corpoComecou) = true;/g)).toHaveLength(2);
+    expect(TURNO.match(/marca\.agenteFala = /g)).toHaveLength(1);
     // Reconcilia com o ledger e com a passagem antes do caso; o caso antes da frase, a
     // frase antes da passagem.
     const escolta = TURNO.slice(TURNO.indexOf("async function passarAoHumanoPelaFalhaNaPreparacao("));

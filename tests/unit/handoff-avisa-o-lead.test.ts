@@ -75,6 +75,8 @@ const FONTES = [
   "lib/agent-engine/agent/human-handoff.ts",
   "lib/ai/handoff/orchestrator.ts",
   "app/api/v1/ai/cases/[id]/reply/route.ts",
+  // (C01) O gancho antes do turno passa à equipe depois de o serviço de entrada falar.
+  "lib/agent-engine/agent/gancho-antes-do-turno.ts",
 ] as const;
 
 /**
