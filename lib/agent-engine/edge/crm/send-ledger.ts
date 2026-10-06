@@ -28,6 +28,11 @@ type Intent = {
   template?: object;
   media?: object;
   /**
+   * (C01, -c01.5) Presente = mensagem interativa. Entra no hash como a foto e o
+   * template: dois formulários diferentes com o mesmo texto são duas mensagens.
+   */
+  interactive?: object;
+  /**
    * (C01) A identidade do TEXTO, quando difere do corpo entregue: o corpo antes das
    * emendas da cadeia de envio (o texto do modelo). Entra no hash em lugar de `body`.
    * A apresentação automática (`disclosureGate`, modo `inject`) emenda a 1ª mensagem ao
@@ -115,9 +120,12 @@ function canonico(valor: unknown): string {
  * legenda X colidia com o texto X (achado 1 da revisão adversarial, 03/10/2026).
  */
 export function hashDoConteudo(
-  input: Pick<Intent, "body" | "template" | "media" | "identidade">,
+  input: Pick<Intent, "body" | "template" | "media" | "identidade" | "interactive">,
 ): string {
   const h = createHash("sha256");
+  if (input.interactive !== undefined) {
+    h.update("interactive\u0000").update(canonico(input.interactive)).update("\u0000");
+  }
   if (input.template !== undefined) h.update("template\u0000").update(canonico(input.template)).update("\u0000");
   if (input.media !== undefined) h.update("media\u0000").update(canonico(input.media)).update("\u0000");
   // (C01) O texto que identifica o envio é o de antes das emendas da cadeia, quando
