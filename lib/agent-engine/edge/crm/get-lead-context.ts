@@ -218,15 +218,24 @@ interface HistoryRow {
   sent_at: Date;
   e_formulario?: boolean | null;
   formulario_resposta?: unknown;
+  formulario_processado?: boolean | null;
 }
 
 /**
- * (C01, -c01.5) As duas colunas da resposta de formulário (`metadata.interactive`,
- * `nfm_reply`) que o corpo da mensagem lê: é formulário? e o `response_json` lido.
+ * (C01, -c01.5) `metadata.gancho_processado`: a decisão do gancho antes do turno sobre
+ * esta resposta de formulário já foi aplicada (`gancho-antes-do-turno.ts`).
+ */
+export const MARCA_DE_PROCESSADO = 'gancho_processado';
+
+/**
+ * (C01, -c01.5) As colunas da resposta de formulário (`metadata.interactive`,
+ * `nfm_reply`) que o corpo da mensagem lê: é formulário? o `response_json` lido, e se
+ * o gancho já a processou (`MARCA_DE_PROCESSADO`).
  */
 export const COLUNAS_DO_FORMULARIO = `(metadata->'interactive'->>'type') = 'nfm_reply' as e_formulario,
                   case when metadata->'interactive'->>'type' = 'nfm_reply'
-                       then metadata->'interactive'->'response' end as formulario_resposta`;
+                       then metadata->'interactive'->'response' end as formulario_resposta,
+                  coalesce(metadata->>'${MARCA_DE_PROCESSADO}', '') = 'true' as formulario_processado`;
 
 export async function getLeadContext(
   db: Queryable,
@@ -409,6 +418,7 @@ export interface CorpoDaMensagemRow {
   /** (C01, -c01.5) `COLUNAS_DO_FORMULARIO`; ausentes em quem não as lê. */
   e_formulario?: boolean | null;
   formulario_resposta?: unknown;
+  formulario_processado?: boolean | null;
 }
 
 /**
@@ -431,9 +441,15 @@ export interface CorpoDaMensagemRow {
  * `messages` para o prompt passa por aqui, senão a composição volta a divergir.
  */
 export function corpoDaMensagem(m: CorpoDaMensagemRow): string {
-  // (C01, -c01.5) Resposta de formulário ainda com o texto neutro (sem o resumo do
-  // gancho): o modelo lê as respostas montadas do `response_json`.
-  if (m.e_formulario === true && m.body === TEXTO_DA_RESPOSTA_DE_FORMULARIO) {
+  // (C01, -c01.5) Resposta de formulário ainda com o texto neutro e sem decisão do
+  // gancho: o modelo lê as respostas montadas do `response_json`. Processada, vale o
+  // corpo gravado (o resumo, ou o texto neutro que o gancho deixou de propósito, como
+  // no formulário inválido).
+  if (
+    m.e_formulario === true &&
+    m.formulario_processado !== true &&
+    m.body === TEXTO_DA_RESPOSTA_DE_FORMULARIO
+  ) {
     return textoDaRespostaDeFormulario(m.formulario_resposta);
   }
   const hasMedia = Boolean(m.media_storage_path || m.media_url);

@@ -99,7 +99,7 @@ import { isoLocalComOffset } from '@/lib/tempo/agora';
 
 import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 import { chaveEDadoPessoal, lerCardDoContato, type CardDoContato } from '../edge/crm/card-do-contato';
-import type { LeadContextMessage } from '../edge/crm/get-lead-context';
+import { MARCA_DE_PROCESSADO, type LeadContextMessage } from '../edge/crm/get-lead-context';
 import { conteudoRegistradoNoJob } from '../edge/crm/send-ledger';
 import { runBeforeSend } from '../guardrails/before-send';
 import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
@@ -209,8 +209,11 @@ interface LinhaDoFormulario {
   processado: boolean | null;
 }
 
-/** `metadata.gancho_processado`: a decisão do gancho sobre esta resposta já foi aplicada. */
-export const MARCA_DE_PROCESSADO = 'gancho_processado';
+/**
+ * `metadata.gancho_processado`: a decisão do gancho sobre esta resposta já foi aplicada.
+ * Definida com as colunas do formulário (`get-lead-context.ts`), que também a leem.
+ */
+export { MARCA_DE_PROCESSADO };
 
 export interface FormularioDoTurno {
   pedido: FormularioDoPedido;

@@ -18,6 +18,8 @@
  * entrar nela obrigaria a reescrever três testes do autor que conferem a
  * matriz inteira. As regras são as mesmas: provider desconhecido responde "não".
  */
+import { chaveEDadoPessoal } from "@/lib/agent-engine/edge/crm/card-do-contato";
+
 import { CHANNEL_PROVIDER_META } from "./capabilities";
 
 /**
@@ -38,8 +40,9 @@ const TETO_DO_VALOR_NO_TEXTO = 200;
  * O que o MODELO lê de uma resposta de formulário que ainda não tem resumo (o gancho
  * antes do turno falhou ou está desligado): o texto neutro e, abaixo dele, uma
  * resposta por linha (`chave: valor`), montadas do `response_json`, sem o
- * `flow_token`. Determinístico: a mesma resposta dá o mesmo texto. Sem resposta
- * legível, só o texto neutro.
+ * `flow_token` e sem a chave com nome de dado pessoal (`chaveEDadoPessoal`, o mesmo
+ * filtro do card e do pedido ao gancho). Determinístico: a mesma resposta dá o mesmo
+ * texto. Sem resposta legível, só o texto neutro.
  *
  * A linha da conversa continua com o texto neutro: quem lê isto é o contexto do
  * turno (`corpoDaMensagem`), e as checagens da entrada não o veem.
@@ -51,7 +54,7 @@ export function textoDaRespostaDeFormulario(resposta: unknown): string {
   const linhas: string[] = [];
   for (const [chave, valor] of Object.entries(resposta as Record<string, unknown>)) {
     if (linhas.length >= TETO_DE_RESPOSTAS_NO_TEXTO) break;
-    if (chave === "flow_token") continue;
+    if (chave === "flow_token" || chaveEDadoPessoal(chave)) continue;
     const texto = valorLegivel(valor);
     if (texto !== null) linhas.push(`${chave}: ${texto.slice(0, TETO_DO_VALOR_NO_TEXTO)}`);
   }

@@ -9,6 +9,7 @@ import type * as Providers from "@/lib/agent-engine/edge/llm/providers";
 import type * as SendLedger from "@/lib/agent-engine/edge/crm/send-ledger";
 import type * as SendMessage from "@/lib/agent-engine/edge/crm/send-message";
 import type * as SpinningStore from "@/lib/agent-engine/spinning/store";
+import type * as Fronteira from "@/lib/atendimento/fronteira";
 import type * as Queue from "@/lib/agent-engine/queue/queue";
 import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
 import type * as Handler from "@/app/api/v1/messages/_handler";
@@ -44,6 +45,14 @@ import type { ChannelSendInput } from "@/lib/agent-engine/channel-adapter";
  *   - envio parcial do `segurar` (o 1º saiu, o 2º não): grava, encerra, fica no log;
  *   - o turno de follow-up (`followup_turn`) não chama o gancho;
  *   - a re-execução depois do `segurar` não envia de novo (a anotação no job).
+ *
+ * E os da 3ª rodada:
+ *   1. a escolta da preparação conta o que o gancho enviou: o prazo da execução que
+ *      vence depois do formulário enviado, na última tentativa, não manda a frase de
+ *      espera nem passa ao humano por cima do formulário;
+ *   2. a resposta processada pelo gancho fica com o corpo gravado (o texto neutro do
+ *      formulário inválido não volta a ser as respostas montadas);
+ *   3. o texto montado das respostas não leva chave com nome de dado pessoal.
  *
  * E os da 2ª rodada da revisão (numeração do pedido):
  *   1. a resposta do formulário nunca se perde: com o gancho fora do ar no turno dela,
@@ -155,6 +164,7 @@ type Modules = {
   createLogger: typeof ObsLogger.createLogger;
   createFakeRegistry: typeof Providers.createFakeRegistry;
   spinning: typeof SpinningStore;
+  fronteira: typeof Fronteira;
 };
 let m: Modules;
 
@@ -349,7 +359,7 @@ function montaHandler(doGenerate: unknown, comGancho: boolean) {
   return m.turno.createInboundTurnHandler(depsDoTurno(doGenerate, comGancho));
 }
 
-async function enfileira(inboundMessageId: string): Promise<string> {
+async function enfileira(inboundMessageId: string, maxAttempts = 3): Promise<string> {
   await pool.query("update job_queue set status = 'done' where organization_id = $1 and status = 'pending'", [ORG]);
   const { job } = await m.queue.enqueueJob(pool, ORG, {
     kind: "inbound_turn",
@@ -361,16 +371,21 @@ async function enfileira(inboundMessageId: string): Promise<string> {
       inbound_message_id: inboundMessageId,
       crm_event_id: randomUUID(),
     },
-    maxAttempts: 3,
+    maxAttempts,
   });
   return job.id;
 }
 
-async function executa(handler: ReturnType<typeof montaHandler>, jobId: string): Promise<Error | null> {
+/** `poolDoTurno`: o pool que o turno recebe (a falha injetada); o canal e a fila usam o real. */
+async function executa(
+  handler: ReturnType<typeof montaHandler>,
+  jobId: string,
+  poolDoTurno: pg.Pool = pool,
+): Promise<Error | null> {
   const [claimed] = await m.queue.claimJobs(pool, { workerId: "gancho", maxConcurrency: 1 });
   expect(claimed?.id).toBe(jobId);
   try {
-    await handler(claimed!, pool, { workerId: "gancho" });
+    await handler(claimed!, poolDoTurno, { workerId: "gancho" });
     await m.queue.completeJob(pool, claimed!.id, "gancho");
     return null;
   } catch (err) {
@@ -435,6 +450,7 @@ beforeAll(async () => {
     createLogger: (await import("@/lib/agent-engine/obs/logger")).createLogger,
     createFakeRegistry: (await import("@/lib/agent-engine/edge/llm/providers")).createFakeRegistry,
     spinning: await import("@/lib/agent-engine/spinning/store"),
+    fronteira: await import("@/lib/atendimento/fronteira"),
   };
 
   await pool.query(
@@ -1229,5 +1245,80 @@ describe("2ª rodada, 6. posições negativas do ledger com contador próprio", 
       falhadas: [],
       doGancho: 1,
     });
+  });
+});
+
+// ─── 3ª rodada da revisão da -c01.5 ─────────────────────────────────────────
+
+describe("3ª rodada, 1. a escolta da preparação conta o que o gancho enviou", () => {
+  it("prazo da execução vencido depois do formulário enviado, na última tentativa: sem frase de espera e sem passagem", async () => {
+    respostaDoGancho = async () =>
+      json({
+        acao: "segurar",
+        enviar: [{ tipo: "interativo", interactive: FORMULARIO }],
+        gravar: { campos: { enviado_em: "2026-07-30T15:00:00Z" } },
+      });
+    const jobId = await enfileira(MSG, 1);
+    // O prazo vence no `gravar`, depois do envio (o gancho repassa o erro de fronteira).
+    const poolComPrazo = new Proxy(pool, {
+      get(alvo, prop) {
+        if (prop === "query") {
+          return (sql: unknown, ...resto: unknown[]) => {
+            const texto = typeof sql === "string" ? sql : ((sql as { text?: string })?.text ?? "");
+            if (texto.includes("set custom_fields = coalesce(custom_fields, '{}'::jsonb) || $3::jsonb"))
+              return Promise.reject(new m.fronteira.PrazoDaExecucaoVencidoError(jobId, 1000));
+            return (alvo.query as (...a: unknown[]) => unknown)(sql, ...resto);
+          };
+        }
+        const valor = Reflect.get(alvo, prop) as unknown;
+        return typeof valor === "function" ? (valor as (...a: unknown[]) => unknown).bind(alvo) : valor;
+      },
+    });
+    const mod = modelo();
+    const erro = await executa(montaHandler(mod.doGenerate, true), jobId, poolComPrazo);
+
+    expect(erro?.name).toBe("PrazoDaExecucaoVencidoError");
+    // Só o formulário saiu: nenhuma frase de espera depois dele.
+    expect(postsNaGraph.map((p) => p.type)).toEqual(["interactive"]);
+    expect(mod.estado.etapas).toBe(0);
+    expect(await passouAoHumano()).toBe(false);
+    expect(await casosAbertos()).toBe(0);
+    expect(
+      linhasDoLog.some((l) => l.includes("o lead já tem resposta deste job — sem passagem")),
+    ).toBe(true);
+  });
+});
+
+describe("3ª rodada, 2. processada pelo gancho, a resposta fica com o corpo gravado", () => {
+  it("o formulário com o texto neutro e a marca (o gancho decidiu sem resumo): o modelo não lê as respostas de novo", async () => {
+    await respostaDeFormulario({ processado: true });
+    const mod = modelo();
+    expect(await executa(montaHandler(mod.doGenerate, true), await enfileira(MSG))).toBeNull();
+
+    const prompt = mod.estado.prompts[0]!;
+    expect(prompt).toContain("Formulário respondido");
+    expect(prompt).not.toContain("pergunta_1: opcao_a");
+    expect(corpos()).toEqual([RESPOSTA_DO_MODELO]);
+  });
+});
+
+describe("3ª rodada, 3. o texto montado das respostas sem dado pessoal", () => {
+  it("chave com nome de dado pessoal no formulário não chega ao modelo", async () => {
+    const formularioId = await respostaDeFormulario({
+      resposta: {
+        flow_token: "tok-teste",
+        pergunta_1: "opcao_a",
+        telefone_contato: "+5511977776666",
+        nome: "Fulana Formulário",
+        email: "fulana@teste.example",
+      },
+    });
+    const mod = modelo();
+    expect(await executa(montaHandler(mod.doGenerate, false), await enfileira(formularioId))).toBeNull();
+
+    const prompt = mod.estado.prompts[0]!;
+    expect(prompt).toContain("pergunta_1: opcao_a");
+    for (const pessoal of ["5511977776666", "Fulana Formulário", "fulana@teste.example"])
+      expect(prompt).not.toContain(pessoal);
   });
 });

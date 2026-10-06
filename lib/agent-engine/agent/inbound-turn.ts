@@ -1337,7 +1337,8 @@ export async function comPassagemSeAPreparacaoFalhar<T>(
  * morre com o erro original.
  *
  * Reconcilia antes do caso: o ledger deste job já tem resposta aceita ou com o canal
- * (`estadoInicialDoJob`, a mesma leitura do turno) → não dispara; o lead já está em
+ * (`estadoInicialDoJob`, a mesma leitura do turno, inclusive o que o gancho antes do
+ * turno enviou, `doGancho`) → não dispara; o lead já está em
  * passagem → não dispara. Sem conseguir ler os dois, não dispara (limite documentado em
  * `C01.md`): a frase às cegas poderia ser a segunda mensagem a um lead já respondido ou
  * já passado. Antes dos desvios determinísticos (`marca.desviosConferidos`), confere a
@@ -1355,7 +1356,10 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
   const erro = `preparação do turno: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200);
   try {
     const estado = await estadoInicialDoJob(pool, { tenantId, jobId: job.id });
-    if (estado.enviadas > 0) {
+    // (C01, -c01.5) O que o gancho antes do turno enviou neste job (posições negativas,
+    // `doGancho`) também é resposta: o formulário já saiu, e a frase de espera com a
+    // passagem por cima dele calaria a resposta que o lead mandar.
+    if (estado.enviadas + (estado.doGancho ?? 0) > 0) {
       log.info('falha na preparação na última tentativa: o lead já tem resposta deste job — sem passagem', {
         erro,
       });

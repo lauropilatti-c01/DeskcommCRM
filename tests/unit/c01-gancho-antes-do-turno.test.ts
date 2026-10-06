@@ -23,7 +23,13 @@ import {
 import { inboundsNaoRespondidos, semRespostasDeFormulario } from "@/lib/agent-engine/agent/inbound-turn";
 import { turnKnobsFromEnv } from "@/lib/agent-engine/agent/turn-knobs";
 import { camposCompactosDoCard } from "@/lib/agent-engine/edge/crm/card-do-contato";
-import { corpoDaMensagem, getLeadContext, type LeadContextMessage } from "@/lib/agent-engine/edge/crm/get-lead-context";
+import {
+  COLUNAS_DO_FORMULARIO,
+  corpoDaMensagem,
+  getLeadContext,
+  MARCA_DE_PROCESSADO,
+  type LeadContextMessage,
+} from "@/lib/agent-engine/edge/crm/get-lead-context";
 import { textoDaRespostaDeFormulario } from "@/lib/channels/interativo";
 import { corpoDoEnvio } from "@/lib/agent-engine/edge/crm/send-message";
 import { hashDoConteudo } from "@/lib/agent-engine/edge/crm/send-ledger";
@@ -414,6 +420,40 @@ describe("a resposta do formulário que o modelo lê sem o resumo do gancho", ()
     ).toBe("Resumo do formulário");
     // Texto igual ao neutro numa mensagem que não é formulário: fica como está.
     expect(corpoDaMensagem({ ...linha, body: "Formulário respondido", e_formulario: false })).toBe("Formulário respondido");
+  });
+
+  it("3ª rodada: processada pelo gancho, vale o corpo gravado, mesmo o texto neutro (formulário inválido)", () => {
+    const linha = { type: "text", media_url: null, media_storage_path: null, media_derived_text: null };
+    expect(
+      corpoDaMensagem({
+        ...linha,
+        body: "Formulário respondido",
+        e_formulario: true,
+        formulario_resposta: RESPOSTA,
+        formulario_processado: true,
+      }),
+    ).toBe("Formulário respondido");
+    // A coluna sai das colunas do formulário, que o histórico e a linha do job leem.
+    expect(COLUNAS_DO_FORMULARIO).toContain(
+      `coalesce(metadata->>'${MARCA_DE_PROCESSADO}', '') = 'true' as formulario_processado`,
+    );
+    expect(MARCA_DE_PROCESSADO).toBe("gancho_processado");
+  });
+
+  it("3ª rodada: a chave com nome de dado pessoal fica fora do texto montado", () => {
+    expect(
+      textoDaRespostaDeFormulario({
+        flow_token: "tok-teste",
+        pergunta_1: "opcao_a",
+        nome: "Ana",
+        "Nome Completo": "Ana Lima",
+        telefone: "+5511999990000",
+        whatsapp_2: "+5511988880000",
+        "E-mail": "ana@teste.example",
+        cpf: "000.000.000-00",
+        nome_do_produto: "Plano B",
+      }),
+    ).toBe("Formulário respondido:\npergunta_1: opcao_a\nnome_do_produto: Plano B");
   });
 });
 
