@@ -103,6 +103,7 @@ import { MARCA_DE_PROCESSADO, type LeadContextMessage } from '../edge/crm/get-le
 import { conteudoRegistradoNoJob } from '../edge/crm/send-ledger';
 import { scheduleCronJob } from '../cron/scheduler';
 import { runBeforeSend } from '../guardrails/before-send';
+import type { DesfechoDoAviso } from './aviso-de-escalacao';
 import { performHumanHandoff } from './human-handoff';
 import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
 import type { Logger } from '../obs/logger';
@@ -857,7 +858,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     }
   }
   if (resposta.passar_a_equipe === true) {
-    await passarAEquipe(ctx, resposta);
+    await passarAEquipe(ctx, resposta, enviadas);
   } else {
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
   }
@@ -931,8 +932,12 @@ export const MOTIVO_DA_PASSAGEM_PELO_GANCHO =
   'O atendimento de entrada passou a conversa para uma pessoa antes de a IA responder';
 export const TITULO_DA_PASSAGEM_PELO_GANCHO = 'Passado à equipe na entrada — assumir a conversa';
 
-async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho): Promise<void> {
+async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho, enviadas: number): Promise<void> {
   const motivo = (resposta.motivo ?? '').trim().slice(0, 60);
+  // O aviso ao cliente é o que o próprio serviço de entrada mandou neste turno: a Central
+  // diz à pessoa que assume se o cliente já sabe que alguém vai falar com ele.
+  const avisoAoLead: DesfechoDoAviso =
+    enviadas > 0 ? { avisado: true } : { avisado: false, porque: 'gancho_sem_envio' };
   try {
     await performHumanHandoff(
       ctx.pool,
@@ -941,6 +946,7 @@ async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho):
         reason: MOTIVO_DA_PASSAGEM_PELO_GANCHO,
         conversationSummary: resposta.resumo ?? MOTIVO_DA_PASSAGEM_PELO_GANCHO,
         inboxTitle: TITULO_DA_PASSAGEM_PELO_GANCHO,
+        avisoAoLead,
         log: ctx.log,
       },
     );
