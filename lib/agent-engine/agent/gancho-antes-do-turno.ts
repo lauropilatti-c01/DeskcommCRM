@@ -1,0 +1,839 @@
+/**
+ * (C01, -c01.5) GANCHO ANTES DO TURNO: um serviço de fora decide, antes do modelo,
+ * se o turno segue ou se ele mesmo responde.
+ *
+ * Liga só por ambiente (`AGENT_PRE_TURN_HOOK_URL`, `AGENT_PRE_TURN_HOOK_SECRET`,
+ * `AGENT_PRE_TURN_HOOK_TIMEOUT_MS`, padrão 4.000 ms). Sem a URL, o knob não existe e o
+ * turno é byte a byte o de antes: nenhuma consulta, nenhuma chamada.
+ *
+ * ## Onde entra
+ *
+ * Em `inbound-turn.ts`, depois de tudo que silencia o turno (agente pausado ou
+ * assistido, pessoa na conversa, pedido de humano, suspeita de opt-out) e antes do
+ * roteiro e do modelo. Só em `inbound_turn`, nunca na prévia, nunca para contato
+ * bloqueado.
+ *
+ * ## O contrato (versão 1)
+ *
+ * `POST <URL>` com `X-Hook-Signature: t=<unix>,v1=<hex HMAC-SHA256(segredo, "<t>." + corpo)>`.
+ * O pedido leva a conversa (canal, pessoa atendendo, última entrada), o card do funil
+ * (etapa, campos, etiquetas), as últimas 12 mensagens e, quando a mensagem do turno
+ * (ou outra da rajada ainda sem resposta) é uma resposta de formulário, o
+ * `formulario`. Nunca telefone, e-mail ou nome do contato: campo do card com nome de
+ * dado pessoal (`CHAVES_DE_DADO_PESSOAL`) fica de fora.
+ *
+ * A resposta é conferida por schema (`respostaDoGanchoSchema`):
+ *
+ *   - `seguir`: aplica `gravar` (campos e etiquetas no card), troca o texto da
+ *     resposta do formulário pelo `resumo` (o original continua em
+ *     `metadata.interactive`) e o turno segue: o modelo lê o resumo;
+ *   - `segurar`: envia cada item de `enviar`, na ordem, pela mesma cadeia de envio
+ *     do aviso de escalação (`runBeforeSend`), aplica `gravar` e o turno TERMINA,
+ *     sem modelo e sem fail-safe: o cliente recebeu resposta.
+ *
+ * ## Falha nunca cala o cliente
+ *
+ * Erro de rede, prazo estourado, status fora de 2xx, resposta fora do schema, canal
+ * que não envia interativo ou envio do `segurar` que não sai: o turno roda o modelo,
+ * como se o gancho não existisse, e o `gravar` daquela resposta NÃO é aplicado.
+ * Os logs levam o motivo em código, nunca corpo, URL ou dado pessoal.
+ *
+ * ## Re-execução do job
+ *
+ * A decisão fica anotada no próprio job (`job_queue.payload.gancho_antes_do_turno`)
+ * antes de qualquer efeito. A re-execução (reaper, retry) repete a decisão anotada em
+ * vez de perguntar de novo: perguntando, o serviço veria o formulário que acabou de
+ * mandar e responderia com o lembrete, e o cliente receberia dois. Se uma mensagem
+ * nova do cliente chegou depois da decisão (a rajada cresceu enquanto o job voltava à
+ * fila), a anotação não vale mais e o gancho é chamado de novo. Cada envio tem posição
+ * própria no ledger (`seq` negativo, que o modelo nunca usa) e o ledger reconhece o
+ * conteúdo já aceito: nada sai duas vezes.
+ *
+ * ## Por que as travas de conteúdo não valem aqui
+ *
+ * O texto vem de código (como o aviso de escalação, `aviso-de-escalacao.ts`), não do
+ * modelo: as travas de estilo, o vocabulário interno e o classificador de promessa
+ * existem para o texto do modelo e ficam desarmados (não são passados). Continuam
+ * valendo: opt-out, LGPD, janela de 24 h, ritmo do número, apresentação automática
+ * da 1ª mensagem e o modo do agente. O anti-spinning fica desarmado no canal
+ * oficial: o formulário é o MESMO texto para todo lead novo, e armado ele vetaria a
+ * partir do terceiro lead na janela do número (a conta do cabeçalho de
+ * `GateContext.spinningEnforced`); o anti-ban protege o número não oficial, onde ele
+ * segue armado.
+ */
+import { createHmac } from 'node:crypto';
+
+import type pg from 'pg';
+import { z } from 'zod';
+
+import type { AgentOperationContext } from '@/lib/ai/agents/operation';
+import { JobLeasePerdidoError, PrazoDaExecucaoVencidoError, StaleServiceBoundaryError } from '@/lib/atendimento/fronteira';
+import { guardServiceEffect } from '@/lib/atendimento/fronteira-server';
+import { canalEnviaInterativo, TEXTO_DA_RESPOSTA_DE_FORMULARIO, tipoDoCanalParaIntegracao } from '@/lib/channels/interativo';
+import { normalizarTags } from '@/lib/contacts/tag-normalizada';
+import { logger } from '@/lib/logger';
+import { isoLocalComOffset } from '@/lib/tempo/agora';
+
+import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
+import { lerCardDoContato, type CardDoContato } from '../edge/crm/card-do-contato';
+import type { LeadContextMessage } from '../edge/crm/get-lead-context';
+import { runBeforeSend } from '../guardrails/before-send';
+import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
+import type { Logger } from '../obs/logger';
+import { claimOfJob } from '../queue/claim';
+import type { JobRow, Queryable } from '../queue/queue';
+
+
+/** Como o gancho chega ao turno (`InboundTurnKnobs.ganchoAntesDoTurno`). */
+export interface GanchoAntesDoTurnoConfig {
+  url: string;
+  segredo: string;
+  prazoMs: number;
+}
+
+/**
+ * O knob a partir do ambiente. URL e segredo juntos, e a URL `http(s)` válida; o que
+ * faltar desliga o gancho com um aviso no boot (sem a URL no log: ela pode levar
+ * credencial). Sem a URL, silêncio: é o caso de toda instalação que não usa o gancho.
+ */
+export function ganchoAntesDoTurnoDoAmbiente(env: {
+  AGENT_PRE_TURN_HOOK_URL?: string | undefined;
+  AGENT_PRE_TURN_HOOK_SECRET?: string | undefined;
+  AGENT_PRE_TURN_HOOK_TIMEOUT_MS: number;
+}): { ganchoAntesDoTurno?: GanchoAntesDoTurnoConfig } {
+  const url = env.AGENT_PRE_TURN_HOOK_URL;
+  if (url === undefined) return {};
+  let valida = false;
+  try {
+    const u = new URL(url);
+    valida = u.protocol === 'https:' || u.protocol === 'http:';
+  } catch {
+    valida = false;
+  }
+  if (!valida) {
+    logger.warn('gancho antes do turno desligado: AGENT_PRE_TURN_HOOK_URL não é um endereço http(s) válido');
+    return {};
+  }
+  if (env.AGENT_PRE_TURN_HOOK_SECRET === undefined) {
+    logger.warn('gancho antes do turno desligado: falta AGENT_PRE_TURN_HOOK_SECRET');
+    return {};
+  }
+  return {
+    ganchoAntesDoTurno: { url, segredo: env.AGENT_PRE_TURN_HOOK_SECRET, prazoMs: env.AGENT_PRE_TURN_HOOK_TIMEOUT_MS },
+  };
+}
+
+// ─── o pedido ──────────────────────────────────────────────────────────────────
+
+export interface MensagemDoPedido {
+  direcao: 'entrada' | 'saida';
+  texto: string;
+  em: string;
+  interativo: unknown;
+}
+
+export interface FormularioDoPedido {
+  mensagem_id: string;
+  resposta: unknown;
+  flow_token: string | null;
+  bruto: string | null;
+}
+
+export interface PedidoDoGancho {
+  versao: 1;
+  evento: 'turno';
+  organizacao_id: string;
+  agente_id: string | null;
+  conversa: { id: string; canal: string; pessoa_atendendo: boolean; ultima_entrada_em: string | null };
+  lead: { id: string | null; etapa: string | null; campos: Record<string, unknown>; etiquetas: string[] };
+  mensagens: MensagemDoPedido[];
+  formulario?: FormularioDoPedido;
+}
+
+/** Quantas mensagens vão no pedido. */
+export const MENSAGENS_NO_PEDIDO = 12;
+
+/**
+ * Campo do card que é dado pessoal não vai no pedido. Pelo NOME da chave, depois de
+ * minúscula, sem acento e sem separador: `Telefone`, `e-mail`, `nome_completo` saem;
+ * `nome_do_produto` fica (o serviço precisa dos campos de qualificação).
+ */
+const CHAVES_DE_DADO_PESSOAL = new Set([
+  'nome', 'name', 'nomecompleto', 'fullname', 'primeironome', 'firstname', 'sobrenome', 'lastname',
+  'cpf', 'rg', 'documento', 'endereco', 'address',
+]);
+const TRECHOS_DE_DADO_PESSOAL = ['telefone', 'phone', 'celular', 'whatsapp', 'email', 'mail'];
+
+export function chaveEDadoPessoal(chave: string): boolean {
+  const k = chave
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  return CHAVES_DE_DADO_PESSOAL.has(k) || TRECHOS_DE_DADO_PESSOAL.some((t) => k.includes(t));
+}
+
+const semDadoPessoal = (campos: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(campos).filter(([k]) => !chaveEDadoPessoal(k)));
+
+const iso = (v: Date | string | null | undefined): string | null =>
+  v === null || v === undefined ? null : v instanceof Date ? v.toISOString() : new Date(v).toISOString();
+
+const objeto = (v: unknown): Record<string, unknown> | null =>
+  v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+
+/** Uma resposta de formulário guardada na entrada (`metadata.interactive`, -c01.5 item A). */
+interface LinhaDoFormulario {
+  id: string;
+  interativo: unknown;
+  sent_at: Date | string | null;
+}
+
+export interface FormularioDoTurno {
+  pedido: FormularioDoPedido;
+  /** O `sent_at` da linha: é por ele que o resumo acha a mensagem no contexto do turno. */
+  sentAt: string | null;
+}
+
+/**
+ * A resposta de formulário que este turno atende: a mensagem do job, se for uma; senão
+ * a mais nova das que chegaram depois da última saída (a rajada sem resposta).
+ */
+export async function formularioDoTurno(
+  db: Queryable,
+  alvo: { organizationId: string; conversationId: string; inboundMessageId: string | null },
+): Promise<FormularioDoTurno | null> {
+  const { rows } = await db.query<LinhaDoFormulario>(
+    `select m.id, m.metadata->'interactive' as interativo, m.sent_at
+       from messages m
+      where m.organization_id = $1 and m.conversation_id = $2 and m.direction = 'inbound'
+        and m.metadata->'interactive'->>'type' = 'nfm_reply'
+        and (m.id = $3::uuid
+             or m.created_at > coalesce(
+                  (select max(o.created_at) from messages o
+                    where o.organization_id = $1 and o.conversation_id = $2 and o.direction = 'outbound'),
+                  '-infinity'::timestamptz))
+      order by coalesce(m.id = $3::uuid, false) desc, m.created_at desc, m.id desc
+      limit 1`,
+    [alvo.organizationId, alvo.conversationId, alvo.inboundMessageId],
+  );
+  const linha = rows[0];
+  if (linha === undefined) return null;
+  const i = objeto(linha.interativo) ?? {};
+  return {
+    pedido: {
+      mensagem_id: linha.id,
+      resposta: i.response ?? null,
+      flow_token: typeof i.flow_token === 'string' ? i.flow_token : null,
+      bruto: typeof i.raw === 'string' ? i.raw : null,
+    },
+    sentAt: iso(linha.sent_at),
+  };
+}
+
+/** A etapa como o serviço a lê: `won`/`lost` quando o negócio fechou, senão o slug da etapa. */
+const etapaDoCard = (card: CardDoContato): string | null => (card.status !== 'open' ? card.status : card.etapa);
+
+export async function montarPedidoDoGancho(
+  db: Queryable,
+  alvo: {
+    organizationId: string;
+    contactId: string;
+    conversationId: string;
+    channelSessionId: string;
+    agentId: string | null;
+    inboundMessageId: string | null;
+    /** As etiquetas do CONTATO lidas no contexto do turno: o serviço vê as duas listas juntas. */
+    etiquetasDoContato: readonly string[];
+  },
+): Promise<{ pedido: PedidoDoGancho; card: CardDoContato | null; formulario: FormularioDoTurno | null; canalEnviaInterativo: boolean }> {
+  const { rows: conversas } = await db.query<{
+    assignee_kind: string | null;
+    assigned_to_user_id: string | null;
+    last_inbound_at: Date | string | null;
+    provider: string | null;
+  }>(
+    `select c.assignee_kind, c.assigned_to_user_id, c.last_inbound_at,
+            (select s.provider from channel_sessions s where s.organization_id = $1 and s.id = $3) as provider
+       from conversations c
+      where c.organization_id = $1 and c.id = $2`,
+    [alvo.organizationId, alvo.conversationId, alvo.channelSessionId],
+  );
+  const conversa = conversas[0];
+  const card = await lerCardDoContato(db, alvo.organizationId, alvo.contactId);
+  const { rows: linhas } = await db.query<{
+    direction: string;
+    type: string;
+    body: string | null;
+    interativo: unknown;
+    em: Date | string;
+  }>(
+    `select direction, type, body, metadata->'interactive' as interativo, coalesce(sent_at, created_at) as em
+       from messages
+      where organization_id = $1 and conversation_id = $2
+        and direction in ('inbound', 'outbound') and type <> 'system'
+      order by coalesce(sent_at, created_at) desc, created_at desc, id desc
+      limit $3`,
+    [alvo.organizationId, alvo.conversationId, MENSAGENS_NO_PEDIDO],
+  );
+  const formulario = await formularioDoTurno(db, alvo);
+
+  const pedido: PedidoDoGancho = {
+    versao: 1,
+    evento: 'turno',
+    organizacao_id: alvo.organizationId,
+    agente_id: alvo.agentId,
+    conversa: {
+      id: alvo.conversationId,
+      canal: tipoDoCanalParaIntegracao(conversa?.provider),
+      pessoa_atendendo:
+        conversa?.assignee_kind === 'user' ||
+        (conversa?.assignee_kind == null && conversa?.assigned_to_user_id != null),
+      ultima_entrada_em: iso(conversa?.last_inbound_at),
+    },
+    lead: {
+      id: card?.id ?? null,
+      etapa: card ? etapaDoCard(card) : null,
+      campos: semDadoPessoal(card?.campos ?? {}),
+      etiquetas: normalizarTags([...(card?.etiquetas ?? []), ...alvo.etiquetasDoContato]),
+    },
+    mensagens: linhas.reverse().map((m) => ({
+      direcao: m.direction === 'inbound' ? 'entrada' : 'saida',
+      texto: m.body ?? `[${m.type}]`,
+      em: iso(m.em) ?? '',
+      interativo: objeto(m.interativo),
+    })),
+    ...(formulario !== null ? { formulario: formulario.pedido } : {}),
+  };
+  return { pedido, card, formulario, canalEnviaInterativo: canalEnviaInterativo(conversa?.provider) };
+}
+
+// ─── a chamada ─────────────────────────────────────────────────────────────────
+
+/** `t=<unix>,v1=<hex HMAC-SHA256(segredo, "<t>." + corpo)>`. */
+export function assinaturaDoGancho(segredo: string, corpo: string, t: number): string {
+  const v1 = createHmac('sha256', segredo).update(`${t}.${corpo}`, 'utf8').digest('hex');
+  return `t=${t},v1=${v1}`;
+}
+
+const itemTexto = z.object({ tipo: z.literal('texto'), texto: z.string().trim().min(1).max(4096) });
+const itemInterativo = z.object({
+  tipo: z.literal('interativo'),
+  interactive: z.looseObject({ type: z.string().min(1) }),
+});
+
+/** Teto do `gravar.campos` serializado: o card não vira depósito. */
+export const TETO_DOS_CAMPOS_GRAVADOS = 16_000;
+/** Teto do corpo da resposta do gancho. */
+const TETO_DA_RESPOSTA = 64_000;
+
+export const respostaDoGanchoSchema = z
+  .object({
+    acao: z.enum(['seguir', 'segurar']),
+    enviar: z.array(z.discriminatedUnion('tipo', [itemTexto, itemInterativo])).max(5).nullish(),
+    gravar: z
+      .object({
+        campos: z.record(z.string().trim().min(1).max(100), z.unknown()).nullish(),
+        etiquetas_mais: z.array(z.string()).max(20).nullish(),
+        etiquetas_menos: z.array(z.string()).max(20).nullish(),
+      })
+      .nullish(),
+    resumo: z.string().trim().min(1).max(4096).nullish(),
+    motivo: z.string().max(200).nullish(),
+  })
+  .refine((r) => r.acao !== 'segurar' || (r.enviar?.length ?? 0) > 0, {
+    message: 'segurar sem nada a enviar deixaria o cliente sem resposta',
+    path: ['enviar'],
+  })
+  .refine((r) => JSON.stringify(r.gravar?.campos ?? {}).length <= TETO_DOS_CAMPOS_GRAVADOS, {
+    message: 'gravar.campos grande demais',
+    path: ['gravar', 'campos'],
+  });
+
+export type RespostaDoGancho = z.infer<typeof respostaDoGanchoSchema>;
+
+export type ChamadaDoGancho =
+  | { ok: true; resposta: RespostaDoGancho }
+  | { ok: false; motivo: 'prazo' | 'rede' | 'status' | 'resposta_invalida'; status?: number };
+
+export async function chamarGancho(
+  config: GanchoAntesDoTurnoConfig,
+  pedido: PedidoDoGancho,
+  agoraUnix: () => number = () => Math.floor(Date.now() / 1000),
+): Promise<ChamadaDoGancho> {
+  const corpo = JSON.stringify(pedido);
+  let res: Response;
+  try {
+    res = await fetch(config.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Hook-Signature': assinaturaDoGancho(config.segredo, corpo, agoraUnix()),
+      },
+      body: corpo,
+      redirect: 'error',
+      signal: AbortSignal.timeout(config.prazoMs),
+    });
+  } catch (err) {
+    return { ok: false, motivo: eTimeout(err) ? 'prazo' : 'rede' };
+  }
+  if (res.status < 200 || res.status > 299) return { ok: false, motivo: 'status', status: res.status };
+  let texto: string;
+  try {
+    texto = await res.text();
+  } catch (err) {
+    return { ok: false, motivo: eTimeout(err) ? 'prazo' : 'rede' };
+  }
+  if (texto.length > TETO_DA_RESPOSTA) return { ok: false, motivo: 'resposta_invalida' };
+  let json: unknown;
+  try {
+    json = JSON.parse(texto);
+  } catch {
+    return { ok: false, motivo: 'resposta_invalida' };
+  }
+  const lido = respostaDoGanchoSchema.safeParse(json);
+  return lido.success ? { ok: true, resposta: lido.data } : { ok: false, motivo: 'resposta_invalida' };
+}
+
+const eTimeout = (err: unknown): boolean =>
+  err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+
+// ─── a decisão anotada no job ──────────────────────────────────────────────────
+
+export const CHAVE_NO_JOB = 'gancho_antes_do_turno';
+
+type DecisaoAnotada =
+  | {
+      situacao: 'decidido';
+      resposta: RespostaDoGancho;
+      formulario: { mensagem_id: string; sent_at: string | null } | null;
+      /** `max(created_at)` das entradas no momento da decisão, como texto do Postgres. */
+      ate: string | null;
+    }
+  | { situacao: 'modelo'; motivo: string };
+
+function decisaoAnotada(payload: Record<string, unknown> | null | undefined): DecisaoAnotada | null {
+  const d = objeto(payload?.[CHAVE_NO_JOB]);
+  if (d === null) return null;
+  if (d.situacao === 'modelo') return { situacao: 'modelo', motivo: String(d.motivo ?? '') };
+  if (d.situacao !== 'decidido') return null;
+  const lido = respostaDoGanchoSchema.safeParse(d.resposta);
+  if (!lido.success) return null;
+  const f = objeto(d.formulario);
+  return {
+    situacao: 'decidido',
+    resposta: lido.data,
+    formulario:
+      f !== null && typeof f.mensagem_id === 'string'
+        ? { mensagem_id: f.mensagem_id, sent_at: typeof f.sent_at === 'string' ? f.sent_at : null }
+        : null,
+    ate: typeof d.ate === 'string' ? d.ate : null,
+  };
+}
+
+async function anotarNoJob(db: Queryable, job: Pick<JobRow, 'id' | 'organization_id'>, d: DecisaoAnotada): Promise<void> {
+  await db.query(
+    `update job_queue set payload = payload || jsonb_build_object($3::text, $4::jsonb)
+      where organization_id = $1 and id = $2`,
+    [job.organization_id, job.id, CHAVE_NO_JOB, JSON.stringify(d)],
+  );
+}
+
+async function ultimaEntrada(db: Queryable, organizationId: string, conversationId: string): Promise<string | null> {
+  const { rows } = await db.query<{ em: string | null }>(
+    `select max(created_at)::text as em from messages
+      where organization_id = $1 and conversation_id = $2 and direction = 'inbound'`,
+    [organizationId, conversationId],
+  );
+  return rows[0]?.em ?? null;
+}
+
+async function chegouEntradaDepois(
+  db: Queryable,
+  organizationId: string,
+  conversationId: string,
+  ate: string | null,
+): Promise<boolean> {
+  if (ate === null) return false;
+  const { rows } = await db.query<{ chegou: boolean }>(
+    `select exists (select 1 from messages
+      where organization_id = $1 and conversation_id = $2 and direction = 'inbound'
+        and created_at > $3::timestamptz) as chegou`,
+    [organizationId, conversationId, ate],
+  );
+  return rows[0]?.chegou === true;
+}
+
+// ─── os efeitos ────────────────────────────────────────────────────────────────
+
+/**
+ * `gravar` no card: campos em merge raso (`||`), etiquetas somadas e tiradas já
+ * normalizadas, sem repetir e na ordem da primeira aparição. Um statement só.
+ */
+export async function gravarNoCard(
+  db: Queryable,
+  organizationId: string,
+  cardId: string,
+  gravar: NonNullable<RespostaDoGancho['gravar']>,
+): Promise<void> {
+  const campos = gravar.campos ?? {};
+  const mais = normalizarTags(gravar.etiquetas_mais ?? []);
+  const menos = normalizarTags(gravar.etiquetas_menos ?? []);
+  if (Object.keys(campos).length === 0 && mais.length === 0 && menos.length === 0) return;
+  await db.query(
+    `update crm_leads
+        set custom_fields = coalesce(custom_fields, '{}'::jsonb) || $3::jsonb,
+            tags = array(
+              select x.t from (
+                select distinct on (lower(btrim(u.t))) u.t, u.ord
+                  from unnest(coalesce(tags, '{}'::text[]) || $4::text[]) with ordinality as u(t, ord)
+                 where btrim(u.t) <> '' and lower(btrim(u.t)) <> all($5::text[])
+                 order by lower(btrim(u.t)), u.ord
+              ) x order by x.ord),
+            updated_at = now()
+      where organization_id = $1 and id = $2`,
+    [organizationId, cardId, JSON.stringify(campos), mais, menos],
+  );
+}
+
+/** O texto que o turno lê no lugar da resposta do formulário. O original fica no metadata. */
+async function trocarTextoDoFormulario(
+  db: Queryable,
+  alvo: { organizationId: string; conversationId: string; mensagemId: string },
+  resumo: string,
+): Promise<void> {
+  await db.query(
+    `update messages set body = $4
+      where organization_id = $1 and conversation_id = $2 and id = $3 and direction = 'inbound'`,
+    [alvo.organizationId, alvo.conversationId, alvo.mensagemId, resumo],
+  );
+}
+
+/**
+ * A mesma troca no contexto já lido pelo turno (a abertura do modelo usa a leitura do
+ * começo do turno): a mensagem de entrada com o texto neutro e o mesmo instante.
+ */
+export function trocarResumoNoContexto(
+  mensagens: LeadContextMessage[],
+  alvo: { sentAt: string | null; resumo: string },
+  fuso: string,
+): boolean {
+  const quando = alvo.sentAt === null ? null : isoLocalComOffset(new Date(alvo.sentAt), fuso);
+  const candidatas = mensagens.filter(
+    (m) => m.direction === 'inbound' && m.body === TEXTO_DA_RESPOSTA_DE_FORMULARIO,
+  );
+  // Pelo instante; sem ele (fuso ou precisão diferentes), a mais nova com o texto neutro,
+  // que é a do formulário deste turno.
+  const certa = candidatas.find((m) => m.sent_at === quando) ?? candidatas.at(-1) ?? null;
+  if (certa === null) return false;
+  certa.body = alvo.resumo;
+  return true;
+}
+
+/** Erros de fronteira sobem: a execução não é mais dona do job, ou o prazo dela venceu. */
+const eDeFronteira = (err: unknown): boolean =>
+  err instanceof StaleServiceBoundaryError ||
+  err instanceof JobLeasePerdidoError ||
+  err instanceof PrazoDaExecucaoVencidoError;
+
+const OK_DO_GANCHO = new Set<ChannelSendResult['kind']>(['sent', 'already_sent', 'queued']);
+
+// ─── a execução ────────────────────────────────────────────────────────────────
+
+export interface ContextoDoGancho {
+  pool: pg.Pool;
+  log: Logger;
+  config: GanchoAntesDoTurnoConfig;
+  job: JobRow;
+  tenantId: string;
+  contactId: string;
+  conversationId: string;
+  channelSessionId: string;
+  inboundMessageId: string | null;
+  agentId: string | null;
+  agentOperation?: AgentOperationContext;
+  etiquetasDoContato: readonly string[];
+  channel: ChannelAdapter;
+  optedOutThisTurn: boolean;
+  lgpd?: LgpdInput;
+  disclosureMode?: 'inject' | 'veto';
+  now: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  /** Relógio da assinatura (testes). Ausente = o relógio real: é o que o serviço confere. */
+  agoraUnix?: () => number;
+}
+
+export type DesfechoDoGancho =
+  /** `segurar` cumprido: o cliente recebeu a resposta do gancho e o turno termina. */
+  | { fim: true }
+  /**
+   * O turno segue para o modelo; com `resumo`, o texto do formulário a trocar no contexto;
+   * com `camposDoCard`, os campos do card relidos depois do `gravar` (o contexto do turno
+   * foi lido antes dele).
+   */
+  | {
+      fim: false;
+      resumo?: { mensagemId: string; sentAt: string | null; texto: string };
+      camposDoCard?: Record<string, unknown>;
+    };
+
+export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<DesfechoDoGancho> {
+  const { pool, log, job } = ctx;
+  const alvo = { organizationId: ctx.tenantId, conversationId: ctx.conversationId };
+
+  // 1. A decisão já anotada por uma execução anterior deste job.
+  let decisao: Extract<DecisaoAnotada, { situacao: 'decidido' }> | null = null;
+  let canalInterativo: boolean | null = null;
+  let card: CardDoContato | null | undefined;
+  const anotada = decisaoAnotada(job.payload);
+  if (anotada?.situacao === 'modelo') {
+    log.info('gancho antes do turno: re-execução segue para o modelo, como a anterior', { motivo: anotada.motivo });
+    return { fim: false };
+  }
+  if (anotada?.situacao === 'decidido') {
+    try {
+      if (!(await chegouEntradaDepois(pool, ctx.tenantId, ctx.conversationId, anotada.ate))) decisao = anotada;
+      else log.info('gancho antes do turno: mensagem nova depois da decisão anotada — pergunta de novo');
+    } catch (err) {
+      if (eDeFronteira(err)) throw err;
+      decisao = anotada;
+    }
+  }
+
+  // 2. Sem decisão válida: pergunta ao gancho.
+  if (decisao === null) {
+    let montado: Awaited<ReturnType<typeof montarPedidoDoGancho>>;
+    let ate: string | null;
+    try {
+      ate = await ultimaEntrada(pool, ctx.tenantId, ctx.conversationId);
+      montado = await montarPedidoDoGancho(pool, {
+        ...alvo,
+        contactId: ctx.contactId,
+        channelSessionId: ctx.channelSessionId,
+        agentId: ctx.agentId,
+        inboundMessageId: ctx.inboundMessageId,
+        etiquetasDoContato: ctx.etiquetasDoContato,
+      });
+    } catch (err) {
+      if (eDeFronteira(err)) throw err;
+      log.warn('gancho antes do turno: pedido não montado — o turno segue para o modelo', {
+        erro: err instanceof Error ? err.name : 'desconhecido',
+      });
+      return { fim: false };
+    }
+    const chamada = await chamarGancho(ctx.config, montado.pedido, ctx.agoraUnix);
+    if (!chamada.ok) {
+      log.warn('gancho antes do turno falhou — o turno segue para o modelo, sem gravar nada', {
+        motivo: chamada.motivo,
+        ...(chamada.status !== undefined ? { status: chamada.status } : {}),
+      });
+      await anotarComCuidado(ctx, { situacao: 'modelo', motivo: chamada.motivo });
+      return { fim: false };
+    }
+    decisao = {
+      situacao: 'decidido',
+      resposta: chamada.resposta,
+      formulario: montado.formulario
+        ? { mensagem_id: montado.formulario.pedido.mensagem_id, sent_at: montado.formulario.sentAt }
+        : null,
+      ate,
+    };
+    canalInterativo = montado.canalEnviaInterativo;
+    card = montado.card;
+    await guardServiceEffect();
+    await anotarComCuidado(ctx, decisao);
+  }
+
+  const { resposta } = decisao;
+  log.info('gancho antes do turno decidiu', {
+    acao: resposta.acao,
+    motivo: (resposta.motivo ?? '').slice(0, 40),
+    enviar: resposta.enviar?.length ?? 0,
+  });
+
+  // 3. Os efeitos.
+  if (card === undefined) card = await lerCardComCuidado(ctx);
+
+  if (resposta.acao === 'seguir') {
+    await guardServiceEffect();
+    const gravou = await aplicarGravar(ctx, card, resposta.gravar);
+    const relido = gravou ? await lerCardComCuidado(ctx) : null;
+    const campos = relido !== null ? { camposDoCard: relido.campos } : {};
+    const f = decisao.formulario;
+    if (f !== null && resposta.resumo) {
+      try {
+        await trocarTextoDoFormulario(pool, { ...alvo, mensagemId: f.mensagem_id }, resposta.resumo);
+        return {
+          fim: false,
+          resumo: { mensagemId: f.mensagem_id, sentAt: f.sent_at, texto: resposta.resumo },
+          ...campos,
+        };
+      } catch (err) {
+        if (eDeFronteira(err)) throw err;
+        log.warn('gancho antes do turno: resumo do formulário não gravado — o modelo lê o texto neutro', {
+          erro: err instanceof Error ? err.name : 'desconhecido',
+        });
+      }
+    }
+    return { fim: false, ...campos };
+  }
+
+  // segurar
+  const itens = resposta.enviar ?? [];
+  if (itens.some((i) => i.tipo === 'interativo')) {
+    if (canalInterativo === null) canalInterativo = await canalDoNumeroEnviaInterativo(ctx);
+    if (!canalInterativo) {
+      log.warn('gancho antes do turno: canal sem mensagem interativa — o turno segue para o modelo');
+      await anotarComCuidado(ctx, { situacao: 'modelo', motivo: 'canal_sem_interativo' });
+      return { fim: false };
+    }
+  }
+  for (const [i, item] of itens.entries()) {
+    const desfecho = await enviarItem(ctx, item, -(i + 1), canalInterativo === true);
+    if (desfecho !== 'ok') {
+      log.warn('gancho antes do turno: envio não saiu — o turno segue para o modelo, sem gravar', {
+        item: i + 1,
+        desfecho,
+      });
+      await anotarComCuidado(ctx, { situacao: 'modelo', motivo: `envio_${desfecho}`.slice(0, 60) });
+      return { fim: false };
+    }
+  }
+  await aplicarGravar(ctx, card, resposta.gravar);
+  log.info('gancho antes do turno respondeu o cliente — turno encerrado sem o modelo', { enviadas: itens.length });
+  return { fim: true };
+}
+
+async function anotarComCuidado(ctx: ContextoDoGancho, d: DecisaoAnotada): Promise<void> {
+  try {
+    await anotarNoJob(ctx.pool, ctx.job, d);
+  } catch (err) {
+    if (eDeFronteira(err)) throw err;
+    // Sem a anotação, a re-execução pergunta de novo; o ledger ainda segura o que
+    // já saiu com o mesmo conteúdo.
+    ctx.log.warn('gancho antes do turno: decisão não anotada no job', {
+      erro: err instanceof Error ? err.name : 'desconhecido',
+    });
+  }
+}
+
+async function lerCardComCuidado(ctx: ContextoDoGancho): Promise<CardDoContato | null> {
+  try {
+    return await lerCardDoContato(ctx.pool, ctx.tenantId, ctx.contactId);
+  } catch (err) {
+    if (eDeFronteira(err)) throw err;
+    return null;
+  }
+}
+
+async function canalDoNumeroEnviaInterativo(ctx: ContextoDoGancho): Promise<boolean> {
+  const { rows } = await ctx.pool.query<{ provider: string | null }>(
+    'select provider from channel_sessions where organization_id = $1 and id = $2',
+    [ctx.tenantId, ctx.channelSessionId],
+  );
+  return canalEnviaInterativo(rows[0]?.provider);
+}
+
+/**
+ * `gravar` é efeito de conveniência: falhar aqui não cala o cliente nem desfaz o que
+ * saiu. Fica no log (sem os valores) e o turno segue.
+ */
+async function aplicarGravar(
+  ctx: ContextoDoGancho,
+  card: CardDoContato | null,
+  gravar: RespostaDoGancho['gravar'],
+): Promise<boolean> {
+  if (!gravar) return false;
+  if (card === null) {
+    ctx.log.warn('gancho antes do turno: sem card do funil para gravar — nada gravado');
+    return false;
+  }
+  try {
+    await gravarNoCard(ctx.pool, ctx.tenantId, card.id, gravar);
+    return true;
+  } catch (err) {
+    if (eDeFronteira(err)) throw err;
+    ctx.log.warn('gancho antes do turno: gravar no card falhou', {
+      erro: err instanceof Error ? err.name : 'desconhecido',
+    });
+    return false;
+  }
+}
+
+type DesfechoDoItem = 'ok' | 'vetado' | ChannelSendResult['kind'] | 'erro';
+
+/** O texto que a linha da conversa mostra para um interativo. */
+const textoDoInterativo = (interactive: Record<string, unknown>): string => {
+  const corpo = objeto(interactive.body);
+  const texto = typeof corpo?.text === 'string' ? corpo.text.trim() : '';
+  return texto !== '' ? texto : `[${String(interactive.type)}]`;
+};
+
+async function enviarItem(
+  ctx: ContextoDoGancho,
+  item: NonNullable<RespostaDoGancho['enviar']>[number],
+  seq: number,
+  canalOficial: boolean,
+): Promise<DesfechoDoItem> {
+  const interactive: ({ type: string } & Record<string, unknown>) | undefined =
+    item.tipo === 'interativo' ? item.interactive : undefined;
+  const body = item.tipo === 'interativo' ? textoDoInterativo(item.interactive) : item.texto;
+  try {
+    const cadeia = await runBeforeSend({
+      pool: ctx.pool,
+      log: ctx.log,
+      tenantId: ctx.tenantId,
+      leadId: ctx.contactId,
+      jobId: ctx.job.id,
+      channelSessionId: ctx.channelSessionId,
+      body,
+      optedOutThisTurn: ctx.optedOutThisTurn,
+      // Ver o cabeçalho: no canal oficial o anti-spinning vetaria o formulário a
+      // partir do terceiro lead na janela do número.
+      enforceSpinning: !canalOficial,
+      crmDailyLimit: null,
+      resposta: true,
+      now: ctx.now(),
+      ...(ctx.sleep !== undefined ? { sleep: ctx.sleep } : {}),
+      ...(ctx.lgpd !== undefined ? { lgpd: ctx.lgpd } : {}),
+      agentId: ctx.agentId,
+      ...(ctx.disclosureMode !== undefined ? { disclosureMode: ctx.disclosureMode } : {}),
+      ...(ctx.agentOperation !== undefined ? { agentOperation: ctx.agentOperation } : {}),
+      send: (finalBody) => {
+        // A apresentação automática da 1ª mensagem emenda o corpo: no interativo, ela
+        // vai no texto do próprio balão. `identidade` guarda o texto de antes, para a
+        // re-execução reconhecer o envio (o hash do interativo ignora o texto do balão).
+        const emendado = finalBody !== body;
+        const final =
+          interactive !== undefined && emendado
+            ? { ...interactive, body: { ...(objeto(interactive.body) ?? {}), text: finalBody } }
+            : interactive;
+        return ctx.channel.send({
+          ...(ctx.agentOperation !== undefined ? { agentOperation: ctx.agentOperation } : {}),
+          tenantId: ctx.tenantId,
+          leadId: ctx.contactId,
+          jobId: ctx.job.id,
+          jobClaim: claimOfJob(ctx.job),
+          seq,
+          conversationId: ctx.conversationId,
+          body: finalBody,
+          ...(emendado ? { identidade: body } : {}),
+          ...(final !== undefined ? { interactive: final } : {}),
+          origem: ORIGEM_DO_GANCHO,
+        });
+      },
+    });
+    if (cadeia.status === 'vetoed') {
+      ctx.log.info('gancho antes do turno: envio vetado pela cadeia', { code: cadeia.code });
+      return 'vetado';
+    }
+    return OK_DO_GANCHO.has(cadeia.outcome.kind) ? 'ok' : cadeia.outcome.kind;
+  } catch (err) {
+    if (eDeFronteira(err)) throw err;
+    ctx.log.warn('gancho antes do turno: envio lançou erro', { erro: err instanceof Error ? err.name : 'desconhecido' });
+    return 'erro';
+  }
+}
+
+/** `metadata.origem` das mensagens que o gancho envia. */
+export const ORIGEM_DO_GANCHO = 'pre_turn_hook';

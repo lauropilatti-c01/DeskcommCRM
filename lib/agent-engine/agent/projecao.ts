@@ -78,6 +78,11 @@ export interface ContextoProjetado {
    * não passa cru).
    */
   ultima_proposta: { numero_e_ano: string | null; status: string; motivo_recusa: string | null } | null;
+  /**
+   * (C01, -c01.5) Os campos do card (`LeadContext.campos_do_card`), já compactos. Passam
+   * pela mesma régua do retorno de ferramenta: chave com cara de identificador sai.
+   */
+  campos_do_card?: Record<string, unknown>;
   mensagens: MensagemProjetada[];
 }
 
@@ -126,6 +131,9 @@ export function projetarContexto(ctx: LeadContext): ContextoProjetado {
             status: ROTULO_STATUS_PROPOSTA[ctx.last_proposal.status] ?? ctx.last_proposal.status,
             motivo_recusa: ctx.last_proposal.decision_reason,
           },
+    ...(ctx.campos_do_card !== undefined
+      ? { campos_do_card: projetarRetornoDeTool(ctx.campos_do_card) as Record<string, unknown> }
+      : {}),
     mensagens: ctx.messages.map((m) => {
       const base: MensagemProjetada = {
         // 'inbound'/'outbound' é vocabulário de sistema e já apareceu parafraseado

@@ -17,6 +17,7 @@ import { deriveLgpdFromContact, type LgpdInput } from '../../guardrails/lgpd/leg
 import { isoLocalComOffset } from '@/lib/tempo/agora';
 import { logger } from '@/lib/logger';
 import { nomeDoContato } from '@/lib/contacts/rotulo-do-contato';
+import { camposCompactosDoCard, lerCardDoContato } from './card-do-contato';
 
 /**
  * Heurística conservadora de contagem: ~3,5 chars/token para pt-br (BPE real fica
@@ -133,6 +134,14 @@ export interface LeadContext {
    * de criar).
    */
   last_proposal?: UltimaProposta | null;
+  /**
+   * (C01, -c01.5) Os campos do card do funil, compactos (`camposCompactosDoCard`): só
+   * valores curtos, sem chave `_`, sem JSON grande. Até aqui o turno não via campo
+   * nenhum do card e o agente perguntava de novo o que já estava gravado (o formulário,
+   * por exemplo). Ausente quando não há card ou campo legível. Opcional pelo mesmo
+   * motivo de `contact_id`.
+   */
+  campos_do_card?: Record<string, string | number | boolean>;
   /** Últimas N mensagens, da mais antiga para a mais nova. */
   messages: LeadContextMessage[];
 }
@@ -277,6 +286,19 @@ export async function getLeadContext(
     });
   }
 
+  // (C01, -c01.5) Os campos do card, compactos. Falha aberta como a proposta: o turno
+  // segue sem eles.
+  let campos_do_card: Record<string, string | number | boolean> = {};
+  try {
+    const card = await lerCardDoContato(db, input.tenantId, input.leadId);
+    campos_do_card = card ? camposCompactosDoCard(card.campos) : {};
+  } catch (err) {
+    logger.warn('lead-context: leitura do card falhou — contexto segue sem os campos', {
+      organizationId: input.tenantId,
+      erro: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   const history: HistoryRow[] = conversationId
     ? (
         await db.query<HistoryRow>(
@@ -337,6 +359,7 @@ export async function getLeadContext(
       conversation_id: conversationId,
       last_human_decision: lastHumanDecision,
       last_proposal,
+      ...(Object.keys(campos_do_card).length > 0 ? { campos_do_card } : {}),
     },
     history,
     knobs.maxTokens,

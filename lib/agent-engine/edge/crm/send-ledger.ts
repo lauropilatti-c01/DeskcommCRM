@@ -108,6 +108,13 @@ function canonico(valor: unknown): string {
   }
   return JSON.stringify(valor) ?? "null";
 }
+/** (C01, -c01.5) O interativo sem `body.text`, para o hash do conteúdo. */
+function interativoSemTexto(interactive: object): object {
+  const corpo = (interactive as { body?: unknown }).body;
+  if (corpo === null || typeof corpo !== "object" || Array.isArray(corpo)) return interactive;
+  const { text: _texto, ...resto } = corpo as Record<string, unknown>;
+  return { ...interactive, body: resto };
+}
 /**
  * (C01) A identidade do CONTEÚDO de um envio, gravada em `body_hash` e usada para
  * reconhecer, em qualquer posição do job, o que o canal já aceitou.
@@ -124,7 +131,11 @@ export function hashDoConteudo(
 ): string {
   const h = createHash("sha256");
   if (input.interactive !== undefined) {
-    h.update("interactive\u0000").update(canonico(input.interactive)).update("\u0000");
+    // (C01, -c01.5) Sem o texto do balão (`body.text`): o texto entra pela `identidade`
+    // ou pelo `body`, como em todo envio. A apresentação automática da 1ª mensagem
+    // emenda o texto do balão, e só na 1ª execução: com ele no hash, a re-execução não
+    // reconhecia o interativo já aceito.
+    h.update("interactive\u0000").update(canonico(interativoSemTexto(input.interactive))).update("\u0000");
   }
   if (input.template !== undefined) h.update("template\u0000").update(canonico(input.template)).update("\u0000");
   if (input.media !== undefined) h.update("media\u0000").update(canonico(input.media)).update("\u0000");
@@ -424,6 +435,8 @@ export async function estadoInicialDoJob(
   const falhadas: Array<{ seq: number; chave: string }> = [];
   for (const row of rows) {
     const seq = Number(row.seq);
+    // (C01, -c01.5) Posição negativa falhada é do gancho antes do turno: o modelo não a herda.
+    if (row.status === "failed" && seq < 0) continue;
     if (row.status === "accepted") {
       enviadas += 1;
       if (seq > posicao) posicao = seq;

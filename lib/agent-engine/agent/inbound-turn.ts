@@ -115,6 +115,8 @@ import {
 } from "./abertura/checkpoint";
 import { buildOpeningMessage, ritualBlocks } from "./abertura/ritual";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
+import { rodarGanchoAntesDoTurno, trocarResumoNoContexto, type GanchoAntesDoTurnoConfig } from './gancho-antes-do-turno';
+import { camposCompactosDoCard } from '../edge/crm/card-do-contato';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { applyScheduleFollowup, type FollowupWindowKnobs } from './schedule-followup';
 import { podeExporScheduleFollowup } from '@/lib/followup/callback-policy';
@@ -1906,6 +1908,12 @@ export interface InboundTurnKnobs {
    * Ausente = `FRASE_DE_ESPERA_PADRAO`.
    */
   fraseDeEspera?: string;
+  /**
+   * (C01, -c01.5) O gancho antes do turno (AGENT_PRE_TURN_HOOK_URL / _SECRET /
+   * _TIMEOUT_MS). Ausente = o turno é o de antes, sem nenhuma chamada a mais.
+   * Ver `gancho-antes-do-turno.ts`.
+   */
+  ganchoAntesDoTurno?: GanchoAntesDoTurnoConfig;
   /** atraso do reagendamento em veto/queued herdado da F2-06 (SEND_QUEUED_RETRY_MS) */
   queuedRetryDelayMs: number;
   /**
@@ -3095,7 +3103,9 @@ async function executarTurnoDoAgente(
     // sumiu) — ambos re-tentam pela fila e morrem em 'dead' se persistirem.
     throw new Error(`abertura do turno falhou em get_lead_context (${openingContext.error.code})`);
   }
-  const currentInboundText =
+  // (C01, -c01.5) `let`: o gancho antes do turno troca o texto neutro de uma resposta
+  // de formulário pelo resumo dela, depois das checagens que leem o texto neutro.
+  let currentInboundText =
     input.inboundMessageId === undefined
       ? null
       : await loadInboundBodyForJob(pool, {
@@ -3258,6 +3268,46 @@ async function executarTurnoDoAgente(
   // (C01, -c01.3, rodada 3) Nenhum desvio determinístico disparou: a escolta da
   // preparação pode mandar a frase de espera sem conferir a suspeita de opt-out.
   marca.desviosConferidos = true;
+
+  // (C01, -c01.5) GANCHO ANTES DO TURNO (`gancho-antes-do-turno.ts`): um serviço de fora
+  // decide, antes do roteiro e do modelo, se o turno segue (com campos gravados no card e
+  // o resumo do formulário no lugar do texto neutro) ou se ele mesmo responde o cliente.
+  // Sem `AGENT_PRE_TURN_HOOK_URL` o knob não existe e nada aqui roda. Falha do gancho =
+  // o turno segue para o modelo, como antes.
+  const gancho = deps.knobs.ganchoAntesDoTurno;
+  if (gancho !== undefined && !preview && liveJob().kind === 'inbound_turn' && !optedOutThisTurn) {
+    const desfechoDoGancho = await rodarGanchoAntesDoTurno({
+      pool,
+      log: runLog,
+      config: gancho,
+      job: liveJob(),
+      tenantId,
+      contactId: leadId,
+      conversationId: input.conversationId,
+      channelSessionId: input.channelSessionId,
+      inboundMessageId: input.inboundMessageId ?? null,
+      agentId: agentConfig?.agentId ?? null,
+      ...(agentOperation !== undefined ? { agentOperation } : {}),
+      etiquetasDoContato: openingContext.context.contact.tags,
+      channel: liveChannel(),
+      optedOutThisTurn,
+      ...(lgpd !== undefined ? { lgpd } : {}),
+      ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
+      now: clock,
+      ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    });
+    if (desfechoDoGancho.fim) return; // o gancho respondeu o cliente: sem modelo e sem fail-safe
+    if (desfechoDoGancho.camposDoCard !== undefined) {
+      const campos = camposCompactosDoCard(desfechoDoGancho.camposDoCard);
+      if (Object.keys(campos).length > 0) openingContext.context.campos_do_card = campos;
+      else delete openingContext.context.campos_do_card;
+    }
+    if (desfechoDoGancho.resumo !== undefined) {
+      const { resumo } = desfechoDoGancho;
+      trocarResumoNoContexto(openingContext.context.messages, { sentAt: resumo.sentAt, resumo: resumo.texto }, fusoDaOrg);
+      if (resumo.mensagemId === input.inboundMessageId) currentInboundText = resumo.texto;
+    }
+  }
 
   // ROTEIRO DE ATENDIMENTO (módulo opcional `fluxos_atendimento`, #1130). Entra
   // AQUI, depois de tudo que silencia o turno — handoff humano, pausa, pedido de

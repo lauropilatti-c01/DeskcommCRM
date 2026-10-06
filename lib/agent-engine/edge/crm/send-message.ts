@@ -72,6 +72,8 @@ export interface SendMessageInput {
   identidade?: string;
   /** (C01, -c01.5) Mensagem interativa: vai ao handler como `text` + `interactive`. */
   interactive?: { type: string } & Record<string, unknown>;
+  /** (C01, -c01.5) Vai a `metadata.origem` da linha (ex.: `pre_turn_hook`). */
+  origem?: string;
 }
 
 /**
@@ -103,7 +105,7 @@ export function corpoDoEnvio(
     ...(input.body !== '' || !input.media ? { body: input.body } : {}),
     // (C01, -c01.5) Botão, lista ou formulário: a linha segue `text`.
     ...(input.interactive && !input.template && !input.media ? { interactive: input.interactive } : {}),
-    metadata: { idempotency_key: idempotencyKey },
+    metadata: { idempotency_key: idempotencyKey, ...(input.origem ? { origem: input.origem } : {}) },
   };
 }
 

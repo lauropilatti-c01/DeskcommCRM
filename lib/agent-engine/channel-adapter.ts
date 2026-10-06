@@ -61,6 +61,11 @@ export interface ChannelSendInput {
    * `interativo_nao_suportado`), e o desfecho chega como `unavailable`.
    */
   interactive?: { type: string } & Record<string, unknown>;
+  /**
+   * (C01, -c01.5) Quem compôs o envio, quando não é o modelo: vai a `metadata.origem`
+   * da linha da conversa (o gancho antes do turno usa `pre_turn_hook`). Ausente = nada.
+   */
+  origem?: string;
 }
 
 /**
