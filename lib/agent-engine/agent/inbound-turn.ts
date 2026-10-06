@@ -3360,7 +3360,8 @@ async function executarTurnoDoAgente(
   // (C01, -c01.6) A reconsulta pedida pelo gancho não tem mensagem nova do cliente: o
   // modelo nunca responde nela (nem com o gancho em falha, nem num turno em que o
   // gancho não roda): responderia de novo ao que já foi respondido.
-  if (eReconsultaDoGancho(liveJob().payload)) {
+  // Na prévia (tela Testar, rascunho do modo assistido) não há job: `liveJob()` lançaria.
+  if (!preview && eReconsultaDoGancho(liveJob().payload)) {
     runLog.info('reconsulta do gancho encerrada sem o modelo', { kind: liveJob().kind });
     return;
   }

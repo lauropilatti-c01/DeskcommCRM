@@ -283,6 +283,12 @@ describe("a reconsulta no turno", () => {
 
   it("o modelo nunca responde no turno marcado: o retorno vem antes do roteiro", () => {
     const depoisDoGancho = turno.slice(turno.indexOf("if (desfechoDoGancho.fim) return;"), turno.indexOf("const roteiro ="));
-    expect(depoisDoGancho).toMatch(/if \(eReconsultaDoGancho\(liveJob\(\)\.payload\)\) \{[\s\S]*?return;/);
+    expect(depoisDoGancho).toMatch(/if \(!preview && eReconsultaDoGancho\(liveJob\(\)\.payload\)\) \{[\s\S]*?return;/);
+  });
+
+  it("na prévia (sem job) nenhuma guarda da reconsulta chama `liveJob()` sem antes conferir a prévia", () => {
+    const usos = [...turno.matchAll(/^.*eReconsultaDoGancho\(liveJob\(\)\.payload\).*$/gm)].map((m) => m[0]);
+    expect(usos.length).toBeGreaterThan(0);
+    for (const linha of usos) expect(linha).toMatch(/!preview &&|preview !== undefined \|\|/);
   });
 });
