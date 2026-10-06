@@ -30,6 +30,47 @@ import { CHANNEL_PROVIDER_META } from "./capabilities";
  */
 export const TEXTO_DA_RESPOSTA_DE_FORMULARIO = "Formulário respondido";
 
+/** Quantas respostas do formulário o texto montado mostra, e o teto de cada valor. */
+const TETO_DE_RESPOSTAS_NO_TEXTO = 30;
+const TETO_DO_VALOR_NO_TEXTO = 200;
+
+/**
+ * O que o MODELO lê de uma resposta de formulário que ainda não tem resumo (o gancho
+ * antes do turno falhou ou está desligado): o texto neutro e, abaixo dele, uma
+ * resposta por linha (`chave: valor`), montadas do `response_json`, sem o
+ * `flow_token`. Determinístico: a mesma resposta dá o mesmo texto. Sem resposta
+ * legível, só o texto neutro.
+ *
+ * A linha da conversa continua com o texto neutro: quem lê isto é o contexto do
+ * turno (`corpoDaMensagem`), e as checagens da entrada não o veem.
+ */
+export function textoDaRespostaDeFormulario(resposta: unknown): string {
+  if (resposta === null || typeof resposta !== "object" || Array.isArray(resposta)) {
+    return TEXTO_DA_RESPOSTA_DE_FORMULARIO;
+  }
+  const linhas: string[] = [];
+  for (const [chave, valor] of Object.entries(resposta as Record<string, unknown>)) {
+    if (linhas.length >= TETO_DE_RESPOSTAS_NO_TEXTO) break;
+    if (chave === "flow_token") continue;
+    const texto = valorLegivel(valor);
+    if (texto !== null) linhas.push(`${chave}: ${texto.slice(0, TETO_DO_VALOR_NO_TEXTO)}`);
+  }
+  return linhas.length === 0
+    ? TEXTO_DA_RESPOSTA_DE_FORMULARIO
+    : `${TEXTO_DA_RESPOSTA_DE_FORMULARIO}:\n${linhas.join("\n")}`;
+}
+
+function valorLegivel(valor: unknown): string | null {
+  if (valor === null || valor === undefined) return null;
+  if (typeof valor === "string") return valor.trim() === "" ? null : valor.trim();
+  if (typeof valor === "number" || typeof valor === "boolean") return String(valor);
+  if (Array.isArray(valor) && valor.every((v) => ["string", "number", "boolean"].includes(typeof v))) {
+    const t = valor.map((v) => String(v).trim()).filter((v) => v !== "").join(", ");
+    return t === "" ? null : t;
+  }
+  return JSON.stringify(valor);
+}
+
 /** `true` quando o canal sabe entregar `interactive` (botão, lista, formulário). */
 export function canalEnviaInterativo(provider: string | null | undefined): boolean {
   return provider === CHANNEL_PROVIDER_META;

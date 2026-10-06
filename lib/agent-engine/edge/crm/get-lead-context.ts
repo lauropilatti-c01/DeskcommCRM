@@ -17,6 +17,7 @@ import { deriveLgpdFromContact, type LgpdInput } from '../../guardrails/lgpd/leg
 import { isoLocalComOffset } from '@/lib/tempo/agora';
 import { logger } from '@/lib/logger';
 import { nomeDoContato } from '@/lib/contacts/rotulo-do-contato';
+import { TEXTO_DA_RESPOSTA_DE_FORMULARIO, textoDaRespostaDeFormulario } from '@/lib/channels/interativo';
 import { camposCompactosDoCard, lerCardDoContato } from './card-do-contato';
 
 /**
@@ -56,6 +57,13 @@ export interface LeadContextMessage {
   type?: string;
   media_storage_path?: string | null;
   media_mime?: string | null;
+  /**
+   * (C01, -c01.5) Resposta de formulário (WhatsApp Flows, `nfm_reply`). O texto dela é
+   * o resumo do gancho ou as respostas montadas, não a fala do cliente: fica fora das
+   * checagens determinísticas da entrada (pedido de humano, palavra de passagem,
+   * suspeita de opt-out — `semRespostasDeFormulario`). Ausente nas outras mensagens.
+   */
+  formulario?: true;
 }
 
 /**
@@ -208,12 +216,32 @@ interface HistoryRow {
   media_mime: string | null;
   media_derived_text: string | null;
   sent_at: Date;
+  e_formulario?: boolean | null;
+  formulario_resposta?: unknown;
 }
+
+/**
+ * (C01, -c01.5) As duas colunas da resposta de formulário (`metadata.interactive`,
+ * `nfm_reply`) que o corpo da mensagem lê: é formulário? e o `response_json` lido.
+ */
+export const COLUNAS_DO_FORMULARIO = `(metadata->'interactive'->>'type') = 'nfm_reply' as e_formulario,
+                  case when metadata->'interactive'->>'type' = 'nfm_reply'
+                       then metadata->'interactive'->'response' end as formulario_resposta`;
 
 export async function getLeadContext(
   db: Queryable,
   _cfg: CrmEdgeConfig,
-  input: { tenantId: string; leadId: string; conversationId?: string | null; fuso: string },
+  input: {
+    tenantId: string;
+    leadId: string;
+    conversationId?: string | null;
+    fuso: string;
+    /**
+     * (C01, -c01.5) Mostrar os campos do card (`campos_do_card`)? Só o turno com o
+     * gancho antes do turno ligado pede; sem ele, o contexto é o da -c01.3.
+     */
+    camposDoCard?: boolean;
+  },
   knobs: LeadContextKnobs,
 ): Promise<LeadContextResult> {
   const { rows: contactRows } = await db.query<ContactRow>(
@@ -286,24 +314,27 @@ export async function getLeadContext(
     });
   }
 
-  // (C01, -c01.5) Os campos do card, compactos. Falha aberta como a proposta: o turno
-  // segue sem eles.
+  // (C01, -c01.5) Os campos do card, compactos, só quando o turno pede (o gancho antes
+  // do turno ligado). Falha aberta como a proposta: o turno segue sem eles.
   let campos_do_card: Record<string, string | number | boolean> = {};
-  try {
-    const card = await lerCardDoContato(db, input.tenantId, input.leadId);
-    campos_do_card = card ? camposCompactosDoCard(card.campos) : {};
-  } catch (err) {
-    logger.warn('lead-context: leitura do card falhou — contexto segue sem os campos', {
-      organizationId: input.tenantId,
-      erro: err instanceof Error ? err.message : String(err),
-    });
+  if (input.camposDoCard === true) {
+    try {
+      const card = await lerCardDoContato(db, input.tenantId, input.leadId);
+      campos_do_card = card ? camposCompactosDoCard(card.campos) : {};
+    } catch (err) {
+      logger.warn('lead-context: leitura do card falhou — contexto segue sem os campos', {
+        organizationId: input.tenantId,
+        erro: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const history: HistoryRow[] = conversationId
     ? (
         await db.query<HistoryRow>(
           `select direction, type, body, media_url, media_storage_path, media_mime,
-                  media_derived_text, sent_at
+                  media_derived_text, sent_at,
+                  ${COLUNAS_DO_FORMULARIO}
            from messages
            where organization_id = $1 and conversation_id = $2
              and direction in ('inbound', 'outbound')
@@ -375,6 +406,9 @@ export interface CorpoDaMensagemRow {
   media_url: string | null;
   media_storage_path: string | null;
   media_derived_text: string | null;
+  /** (C01, -c01.5) `COLUNAS_DO_FORMULARIO`; ausentes em quem não as lê. */
+  e_formulario?: boolean | null;
+  formulario_resposta?: unknown;
 }
 
 /**
@@ -397,6 +431,11 @@ export interface CorpoDaMensagemRow {
  * `messages` para o prompt passa por aqui, senão a composição volta a divergir.
  */
 export function corpoDaMensagem(m: CorpoDaMensagemRow): string {
+  // (C01, -c01.5) Resposta de formulário ainda com o texto neutro (sem o resumo do
+  // gancho): o modelo lê as respostas montadas do `response_json`.
+  if (m.e_formulario === true && m.body === TEXTO_DA_RESPOSTA_DE_FORMULARIO) {
+    return textoDaRespostaDeFormulario(m.formulario_resposta);
+  }
   const hasMedia = Boolean(m.media_storage_path || m.media_url);
   const derived = m.media_derived_text;
   // Onda 3: legenda e derivado (transcrição/visão/pdf) COEXISTEM, e o derivado
@@ -432,6 +471,7 @@ function fitToBudget(
       // interface acima e o cabeçalho de `isoLocalComOffset`.
       sent_at: isoLocalComOffset(m.sent_at, fuso),
       ...(hasMedia ? { type: m.type, media_storage_path: m.media_storage_path, media_mime: m.media_mime } : {}),
+      ...(m.e_formulario === true ? { formulario: true as const } : {}),
     };
   });
   const build = (msgs: LeadContextMessage[]): LeadContext => ({ ...base, messages: msgs });

@@ -626,7 +626,8 @@ describe("(C01) a ligação no código", () => {
     );
     expect(LEDGER).toContain('return h.update(input.identidade ?? input.body).digest("hex");');
     expect(LEDGER).toMatch(
-      /input: \{ tenantId: string; jobId: string \} & Pick<Intent, "body" \| "media" \| "template" \| "identidade">,/,
+      // (C01, -c01.5, 2ª rodada) `interactive` entrou: a re-execução do gancho confere o interativo registrado.
+      /input: \{ tenantId: string; jobId: string \} & Pick<Intent, "body" \| "media" \| "template" \| "identidade" \| "interactive">,/,
     );
   });
 

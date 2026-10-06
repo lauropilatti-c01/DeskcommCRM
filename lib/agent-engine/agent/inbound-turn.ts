@@ -42,6 +42,7 @@ import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 
 import { withFields, type Logger } from '../obs/logger';
 import {
+  COLUNAS_DO_FORMULARIO,
   corpoDaMensagem,
   getLeadContext,
   textoDoClienteNaUltimaMensagem,
@@ -1020,8 +1021,20 @@ export async function loadInboundBodyForJob(
   db: Queryable,
   input: { tenantId: string; conversationId: string; inboundMessageId: string },
 ): Promise<string | null> {
+  return (await mensagemFixadaDoJob(db, input))?.corpo ?? null;
+}
+
+/**
+ * (C01, -c01.5) A linha canônica do job e se ela é uma resposta de formulário (que fica
+ * fora das checagens determinísticas, como em `semRespostasDeFormulario`).
+ */
+export async function mensagemFixadaDoJob(
+  db: Queryable,
+  input: { tenantId: string; conversationId: string; inboundMessageId: string },
+): Promise<{ corpo: string; formulario: boolean } | null> {
   const result = await db.query<CorpoDaMensagemRow>(
-    `select type, body, media_url, media_storage_path, media_derived_text
+    `select type, body, media_url, media_storage_path, media_derived_text,
+            ${COLUNAS_DO_FORMULARIO}
        from messages
       where organization_id = $1
         and conversation_id = $2
@@ -1031,7 +1044,7 @@ export async function loadInboundBodyForJob(
     [input.tenantId, input.conversationId, input.inboundMessageId],
   );
   const row = result.rows[0];
-  return row === undefined ? null : corpoDaMensagem(row);
+  return row === undefined ? null : { corpo: corpoDaMensagem(row), formulario: row.e_formulario === true };
 }
 
 /**
@@ -1475,14 +1488,16 @@ async function mensagensSemSuspeitaDeOptOut(
   log: Logger,
 ): Promise<boolean> {
   try {
-    const { rows } = await pool.query<{ direction: string; body: string | null }>(
-      `select direction, body from messages
+    const { rows } = await pool.query<{ direction: string; body: string | null; formulario: boolean | null }>(
+      `select direction, body, (metadata->'interactive'->>'type') = 'nfm_reply' as formulario from messages
         where organization_id = $1 and conversation_id = $2
         order by created_at desc limit 20`,
       [tenantId, conversationId],
     );
     for (const m of rows) {
       if (m.direction === 'outbound') break;
+      // (C01, -c01.5) Resposta de formulário não é fala do cliente (`semRespostasDeFormulario`).
+      if (m.formulario === true) continue;
       if (m.body !== null && detectAmbiguousOptOut(m.body)) return false;
     }
     return true;
@@ -2184,6 +2199,20 @@ export function inboundsNaoRespondidos(messages: readonly LeadContextMessage[]):
 }
 
 /**
+ * (C01, -c01.5) O histórico sem as respostas de formulário de entrada. É dele que sai
+ * `inboundsPendentes`, a lista que as checagens determinísticas leem (pedido de
+ * humano, palavra de passagem, suspeita de opt-out, urgência). O texto de uma resposta
+ * de formulário é o resumo do gancho antes do turno ou as respostas montadas
+ * (`corpoDaMensagem`), não a fala do cliente: "atendente" marcado num formulário não é
+ * pedido de humano. Vale em qualquer turno, não só no primeiro: no retry e no job
+ * seguinte o resumo já está na linha. O formulário continua no contexto do modelo e
+ * na tela; só não entra nessa lista (nem, por ela, no briefing da passagem).
+ */
+export function semRespostasDeFormulario(messages: readonly LeadContextMessage[]): LeadContextMessage[] {
+  return messages.filter((m) => !(m.direction === 'inbound' && m.formulario === true));
+}
+
+/**
  * Parâmetros do run que DIFEREM entre inbound (F2-09) e follow-up (F3-03): os ids
  * de envio (de fonte confiável — payload do drain no inbound, row do lead no
  * follow-up, nunca do payload do modelo) e a montagem da mensagem de abertura,
@@ -2362,7 +2391,8 @@ export async function deteccoesDeterministicasDoAssistido(
     );
     if (abertura.ok) {
       contextoLido = true;
-      inboundsPendentes = inboundsNaoRespondidos(abertura.context.messages);
+      // (C01, -c01.5) Sem as respostas de formulário (`semRespostasDeFormulario`).
+      inboundsPendentes = inboundsNaoRespondidos(semRespostasDeFormulario(abertura.context.messages));
       optedOutThisTurn = abertura.context.contact.is_blocked;
       lgpd = abertura.lgpd;
     } else {
@@ -2379,12 +2409,12 @@ export async function deteccoesDeterministicasDoAssistido(
   // falhou, e aí a mensagem fixada no job é o que temos.
   if (!contextoLido && args.inboundMessageId !== undefined) {
     try {
-      const fixada = await loadInboundBodyForJob(pool, {
+      const fixada = await mensagemFixadaDoJob(pool, {
         tenantId,
         conversationId,
         inboundMessageId: args.inboundMessageId,
       });
-      if (fixada !== null && fixada.trim() !== '') inboundsPendentes = [fixada];
+      if (fixada !== null && !fixada.formulario && fixada.corpo.trim() !== '') inboundsPendentes = [fixada.corpo];
     } catch (err) {
       log.warn('modo assistido: mensagem fixada não lida — sem detecção neste turno', {
         error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
@@ -3095,7 +3125,14 @@ async function executarTurnoDoAgente(
     : await getLeadContext(
         pool,
         deps.crmCfg,
-        { tenantId, leadId, conversationId: input.conversationId, fuso: fusoDaOrg },
+        {
+          tenantId,
+          leadId,
+          conversationId: input.conversationId,
+          fuso: fusoDaOrg,
+          // (C01, -c01.5) Os campos do card só com o gancho antes do turno ligado.
+          camposDoCard: deps.knobs.ganchoAntesDoTurno !== undefined,
+        },
         turnContextKnobs,
       );
   if (!openingContext.ok) {
@@ -3187,7 +3224,8 @@ async function executarTurnoDoAgente(
   //    drain coalesce no job da primeira.
   const mensagemDoJob =
     currentInboundText ?? latestInboundSignal(openingContext.context.messages);
-  const inboundsPendentes = inboundsNaoRespondidos(openingContext.context.messages);
+  // (C01, -c01.5) Sem as respostas de formulário (`semRespostasDeFormulario`).
+  const inboundsPendentes = inboundsNaoRespondidos(semRespostasDeFormulario(openingContext.context.messages));
   if (
     !preview &&
     inboundsPendentes.some(
@@ -4102,7 +4140,13 @@ async function executarTurnoDoAgente(
             : await getLeadContext(
                 pool,
                 deps.crmCfg,
-                { tenantId, leadId, conversationId: input.conversationId, fuso: fusoDaOrg },
+                {
+                  tenantId,
+                  leadId,
+                  conversationId: input.conversationId,
+                  fuso: fusoDaOrg,
+                  camposDoCard: deps.knobs.ganchoAntesDoTurno !== undefined,
+                },
                 turnContextKnobs,
               );
           // Sem esta linha a projeção da abertura seria decorativa: bastaria o

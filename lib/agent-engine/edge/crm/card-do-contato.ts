@@ -98,6 +98,27 @@ export async function lerCardDoContato(
   };
 }
 
+/**
+ * Campo do card que é dado pessoal. Pelo NOME da chave, depois de minúscula, sem
+ * acento e sem separador: `Telefone`, `e-mail`, `nome_completo` saem;
+ * `nome_do_produto` fica. Vale para o pedido ao gancho antes do turno e para o bloco
+ * do modelo (`camposCompactosDoCard`).
+ */
+const CHAVES_DE_DADO_PESSOAL = new Set([
+  'nome', 'name', 'nomecompleto', 'fullname', 'primeironome', 'firstname', 'sobrenome', 'lastname',
+  'cpf', 'rg', 'documento', 'endereco', 'address',
+]);
+const TRECHOS_DE_DADO_PESSOAL = ['telefone', 'phone', 'celular', 'whatsapp', 'email', 'mail'];
+
+export function chaveEDadoPessoal(chave: string): boolean {
+  const k = chave
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  return CHAVES_DE_DADO_PESSOAL.has(k) || TRECHOS_DE_DADO_PESSOAL.some((t) => k.includes(t));
+}
+
 /** Teto de cada valor de texto no bloco do modelo. */
 export const TETO_DO_VALOR_NO_CONTEXTO = 120;
 /** Teto de chaves no bloco do modelo. */
@@ -108,11 +129,13 @@ export const TETO_DO_BLOCO_NO_CONTEXTO = 800;
 /**
  * Os campos do card como o modelo os lê: só valores curtos e legíveis.
  *
- * Fora: chave que começa com `_` (é de quem integra, não do atendimento), valor
- * vazio, objeto (JSON grande vira ruído e come o histórico) e lista que não seja
- * de valores simples. Lista simples vira texto separado por vírgula. Texto passa
- * de `TETO_DO_VALOR_NO_CONTEXTO`: cortado. O bloco inteiro respeita os dois tetos
- * acima, na ordem das chaves; o que não cabe fica de fora.
+ * Fora: chave que começa com `_` (é de quem integra, não do atendimento), chave com
+ * nome de dado pessoal (`chaveEDadoPessoal`: o card não vira segunda cópia do
+ * telefone, do nome ou do e-mail), valor vazio, objeto e texto com cara de JSON
+ * (começa com `{` ou `[`: JSON grande vira ruído e come o histórico), e lista que
+ * não seja de valores simples. Lista simples vira texto separado por vírgula. Texto
+ * passa de `TETO_DO_VALOR_NO_CONTEXTO`: cortado. O bloco inteiro respeita os dois
+ * tetos acima, na ordem das chaves; o que não cabe fica de fora.
  */
 export function camposCompactosDoCard(
   campos: Record<string, unknown>,
@@ -121,7 +144,7 @@ export function camposCompactosDoCard(
   let tamanho = 2;
   for (const [chave, valor] of Object.entries(campos)) {
     if (Object.keys(saida).length >= TETO_DE_CAMPOS_NO_CONTEXTO) break;
-    if (chave.startsWith('_') || chave.trim() === '') continue;
+    if (chave.startsWith('_') || chave.trim() === '' || chaveEDadoPessoal(chave)) continue;
     const compacto = valorCompacto(valor);
     if (compacto === null) continue;
     const custo = JSON.stringify(chave).length + JSON.stringify(compacto).length + 2;
@@ -137,7 +160,7 @@ function valorCompacto(valor: unknown): string | number | boolean | null {
   if (typeof valor === 'boolean') return valor;
   if (typeof valor === 'string') {
     const t = valor.trim();
-    return t === '' ? null : t.slice(0, TETO_DO_VALOR_NO_CONTEXTO);
+    return t === '' || t.startsWith('{') || t.startsWith('[') ? null : t.slice(0, TETO_DO_VALOR_NO_CONTEXTO);
   }
   if (Array.isArray(valor)) {
     if (valor.length === 0) return null;

@@ -8,6 +8,7 @@ import type * as FollowupTurn from "@/lib/agent-engine/agent/followup-turn";
 import type * as Providers from "@/lib/agent-engine/edge/llm/providers";
 import type * as SendLedger from "@/lib/agent-engine/edge/crm/send-ledger";
 import type * as SendMessage from "@/lib/agent-engine/edge/crm/send-message";
+import type * as SpinningStore from "@/lib/agent-engine/spinning/store";
 import type * as Queue from "@/lib/agent-engine/queue/queue";
 import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
 import type * as Handler from "@/app/api/v1/messages/_handler";
@@ -43,6 +44,20 @@ import type { ChannelSendInput } from "@/lib/agent-engine/channel-adapter";
  *   - envio parcial do `segurar` (o 1º saiu, o 2º não): grava, encerra, fica no log;
  *   - o turno de follow-up (`followup_turn`) não chama o gancho;
  *   - a re-execução depois do `segurar` não envia de novo (a anotação no job).
+ *
+ * E os da 2ª rodada da revisão (numeração do pedido):
+ *   1. a resposta do formulário nunca se perde: com o gancho fora do ar no turno dela,
+ *      o modelo lê as respostas (chave: valor, sem o flow_token) e o pedido seguinte a
+ *      leva de novo, até a decisão ser aplicada (`metadata.gancho_processado`); a
+ *      anotação "segue para o modelo" cai com mensagem nova do cliente;
+ *   2. cada mensagem do pedido leva `status` e, na falhada, o código do erro (só o código);
+ *   3. `campos_do_card` só com o gancho ligado, sem telefone nem e-mail do card;
+ *   4. a resposta do formulário fica fora do pedido de humano e da suspeita de opt-out,
+ *      no turno dela e nos seguintes;
+ *   5. na re-execução do `segurar`, o que já saiu vai ao canal sem a cadeia (que o
+ *      vetaria agora), e o canal do número é lido também na decisão anotada;
+ *   6. as posições negativas do ledger têm contador próprio: fora de `enviadas` e de
+ *      `falhadas` do modelo.
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -139,6 +154,7 @@ type Modules = {
   queue: typeof Queue;
   createLogger: typeof ObsLogger.createLogger;
   createFakeRegistry: typeof Providers.createFakeRegistry;
+  spinning: typeof SpinningStore;
 };
 let m: Modules;
 
@@ -418,6 +434,7 @@ beforeAll(async () => {
     queue: await import("@/lib/agent-engine/queue/queue"),
     createLogger: (await import("@/lib/agent-engine/obs/logger")).createLogger,
     createFakeRegistry: (await import("@/lib/agent-engine/edge/llm/providers")).createFakeRegistry,
+    spinning: await import("@/lib/agent-engine/spinning/store"),
   };
 
   await pool.query(
@@ -505,6 +522,12 @@ beforeEach(async () => {
   // A janela do anti-spinning cruza leads e testes: a mesma resposta do modelo seria
   // vetada a partir da terceira vez.
   await pool.query("delete from outbound_copies where organization_id = $1", [ORG]);
+  // O que a passagem ao humano e a janela de 24 h mexem (provas 4 e 5 da 2ª rodada).
+  await pool.query("update contacts set force_human = false where organization_id = $1", [ORG]);
+  await pool.query(
+    "update conversations set bot_silenced_until = null, status = 'open', last_inbound_at = $2 where organization_id = $1",
+    [ORG, MENSAGEM_DO_CLIENTE_EM],
+  );
   await pool.query(
     "update crm_leads set custom_fields = $3::jsonb, tags = $4::text[], contact_id = $5 where organization_id = $1 and id = $2",
     [ORG, CARD, JSON.stringify(CAMPOS_INICIAIS), ETIQUETAS_INICIAIS, CONTACT],
@@ -517,14 +540,19 @@ beforeEach(async () => {
   );
 });
 
-/** A resposta de um formulário como a entrada a grava (item A): texto neutro, original no metadata. */
-async function respostaDeFormulario(): Promise<string> {
+/**
+ * A resposta de um formulário como a entrada a grava (item A): texto neutro, original no
+ * metadata. `body` e `processado` simulam o que uma decisão do gancho já aplicou.
+ */
+async function respostaDeFormulario(
+  opcoes: { resposta?: Record<string, unknown>; body?: string; processado?: boolean } = {},
+): Promise<string> {
   const id = randomUUID();
-  const bruto = '{"flow_token":"tok-teste","pergunta_1":"opcao_a","pergunta_2":"opcao_b"}';
+  const bruto = JSON.stringify(opcoes.resposta ?? { flow_token: "tok-teste", pergunta_1: "opcao_a", pergunta_2: "opcao_b" });
   await pool.query(
     `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
        type, direction, status, body, sent_via, sent_at, metadata)
-     values ($1,$2,$3,$4,$5,'text','inbound','delivered','Formulário respondido','external_device',$6,$7::jsonb)`,
+     values ($1,$2,$3,$4,$5,'text','inbound','delivered',$8,'external_device',$6,$7::jsonb)`,
     [
       id,
       ORG,
@@ -542,11 +570,37 @@ async function respostaDeFormulario(): Promise<string> {
           raw: bruto,
         },
         raw_type: "interactive",
+        ...(opcoes.processado === true ? { gancho_processado: true } : {}),
       }),
+      opcoes.body ?? "Formulário respondido",
     ],
   );
   return id;
 }
+
+/** Uma mensagem nova do cliente, depois de tudo o que já está na conversa. */
+async function novaEntrada(texto: string): Promise<string> {
+  const id = randomUUID();
+  await pool.query(
+    `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+       type, direction, status, body, sent_via, sent_at)
+     values ($1,$2,$3,$4,$5,'text','inbound','delivered',$6,'external_device', now())`,
+    [id, ORG, CONV, SESSION, CONTACT, texto],
+  );
+  return id;
+}
+
+async function passouAoHumano(): Promise<boolean> {
+  const { rows } = await pool.query<{ force_human: boolean; silenciada: boolean }>(
+    `select c.force_human, (v.bot_silenced_until is not null) as silenciada
+       from contacts c join conversations v on v.contact_id = c.id and v.organization_id = c.organization_id
+      where c.organization_id = $1 and c.id = $2 and v.id = $3`,
+    [ORG, CONTACT, CONV],
+  );
+  return rows[0]!.force_human || rows[0]!.silenciada;
+}
+
+const corpos = () => postsNaGraph.map((p) => (p.text as { body: string } | undefined)?.body ?? `[${String(p.type)}]`);
 
 describe("2. sem o gancho no ambiente, o turno é o de antes", () => {
   it("o modelo responde e nenhuma chamada a mais sai (nem ao gancho, nem anotação no job)", async () => {
@@ -560,6 +614,8 @@ describe("2. sem o gancho no ambiente, o turno é o de antes", () => {
     expect((postsNaGraph[0]!.text as { body: string }).body).toBe(RESPOSTA_DO_MODELO);
     expect(await anotacaoDoJob(jobId)).toBeUndefined();
     expect(await card()).toEqual({ custom_fields: CAMPOS_INICIAIS, tags: ETIQUETAS_INICIAIS });
+    // (2ª rodada, item 3) Sem o gancho, o contexto é o da -c01.3: sem o bloco do card.
+    expect(mod.estado.prompts[0]).not.toContain("campos_do_card");
   });
 });
 
@@ -608,6 +664,8 @@ describe("3. `seguir` com `gravar` e `resumo`", () => {
     );
     expect(rows[0]!.body).toBe(RESUMO);
     expect(rows[0]!.metadata.interactive.type).toBe("nfm_reply");
+    // (2ª rodada, item 1a) A decisão sobre esta resposta foi aplicada: o próximo pedido não a leva.
+    expect((rows[0]!.metadata as Record<string, unknown>).gancho_processado).toBe(true);
 
     // O modelo foi chamado e leu o resumo (e não o texto neutro) e os campos do card.
     expect(mod.estado.etapas).toBeGreaterThanOrEqual(1);
@@ -617,6 +675,9 @@ describe("3. `seguir` com `gravar` e `resumo`", () => {
     // Os campos do card, relidos depois do `gravar`: o que o formulário gravou já aparece.
     expect(prompt).toContain("campos_do_card");
     expect(prompt).toContain("respondido_em");
+    // (2ª rodada, item 3) O bloco do card não leva o telefone nem o e-mail guardados nele.
+    expect(prompt).not.toContain("5511988887777");
+    expect(prompt).not.toContain("outro@teste.example");
     expect(postsNaGraph).toHaveLength(1);
     expect((postsNaGraph[0]!.text as { body: string }).body).toBe(RESPOSTA_DO_MODELO);
   });
@@ -851,7 +912,7 @@ describe("5. falha do gancho: o modelo responde e nada é gravado", () => {
     const jobId = await enfileira(MSG);
     expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
     expect(pedidosAoGancho).toHaveLength(1);
-    expect(await anotacaoDoJob(jobId)).toEqual({ situacao: "modelo", motivo: "prazo" });
+    expect(await anotacaoDoJob(jobId)).toEqual({ situacao: "modelo", motivo: "prazo", ate: expect.any(String) });
     await esperaModeloSemGravar(jobId, mod);
   });
 
@@ -860,7 +921,7 @@ describe("5. falha do gancho: o modelo responde e nada é gravado", () => {
     const mod = modelo();
     const jobId = await enfileira(MSG);
     expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
-    expect(await anotacaoDoJob(jobId)).toEqual({ situacao: "modelo", motivo: "status" });
+    expect(await anotacaoDoJob(jobId)).toEqual({ situacao: "modelo", motivo: "status", ate: expect.any(String) });
     await esperaModeloSemGravar(jobId, mod);
   });
 
@@ -876,7 +937,7 @@ describe("5. falha do gancho: o modelo responde e nada é gravado", () => {
       const mod = modelo();
       const jobId = await enfileira(MSG);
       expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
-      expect(await anotacaoDoJob(jobId)).toEqual({ situacao: "modelo", motivo: "resposta_invalida" });
+      expect(await anotacaoDoJob(jobId)).toEqual({ situacao: "modelo", motivo: "resposta_invalida", ate: expect.any(String) });
       await esperaModeloSemGravar(jobId, mod);
     }
   });
@@ -939,8 +1000,234 @@ describe("6. assinatura e dado pessoal", () => {
     });
     expect(pedido.lead.campos).toEqual({ interesse: "plano-b", _interno: { origem: "importacao" } });
     expect(pedido.mensagens).toEqual([
-      { direcao: "entrada", texto: "Oi, quero saber mais", em: "2026-07-30T14:55:00.000Z", interativo: null },
+      { direcao: "entrada", texto: "Oi, quero saber mais", em: "2026-07-30T14:55:00.000Z", interativo: null, status: "delivered" },
     ]);
     expect(pedido.formulario).toBeUndefined();
+  });
+});
+
+// ─── 2ª rodada da revisão da -c01.5 ─────────────────────────────────────────
+
+describe("2ª rodada, 1. a resposta do formulário nunca se perde, nem com o gancho fora do ar", () => {
+  it("gancho com 500 no turno do formulário: o modelo lê as respostas; o pedido seguinte leva o formulário até a decisão ser aplicada", async () => {
+    const formularioId = await respostaDeFormulario();
+    const RESUMO = "Respostas do formulário: pergunta 1, opção A; pergunta 2, opção B.";
+    // Um modelo falso por turno: o de `modelo()` só chama `send_message` na 1ª etapa.
+    const mod = modelo();
+
+    // Turno do formulário, gancho fora do ar.
+    respostaDoGancho = async () => json({ erro: "fora do ar" }, 500);
+    expect(await executa(montaHandler(mod.doGenerate, true), await enfileira(formularioId))).toBeNull();
+    // (1c) O modelo leu as respostas, montadas do `response_json`, sem o flow_token.
+    const promptDoFormulario = mod.estado.prompts[0]!;
+    expect(promptDoFormulario).toContain("pergunta_1: opcao_a");
+    expect(promptDoFormulario).toContain("pergunta_2: opcao_b");
+    expect(promptDoFormulario).not.toContain("tok-teste");
+    expect(promptDoFormulario).not.toContain("flow_token");
+    expect(corpos()).toEqual([RESPOSTA_DO_MODELO]);
+
+    // Turno seguinte (já há uma saída nossa depois do formulário): o pedido leva o formulário.
+    respostaDoGancho = async () =>
+      json({ acao: "seguir", motivo: "formulario", gravar: { campos: { pergunta_1: "opcao_a" } }, resumo: RESUMO });
+    const mod2 = modelo();
+    expect(await executa(montaHandler(mod2.doGenerate, true), await enfileira(await novaEntrada("E agora, o que faço?")))).toBeNull();
+    expect(pedidosAoGancho).toHaveLength(2);
+    const segundo = JSON.parse(pedidosAoGancho[1]!.corpo) as { formulario?: { mensagem_id: string; resposta: unknown } };
+    expect(segundo.formulario).toMatchObject({
+      mensagem_id: formularioId,
+      resposta: { flow_token: "tok-teste", pergunta_1: "opcao_a", pergunta_2: "opcao_b" },
+    });
+    const { rows } = await pool.query<{ body: string; metadata: Record<string, unknown> }>(
+      "select body, metadata from messages where id = $1",
+      [formularioId],
+    );
+    expect(rows[0]!.body).toBe(RESUMO);
+    expect(rows[0]!.metadata.gancho_processado).toBe(true);
+    expect(mod2.estado.prompts[0]).toContain(RESUMO);
+    expect(corpos()).toEqual([RESPOSTA_DO_MODELO, RESPOSTA_DO_MODELO]);
+    expect((await card()).custom_fields).toMatchObject({ pergunta_1: "opcao_a" });
+
+    // Aplicada a decisão, o terceiro pedido não leva mais o formulário.
+    respostaDoGancho = async () => json({ acao: "segurar", motivo: "aguardando", enviar: [] });
+    expect(await executa(montaHandler(modelo().doGenerate, true), await enfileira(await novaEntrada("Obrigado!")))).toBeNull();
+    expect(pedidosAoGancho).toHaveLength(3);
+    expect((JSON.parse(pedidosAoGancho[2]!.corpo) as { formulario?: unknown }).formulario).toBeUndefined();
+  });
+
+  it("a anotação \"segue para o modelo\" cai com mensagem nova do cliente: a re-execução pergunta de novo", async () => {
+    let chamadas = 0;
+    respostaDoGancho = async () => {
+      chamadas += 1;
+      return chamadas === 1 ? json({ erro: "fora do ar" }, 500) : json({ acao: "segurar", motivo: "aguardando", enviar: [] });
+    };
+    const mod = modelo();
+    const handler = montaHandler(mod.doGenerate, true);
+    const jobId = await enfileira(MSG);
+    expect(await executa(handler, jobId)).toBeNull();
+    expect(await anotacaoDoJob(jobId)).toMatchObject({ situacao: "modelo", motivo: "status" });
+    const etapasDaPrimeira = mod.estado.etapas;
+    expect(etapasDaPrimeira).toBeGreaterThanOrEqual(1);
+
+    // A rajada cresceu depois da anotação, e o job volta à fila.
+    await novaEntrada("Só mais uma pergunta");
+    expect(await reexecuta(handler, jobId)).toBeNull();
+
+    expect(chamadas).toBe(2);
+    expect(mod.estado.etapas).toBe(etapasDaPrimeira);
+    expect(await anotacaoDoJob(jobId)).toMatchObject({ situacao: "decidido", resposta: { acao: "segurar", enviar: [] } });
+    expect(corpos()).toEqual([RESPOSTA_DO_MODELO]);
+  });
+});
+
+describe("2ª rodada, 2. cada mensagem do pedido leva o status e, na falhada, só o código do erro", () => {
+  it("o formulário que a Meta recusou (131026) chega ao pedido seguinte como `failed` com o código, sem o texto do erro", async () => {
+    respostaDoGancho = async () => json({ acao: "segurar", enviar: [{ tipo: "interativo", interactive: FORMULARIO }] });
+    const mod = modelo();
+    const handler = montaHandler(mod.doGenerate, true);
+    expect(await executa(handler, await enfileira(MSG))).toBeNull();
+    // O recibo da Meta marca a mensagem falhada (como `status-update.ts` grava).
+    await pool.query(
+      `update messages set status = 'failed', error_code = '131026', error_message = 'Message Undeliverable'
+        where organization_id = $1 and conversation_id = $2 and direction = 'outbound'`,
+      [ORG, CONV],
+    );
+
+    respostaDoGancho = async () => json({ acao: "segurar", motivo: "aguardando", enviar: [] });
+    expect(await executa(handler, await enfileira(await novaEntrada("Não chegou nada aqui")))).toBeNull();
+
+    const corpo = pedidosAoGancho[1]!.corpo;
+    expect(corpo).not.toContain("Undeliverable");
+    const segundo = JSON.parse(corpo) as { mensagens: Array<Record<string, unknown>> };
+    expect(segundo.mensagens.find((x) => x.direcao === "saida")).toEqual({
+      direcao: "saida",
+      texto: FORMULARIO.body.text,
+      em: expect.any(String),
+      interativo: FORMULARIO,
+      status: "failed",
+      erro: "131026",
+    });
+    expect(segundo.mensagens.find((x) => x.texto === "Não chegou nada aqui")).toMatchObject({ status: "delivered" });
+    expect(segundo.mensagens.find((x) => x.texto === "Não chegou nada aqui")).not.toHaveProperty("erro");
+  });
+});
+
+describe("2ª rodada, 4. resposta de formulário fora do pedido de humano e da suspeita de opt-out", () => {
+  it("no turno do próprio formulário: a resposta com cara de pedido de humano não passa ao humano", async () => {
+    const formularioId = await respostaDeFormulario({
+      resposta: { flow_token: "tok-teste", preferencia: "falar com um atendente" },
+    });
+    const mod = modelo();
+    expect(await executa(montaHandler(mod.doGenerate, false), await enfileira(formularioId))).toBeNull();
+
+    expect(await passouAoHumano()).toBe(false);
+    expect(mod.estado.etapas).toBeGreaterThanOrEqual(1);
+    // A resposta continua no contexto do modelo.
+    expect(mod.estado.prompts[0]).toContain("preferencia: falar com um atendente");
+    expect(corpos()).toEqual([RESPOSTA_DO_MODELO]);
+  });
+
+  for (const [caso, resumo] of [
+    ["pedido de humano", "Prefere falar com um atendente"],
+    ["suspeita de opt-out", "Não quero mais receber mensagens"],
+  ] as const) {
+    it(`no turno seguinte: o resumo já gravado (${caso}) fica no texto, mas não dispara a checagem`, async () => {
+      await respostaDeFormulario({ body: resumo, processado: true });
+      const mod = modelo();
+      expect(await executa(montaHandler(mod.doGenerate, true), await enfileira(MSG))).toBeNull();
+
+      expect(await passouAoHumano()).toBe(false);
+      expect(mod.estado.etapas).toBeGreaterThanOrEqual(1);
+      expect(mod.estado.prompts[0]).toContain(resumo);
+      expect(corpos()).toEqual([RESPOSTA_DO_MODELO]);
+      // Processada, ela não vai de novo ao gancho.
+      expect((JSON.parse(pedidosAoGancho[0]!.corpo) as { formulario?: unknown }).formulario).toBeUndefined();
+    });
+  }
+});
+
+describe("2ª rodada, 5. re-execução do `segurar`", () => {
+  it("o que já saiu vai ao canal sem a cadeia: com a janela de 24 h fechada agora, a re-execução não cai no modelo", async () => {
+    respostaDoGancho = async () => json({ acao: "segurar", enviar: [{ tipo: "interativo", interactive: FORMULARIO }] });
+    const mod = modelo();
+    const handler = montaHandler(mod.doGenerate, true);
+    const jobId = await enfileira(MSG);
+    expect(await executa(handler, jobId)).toBeNull();
+    expect(postsNaGraph).toHaveLength(1);
+
+    // Entre as duas execuções, a janela de atendimento fecha (a cadeia vetaria o envio).
+    await pool.query("update conversations set last_inbound_at = $2 where organization_id = $1", [
+      ORG,
+      "2026-07-28T10:00:00Z",
+    ]);
+    expect(await reexecuta(handler, jobId)).toBeNull();
+
+    expect(pedidosAoGancho).toHaveLength(1);
+    expect(mod.estado.etapas).toBe(0);
+    expect(postsNaGraph).toHaveLength(1);
+    expect(await casosAbertos()).toBe(0);
+    expect(await anotacaoDoJob(jobId)).toMatchObject({ situacao: "decidido", resposta: { acao: "segurar" } });
+    const { rows } = await pool.query<{ seq: number; status: string }>(
+      "select seq, status from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(rows).toEqual([{ seq: -1, status: "accepted" }]);
+  });
+
+  it("decisão anotada só com texto: o canal do número é lido mesmo assim (no oficial, o anti-spinning não arma)", async () => {
+    const TEXTO = "Obrigado pela resposta, o formulário está logo acima.";
+    // Duas cópias iguais no número: num canal com anti-spinning, a terceira seria vetada.
+    await m.spinning.recordCopy(pool, ORG, SESSION, TEXTO);
+    await m.spinning.recordCopy(pool, ORG, SESSION, TEXTO);
+    const jobId = await enfileira(MSG);
+    // Uma execução anterior anotou a decisão e caiu antes de enviar.
+    const { rows: ultima } = await pool.query<{ em: string }>(
+      `select max(created_at)::text as em from messages
+        where organization_id = $1 and conversation_id = $2 and direction = 'inbound'`,
+      [ORG, CONV],
+    );
+    await pool.query(
+      `update job_queue set payload = payload || jsonb_build_object('gancho_antes_do_turno', $2::jsonb) where id = $1`,
+      [
+        jobId,
+        JSON.stringify({
+          situacao: "decidido",
+          resposta: { acao: "segurar", motivo: "lembrete", enviar: [{ tipo: "texto", texto: TEXTO }] },
+          formulario: null,
+          ate: ultima[0]!.em,
+        }),
+      ],
+    );
+    const mod = modelo();
+    expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
+
+    expect(pedidosAoGancho).toEqual([]);
+    expect(mod.estado.etapas).toBe(0);
+    expect(corpos()).toEqual([TEXTO]);
+    expect(await anotacaoDoJob(jobId)).toMatchObject({ situacao: "decidido" });
+  });
+});
+
+describe("2ª rodada, 6. posições negativas do ledger com contador próprio", () => {
+  it("o envio parcial do gancho (o 1º saiu, o 2º falhou) não conta em `enviadas` nem em `falhadas` do modelo", async () => {
+    respostaDoGancho = async () =>
+      json({
+        acao: "segurar",
+        enviar: [
+          { tipo: "texto", texto: "Já te mando as perguntas." },
+          { tipo: "interativo", interactive: FORMULARIO },
+        ],
+      });
+    statusDaGraph = [200, 500];
+    const mod = modelo();
+    const jobId = await enfileira(MSG);
+    expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
+
+    expect(await m.ledger.estadoInicialDoJob(pool, { tenantId: ORG, jobId })).toEqual({
+      posicao: 0,
+      enviadas: 0,
+      pendentes: [],
+      falhadas: [],
+      doGancho: 1,
+    });
   });
 });

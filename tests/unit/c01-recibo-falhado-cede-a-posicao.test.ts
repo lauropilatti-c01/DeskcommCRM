@@ -402,7 +402,8 @@ describe("(C01) a ligação pelo código", () => {
     expect(estado).toMatch(
       /\} else \{\s*(?:\/\/[^\n]*\n\s*)*await store\.update\(input\.tenantId, recibo\.id, "failed", mensagem\.id, "handler marcou a mensagem como failed"\);\s*falhadas\.push\(\{ seq, chave: recibo\.id \}\);\s*\}/,
     );
-    expect(estado).toMatch(/return \{ posicao, enviadas, pendentes, falhadas \};/);
+    // (C01, -c01.5, 2ª rodada) `doGancho`: as posições negativas do gancho, só quando há.
+    expect(estado).toMatch(/return \{ posicao, enviadas, pendentes, falhadas, \.\.\.\(doGancho > 0 \? \{ doGancho \} : \{\}\) \};/);
     // O 'failed' não entra em `enviadas` nem em `posicao`: só `continue` depois da lista.
     expect(estado).not.toMatch(
       /if \(row\.status === "failed"\) \{[\s\S]*?enviadas \+= 1[\s\S]*?continue;\s*\}/,

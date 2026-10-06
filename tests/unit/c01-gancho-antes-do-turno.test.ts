@@ -14,13 +14,17 @@ import {
   chaveEDadoPessoal,
   montarPedidoDoGancho,
   rodarGanchoAntesDoTurno,
+  TETO_DO_MOTIVO,
+  TETO_DO_RESUMO,
   trocarResumoNoContexto,
   type GanchoAntesDoTurnoConfig,
   type PedidoDoGancho,
 } from "@/lib/agent-engine/agent/gancho-antes-do-turno";
+import { inboundsNaoRespondidos, semRespostasDeFormulario } from "@/lib/agent-engine/agent/inbound-turn";
 import { turnKnobsFromEnv } from "@/lib/agent-engine/agent/turn-knobs";
 import { camposCompactosDoCard } from "@/lib/agent-engine/edge/crm/card-do-contato";
-import type { LeadContextMessage } from "@/lib/agent-engine/edge/crm/get-lead-context";
+import { corpoDaMensagem, getLeadContext, type LeadContextMessage } from "@/lib/agent-engine/edge/crm/get-lead-context";
+import { textoDaRespostaDeFormulario } from "@/lib/channels/interativo";
 import { corpoDoEnvio } from "@/lib/agent-engine/edge/crm/send-message";
 import { hashDoConteudo } from "@/lib/agent-engine/edge/crm/send-ledger";
 import { loadEnv } from "@/lib/agent-engine/env";
@@ -169,8 +173,11 @@ describe("o pedido não leva dado pessoal", () => {
         if (sql.includes("as em") && sql.includes("limit $3"))
           return {
             rows: [
-              { direction: "outbound", type: "text", body: "Responda o formulário", interativo: { type: "flow" }, em: new Date("2026-07-30T14:56:00Z") },
-              { direction: "inbound", type: "image", body: null, interativo: null, em: new Date("2026-07-30T14:55:00Z") },
+              {
+                direction: "outbound", type: "text", body: "Responda o formulário", interativo: { type: "flow" },
+                em: new Date("2026-07-30T14:56:00Z"), situacao: "failed", erro: "131026",
+              },
+              { direction: "inbound", type: "image", body: null, interativo: null, em: new Date("2026-07-30T14:55:00Z"), situacao: "delivered", erro: null },
             ],
           };
         return { rows: [] };
@@ -195,10 +202,18 @@ describe("o pedido não leva dado pessoal", () => {
       conversa: { id: CONV, canal: "meta", pessoa_atendendo: true, ultima_entrada_em: "2026-07-30T14:55:00.000Z" },
       lead: { id: "card-1", etapa: "novo", campos: { interesse: "plano-b" }, etiquetas: ["etiqueta-antiga", "cliente"] },
       mensagens: [
-        { direcao: "entrada", texto: "[image]", em: "2026-07-30T14:55:00.000Z", interativo: null },
-        { direcao: "saida", texto: "Responda o formulário", em: "2026-07-30T14:56:00.000Z", interativo: { type: "flow" } },
+        { direcao: "entrada", texto: "[image]", em: "2026-07-30T14:55:00.000Z", interativo: null, status: "delivered" },
+        {
+          direcao: "saida", texto: "Responda o formulário", em: "2026-07-30T14:56:00.000Z", interativo: { type: "flow" },
+          status: "failed", erro: "131026",
+        },
       ],
     });
+    // A situação vem da linha (falha que a Meta avisou depois, entrega, leitura); do
+    // erro, só o código: o texto do erro não é lido.
+    const sqlDasMensagens = consultas.find((c) => c.includes("as em") && c.includes("limit $3"))!;
+    expect(sqlDasMensagens).toMatch(/case when status = 'failed' then error_code end as erro/);
+    expect(sqlDasMensagens).not.toMatch(/error_message/);
   });
 });
 
@@ -237,7 +252,11 @@ describe("7. canal que não envia interativo: o gancho não tenta, e o turno seg
     });
     expect(desfecho).toEqual({ fim: false });
     expect(send).not.toHaveBeenCalled();
-    expect(JSON.parse(String(updates.at(-1)![3]))).toEqual({ situacao: "modelo", motivo: "canal_sem_interativo" });
+    expect(JSON.parse(String(updates.at(-1)![3]))).toEqual({
+      situacao: "modelo",
+      motivo: "canal_sem_interativo",
+      ate: "2026-07-30 14:55:00+00",
+    });
     expect(log.warn.mock.calls.map((c) => c[0])).toContain(
       "gancho antes do turno: canal sem mensagem interativa — o turno segue para o modelo",
     );
@@ -245,6 +264,25 @@ describe("7. canal que não envia interativo: o gancho não tenta, e o turno seg
 });
 
 describe("os campos do card que o modelo lê", () => {
+  it("dado pessoal (telefone, nome, e-mail, cpf e variantes) e texto com cara de JSON ficam de fora", () => {
+    expect(
+      camposCompactosDoCard({
+        interesse: "plano-b",
+        telefone: "+5511999990000",
+        Celular_2: "+5511988880000",
+        whatsapp_alternativo: "+5511977770000",
+        nome: "Ana",
+        "Nome Completo": "Ana Lima",
+        email: "ana@teste.example",
+        "E-mail": "ana2@teste.example",
+        cpf: "000.000.000-00",
+        qualificacao_datas: '{"inicio":"2026-07-01","fim":"2026-07-30"}',
+        lista_em_json: '["a","b"]',
+        nome_do_produto: "Plano B",
+      }),
+    ).toEqual({ interesse: "plano-b", nome_do_produto: "Plano B" });
+  });
+
   it("sem chave `_`, sem objeto, texto curto, lista simples vira texto, tetos de chaves e de tamanho", () => {
     expect(
       camposCompactosDoCard({
@@ -277,6 +315,17 @@ describe("o resumo no contexto já lido pelo turno", () => {
     ];
     expect(trocarResumoNoContexto(msgs, { sentAt: "2026-07-01T13:00:00.000Z", resumo: "Resumo antigo" }, fuso)).toBe(true);
     expect(msgs.map((x) => x.body)).toEqual(["Resumo antigo", "Formulário respondido", "Formulário respondido"]);
+  });
+
+  it("acha a resposta pela marca de formulário, com as respostas montadas no lugar do texto neutro", () => {
+    const fuso = "America/Sao_Paulo";
+    const msgs: LeadContextMessage[] = [
+      { direction: "inbound", body: "Resumo de antes", sent_at: "2026-07-01T10:00:00-03:00", formulario: true },
+      { direction: "inbound", body: "Formulário respondido:\npergunta_1: opcao_a", sent_at: "2026-07-30T11:58:00-03:00", formulario: true },
+    ];
+    // Sem o instante (precisão diferente): a mais nova ainda sem resumo.
+    expect(trocarResumoNoContexto(msgs, { sentAt: null, resumo: "Resumo novo" }, fuso)).toBe(true);
+    expect(msgs.map((x) => x.body)).toEqual(["Resumo de antes", "Resumo novo"]);
   });
 });
 
@@ -314,5 +363,123 @@ describe("a ligação no turno", () => {
     );
     expect(trecho).toMatch(/const gancho = deps\.knobs\.ganchoAntesDoTurno;/);
     expect(trecho).toMatch(/if \(desfechoDoGancho\.fim\) return;/);
+  });
+});
+
+describe("contrato tolerante: resumo e motivo", () => {
+  const responde = (corpo: unknown) =>
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(corpo), { status: 200 })));
+
+  it("`resumo` vazio ou só espaço vale ausente; acima do teto, cortado; `motivo` longo, cortado — a resposta vale", async () => {
+    responde({ acao: "seguir", resumo: "   ", motivo: "m".repeat(500) });
+    const vazio = await chamarGancho(CONFIG, PEDIDO);
+    expect(vazio.ok).toBe(true);
+    if (!vazio.ok) return;
+    expect(vazio.resposta.resumo ?? null).toBeNull();
+    expect(vazio.resposta.motivo).toBe("m".repeat(TETO_DO_MOTIVO));
+
+    responde({ acao: "seguir", resumo: `  ${"r".repeat(TETO_DO_RESUMO + 900)}  ` });
+    const longo = await chamarGancho(CONFIG, PEDIDO);
+    expect(longo.ok).toBe(true);
+    if (!longo.ok) return;
+    expect(longo.resposta.resumo).toBe("r".repeat(TETO_DO_RESUMO));
+  });
+});
+
+describe("a resposta do formulário que o modelo lê sem o resumo do gancho", () => {
+  const RESPOSTA = {
+    flow_token: "tok-teste",
+    pergunta_1: "opcao_a",
+    pergunta_2: ["opcao_b", "opcao_c"],
+    vazia: "  ",
+    numero: 3,
+  };
+
+  it("uma resposta por linha (`chave: valor`), sem o `flow_token`; a mesma resposta dá o mesmo texto", () => {
+    const esperado = "Formulário respondido:\npergunta_1: opcao_a\npergunta_2: opcao_b, opcao_c\nnumero: 3";
+    expect(textoDaRespostaDeFormulario(RESPOSTA)).toBe(esperado);
+    expect(textoDaRespostaDeFormulario({ ...RESPOSTA })).toBe(esperado);
+    expect(textoDaRespostaDeFormulario(null)).toBe("Formulário respondido");
+    expect(textoDaRespostaDeFormulario({ flow_token: "x" })).toBe("Formulário respondido");
+  });
+
+  it("o corpo da linha (histórico e linha do job) é o texto montado só enquanto ela tem o texto neutro", () => {
+    const linha = { type: "text", media_url: null, media_storage_path: null, media_derived_text: null };
+    expect(
+      corpoDaMensagem({ ...linha, body: "Formulário respondido", e_formulario: true, formulario_resposta: RESPOSTA }),
+    ).toBe(textoDaRespostaDeFormulario(RESPOSTA));
+    // Com o resumo do gancho na linha, o resumo.
+    expect(
+      corpoDaMensagem({ ...linha, body: "Resumo do formulário", e_formulario: true, formulario_resposta: RESPOSTA }),
+    ).toBe("Resumo do formulário");
+    // Texto igual ao neutro numa mensagem que não é formulário: fica como está.
+    expect(corpoDaMensagem({ ...linha, body: "Formulário respondido", e_formulario: false })).toBe("Formulário respondido");
+  });
+});
+
+describe("resposta de formulário fora das checagens determinísticas", () => {
+  it("o resumo (ou as respostas) com cara de pedido de humano não entra nos inbounds que as checagens leem", () => {
+    const msgs: LeadContextMessage[] = [
+      { direction: "outbound", body: "Oi!", sent_at: "2026-07-30T11:50:00-03:00" },
+      { direction: "inbound", body: "Prefere falar com um atendente", sent_at: "2026-07-30T11:55:00-03:00", formulario: true },
+      { direction: "inbound", body: "ok, obrigado", sent_at: "2026-07-30T11:56:00-03:00" },
+    ];
+    expect(inboundsNaoRespondidos(semRespostasDeFormulario(msgs))).toEqual(["ok, obrigado"]);
+    // O formulário continua no contexto (o modelo e a tela o veem): só a lista o deixa de fora.
+    expect(semRespostasDeFormulario(msgs)).toHaveLength(2);
+    expect(msgs).toHaveLength(3);
+  });
+});
+
+describe("os campos do card só entram no contexto com o gancho ligado", () => {
+  function dbComCard() {
+    const consultas: string[] = [];
+    const db = {
+      query: vi.fn(async (sql: string) => {
+        consultas.push(sql);
+        if (sql.includes("from contacts"))
+          return {
+            rows: [{
+              name: "Ana", display_name: null, email: null, phone_number: "5511", tags: [], is_blocked: false,
+              source: "whatsapp", consent: null, is_anonymized: false,
+            }],
+          };
+        if (sql.includes("from crm_leads l"))
+          return {
+            rows: [{
+              id: "card-1", organization_id: ORG, pipeline_id: "p1", status: "open", last_activity_at: null,
+              created_at: new Date("2026-07-01T00:00:00Z"), custom_fields: { interesse: "plano-b", telefone: "+5511999990000" },
+              tags: [], etapa: "novo",
+            }],
+          };
+        if (sql.includes("from crm_pipelines")) return { rows: [{ id: "p1" }] };
+        return { rows: [] };
+      }),
+    };
+    return { db, consultas };
+  }
+  const INPUT = { tenantId: ORG, leadId: CONTATO, conversationId: CONV, fuso: "America/Sao_Paulo" };
+  const KNOBS = { historyLimit: 20, maxTokens: 4000 };
+
+  it("sem o pedido (gancho desligado): nem a consulta ao card, nem o bloco — o contexto da -c01.3", async () => {
+    const { db, consultas } = dbComCard();
+    const r = await getLeadContext(db as never, {} as never, INPUT, KNOBS);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect("campos_do_card" in r.context).toBe(false);
+    expect(consultas.some((c) => c.includes("from crm_leads"))).toBe(false);
+  });
+
+  it("com o pedido: o bloco, sem o telefone do card", async () => {
+    const { db } = dbComCard();
+    const r = await getLeadContext(db as never, {} as never, { ...INPUT, camposDoCard: true }, KNOBS);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.context.campos_do_card).toEqual({ interesse: "plano-b" });
+  });
+
+  it("o turno pede os campos só quando o knob do gancho existe", () => {
+    const turno = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
+    expect(turno.match(/camposDoCard: deps\.knobs\.ganchoAntesDoTurno !== undefined/g)).toHaveLength(2);
   });
 });
