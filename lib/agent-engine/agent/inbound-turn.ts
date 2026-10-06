@@ -2954,7 +2954,9 @@ async function executarTurnoDoAgente(
     return;
   // (C01, -c01.3, rodada 3) Daqui em diante o agente fala: a falha da preparação na
   // última tentativa passa à equipe (`comPassagemSeAPreparacaoFalhar`).
-  marca.agenteFala = true;
+  // (C01, -c01.6) Menos na reconsulta do gancho antes do turno: ela não tem mensagem
+  // nova do cliente, e a frase de espera chegaria a quem não escreveu nada.
+  marca.agenteFala = preview !== undefined || !eReconsultaDoGancho(liveJob().payload);
   marca.agentId = agentConfig?.agentId ?? null;
   const agentOperation =
     !preview && agentConfig?.operationRevision
@@ -6649,15 +6651,33 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
         error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
       });
     }
+    // (C01, -c01.6) A reconsulta do gancho antes do turno não tem mensagem nova do
+    // cliente: só roda com o gancho ligado e no agente automático, e o roteador
+    // não classifica nada nela (`inbound: false`: nem classificador nem Jev).
+    const reconsulta = eReconsultaDoGancho(job.payload);
+    if (reconsulta && deps.knobs.ganchoAntesDoTurno === undefined) {
+      deps.log.info('turno pulado — reconsulta do gancho com o gancho desligado', {
+        job_id: job.id,
+        conversation_id: payload.conversation_id,
+      });
+      return;
+    }
     const resolvedAgent = await resolveConversationTurn(pool, deps.llmCfg, {
       tenantId: job.organization_id,
       leadId: job.contact_id,
       jobId: job.id,
       conversationId: payload.conversation_id,
       channelSessionId: payload.channel_session_id,
-      inbound: true,
+      inbound: !reconsulta,
     }, { log: deps.log, jev: deps.jev });
     const operationAgent = resolvedAgent.config;
+    if (reconsulta && operationAgent?.operationMode === 'assisted') {
+      deps.log.info('turno pulado — reconsulta do gancho com o agente no modo assistido', {
+        job_id: job.id,
+        conversation_id: payload.conversation_id,
+      });
+      return;
+    }
     if (operationAgent?.operationMode === 'assisted') {
       // As travas do assistido (handoff e elegibilidade) já rodaram acima, antes
       // de escolher o agente.
@@ -6708,16 +6728,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
     };
     // (C01, -c01.6) A reconsulta que o gancho antes do turno pediu
     // (`reconsultar_em_s`) roda sobre uma mensagem já respondida (pelo próprio
-    // gancho): não passa por esta checagem. Sem o gancho ligado, ela não roda (o
-    // modelo responderia de novo ao já respondido).
-    const reconsulta = eReconsultaDoGancho(job.payload);
-    if (reconsulta && deps.knobs.ganchoAntesDoTurno === undefined) {
-      deps.log.info('turno pulado — reconsulta do gancho com o gancho desligado', {
-        job_id: job.id,
-        conversation_id: payload.conversation_id,
-      });
-      return;
-    }
+    // gancho): não passa por esta checagem.
     if (!reconsulta && (await ultimaInboundJaRespondida(pool, alvo))) {
       deps.log.info('turno pulado — outro turno já viu e respondeu a última mensagem do cliente', {
         job_id: job.id,

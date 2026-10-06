@@ -5,13 +5,20 @@
  *      espalhamento, sem agendar duas vezes na re-execução; o pedido da reconsulta leva
  *      `reconsulta: true`; o turno marcado pula a checagem de "já respondido" e nunca
  *      chama o modelo;
- *   3. `passar_a_equipe` (só com `segurar`): a mesma passagem da palavra "atendente".
+ *   3. `passar_a_equipe` (só com `segurar`): a mesma passagem da palavra "atendente",
+ *      com motivo e título legíveis na Central.
+ * E o que a revisão independente achou: mensagem nova nunca entra de carona no job da
+ * reconsulta; a reconsulta não roda o roteador nem o rascunho do modo assistido, não
+ * manda a frase de espera e não marca como processado um formulário mais novo.
  */
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { buscarJobParaCoalescer } from "@/lib/agent-engine/edge/crm/debounce";
 import {
   MARCA_DA_RECONSULTA,
+  MOTIVO_DA_PASSAGEM_PELO_GANCHO,
+  TITULO_DA_PASSAGEM_PELO_GANCHO,
   respostaDoGanchoSchema,
   rodarGanchoAntesDoTurno,
   type GanchoAntesDoTurnoConfig,
@@ -191,9 +198,46 @@ describe("3. `passar_a_equipe`: a passagem da palavra \"atendente\"", () => {
     expect(consultas.some((c) => c.sql.includes("update cron_jobs set enabled = false"))).toBe(true);
   });
 
+  it("a Central mostra motivo e título legíveis, não o código do serviço de fora", async () => {
+    const { consultas } = await rodar({ acao: "segurar", enviar: [], motivo: "formulario-aluno-zero1", passar_a_equipe: true });
+    const conversa = consultas.find((c) => c.sql.includes("last_handoff_reason = $4"));
+    expect(conversa?.params[3]).toBe(MOTIVO_DA_PASSAGEM_PELO_GANCHO);
+    const aviso = consultas.find((c) => c.sql.includes("insert into agent_inbox_items"));
+    expect(aviso?.params[1]).toBe(TITULO_DA_PASSAGEM_PELO_GANCHO);
+    expect(String(aviso?.params[2])).toContain(MOTIVO_DA_PASSAGEM_PELO_GANCHO);
+    expect(JSON.stringify(aviso?.params)).not.toMatch(/pre_turn_hook|formulario-aluno-zero1/);
+  });
+
   it("sem o campo, ninguém é passado", async () => {
     const { consultas } = await rodar({ acao: "segurar", enviar: [] });
     expect(consultas.some((c) => c.sql.includes("force_human = true"))).toBe(false);
+  });
+});
+
+describe("a reconsulta não mexe no formulário", () => {
+  it("o pedido da reconsulta não leva `formulario`, e nada é marcado como processado", async () => {
+    const { pedidos, consultas } = await rodar(
+      { acao: "segurar", enviar: [], resumo: "não pode gravar" },
+      { comFormulario: true, payload: { ...PAYLOAD, [MARCA_DA_RECONSULTA]: true } },
+    );
+    expect("formulario" in JSON.parse(pedidos[0]!)).toBe(false);
+    expect(consultas.some((c) => c.sql.includes("'nfm_reply'"))).toBe(false);
+    expect(consultas.some((c) => c.sql.includes("update messages"))).toBe(false);
+  });
+
+  it("o turno normal continua levando o formulário", async () => {
+    const { pedidos } = await rodar({ acao: "segurar", enviar: [] }, { comFormulario: true });
+    expect(JSON.parse(pedidos[0]!).formulario?.mensagem_id).toBe(FORM);
+  });
+});
+
+describe("mensagem nova nunca entra de carona no job da reconsulta", () => {
+  it("a busca do job para juntar a rajada exclui o job marcado", async () => {
+    const query = vi.fn(async () => ({ rows: [], rowCount: 0 }));
+    await buscarJobParaCoalescer({ query } as never, { organizationId: ORG, contactId: CONTATO });
+    const sql = String((query.mock.calls[0] as unknown[])[0]);
+    expect(sql).toContain(`not (payload ? '${MARCA_DA_RECONSULTA}')`);
+    expect(sql).toContain("not (payload ? 'held_run_after')");
   });
 });
 
@@ -204,6 +248,22 @@ describe("a reconsulta no turno", () => {
     expect(turno).toMatch(/const reconsulta = eReconsultaDoGancho\(job\.payload\);/);
     expect(turno).toMatch(/if \(reconsulta && deps\.knobs\.ganchoAntesDoTurno === undefined\) \{/);
     expect(turno).toMatch(/if \(!reconsulta && \(await ultimaInboundJaRespondida\(pool, alvo\)\)\) \{/);
+  });
+
+  it("não roda o roteador (o turno não conta como mensagem nova) nem o rascunho do modo assistido", () => {
+    const guarda = turno.indexOf("if (reconsulta && deps.knobs.ganchoAntesDoTurno === undefined) {");
+    const resolve = turno.indexOf("await resolveConversationTurn(", guarda);
+    expect(guarda).toBeGreaterThan(-1);
+    expect(resolve).toBeGreaterThan(guarda);
+    expect(turno.slice(resolve, resolve + 600)).toMatch(/inbound: !reconsulta,/);
+    expect(turno.slice(resolve, resolve + 1500)).toMatch(
+      /if \(reconsulta && operationAgent\?\.operationMode === 'assisted'\) \{[\s\S]*?return;/,
+    );
+  });
+
+  it("a escolta da preparação não manda a frase de espera no turno marcado", () => {
+    expect(turno).toMatch(/marca\.agenteFala = preview !== undefined \|\| !eReconsultaDoGancho\(liveJob\(\)\.payload\);/);
+    expect(turno).not.toMatch(/marca\.agenteFala = true;/);
   });
 
   it("o modelo nunca responde no turno marcado: o retorno vem antes do roteiro", () => {

@@ -34,11 +34,17 @@ import type pg from 'pg';
  * saía "done" sem erro nenhum, e nenhum turno rodava. Medido em produção
  * (2026-09-14): 6 mensagens ao longo de 7h, zero resposta, zero job novo — só o
  * coalescing silencioso repetido no mesmo job com `held_run_after` no payload.
+ *
+ * (C01, -c01.6) Também nunca de carona no job da reconsulta do gancho antes do
+ * turno (`gancho_reconsulta`, `gancho-antes-do-turno.ts`): ele pode estar adiado
+ * (janela de horário, nova tentativa) e termina sem o modelo; a mensagem nova
+ * que entrasse nele não seria respondida. Ela ganha job próprio.
  */
 const SQL_JOB_PARA_COALESCER = `select id from job_queue
  where organization_id = $1 and contact_id = $2
    and kind = 'inbound_turn' and status = 'pending' and run_after > now()
    and not (payload ? 'held_run_after')
+   and not (payload ? 'gancho_reconsulta')
  limit 1`;
 
 /** O que fazer com a mensagem que acabou de chegar. */

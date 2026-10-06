@@ -324,7 +324,9 @@ export async function montarPedidoDoGancho(
       limit $3`,
     [alvo.organizationId, alvo.conversationId, MENSAGENS_NO_PEDIDO],
   );
-  const formulario = await formularioDoTurno(db, alvo);
+  // (C01, -c01.6) A reconsulta não atende formulário: a resposta que chegar enquanto
+  // ela espera é do turno da própria mensagem (marcá-la aqui a tiraria dele).
+  const formulario = alvo.reconsulta === true ? null : await formularioDoTurno(db, alvo);
 
   const pedido: PedidoDoGancho = {
     versao: 1,
@@ -918,20 +920,31 @@ async function agendarReconsulta(ctx: ContextoDoGancho, segundos: number | null 
  * Central), sem a linha de passagem (como o fail-safe). O aviso ao cliente é o que o
  * gancho já enviou. Idempotente: a re-execução não passa duas vezes.
  */
+/**
+ * (C01, -c01.6) O motivo e o título da passagem pedida pelo gancho. Frase legível, não
+ * código (a mesma régua de `MOTIVO_DA_PASSAGEM_POR_VOCABULARIO_INTERNO`): sem linha de
+ * `passagens_de_atendimento`, o motivo é o que a Central mostra (`Motivo: …`) e o que fica
+ * em `conversations.last_handoff_reason`. O `motivo` da resposta do gancho é código do
+ * serviço de fora e vai só para o log.
+ */
+export const MOTIVO_DA_PASSAGEM_PELO_GANCHO =
+  'O atendimento de entrada passou a conversa para uma pessoa antes de a IA responder';
+export const TITULO_DA_PASSAGEM_PELO_GANCHO = 'Passado à equipe na entrada — assumir a conversa';
+
 async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho): Promise<void> {
-  const motivo = (resposta.motivo ?? '').trim();
+  const motivo = (resposta.motivo ?? '').trim().slice(0, 60);
   try {
     await performHumanHandoff(
       ctx.pool,
       { tenantId: ctx.tenantId, leadId: ctx.contactId, conversationId: ctx.conversationId },
       {
-        reason: 'pre_turn_hook',
-        conversationSummary: resposta.resumo ?? 'Passado à equipe pelo serviço antes do turno.',
-        inboxTitle: motivo !== '' ? `Passar à equipe: ${motivo.slice(0, 60)}` : 'Passar à equipe',
+        reason: MOTIVO_DA_PASSAGEM_PELO_GANCHO,
+        conversationSummary: resposta.resumo ?? MOTIVO_DA_PASSAGEM_PELO_GANCHO,
+        inboxTitle: TITULO_DA_PASSAGEM_PELO_GANCHO,
         log: ctx.log,
       },
     );
-    ctx.log.info('gancho antes do turno: conversa passada à equipe');
+    ctx.log.info('gancho antes do turno: conversa passada à equipe', { motivo });
   } catch (err) {
     if (eDeFronteira(err)) throw err;
     ctx.log.warn('gancho antes do turno: passagem à equipe falhou', {
