@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import pg from "pg";
 
 import type * as InboundTurn from "@/lib/agent-engine/agent/inbound-turn";
+import type * as FollowupTurn from "@/lib/agent-engine/agent/followup-turn";
 import type * as Providers from "@/lib/agent-engine/edge/llm/providers";
 import type * as SendLedger from "@/lib/agent-engine/edge/crm/send-ledger";
 import type * as SendMessage from "@/lib/agent-engine/edge/crm/send-message";
@@ -11,6 +12,7 @@ import type * as Queue from "@/lib/agent-engine/queue/queue";
 import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
 import type * as Handler from "@/app/api/v1/messages/_handler";
 import type * as Duble from "@/tests/helpers/duble-do-handler";
+import { criarOrigemDeFollowup } from "./followup-service-origin";
 import type { ChannelSendInput } from "@/lib/agent-engine/channel-adapter";
 
 /**
@@ -35,6 +37,12 @@ import type { ChannelSendInput } from "@/lib/agent-engine/channel-adapter";
  *      modelo responde e o `gravar` não é aplicado;
  *   6. a assinatura confere com o segredo, e o pedido não leva telefone, e-mail nem
  *      nome do contato.
+ *
+ * E os requisitos da verificação do porteiro:
+ *   - `segurar` com `enviar: []`: grava e encerra o turno sem modelo e sem fail-safe;
+ *   - envio parcial do `segurar` (o 1º saiu, o 2º não): grava, encerra, fica no log;
+ *   - o turno de follow-up (`followup_turn`) não chama o gancho;
+ *   - a re-execução depois do `segurar` não envia de novo (a anotação no job).
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -123,6 +131,7 @@ const FORMULARIO = {
 
 type Modules = {
   turno: typeof InboundTurn;
+  followup: typeof FollowupTurn;
   ledger: typeof SendLedger;
   envio: typeof SendMessage;
   handler: typeof Handler;
@@ -225,6 +234,8 @@ function texto(t: string) {
 // ─── o canal: ledger real → corpo do motor → handler → adapter oficial → Graph ──
 
 let enviosAoCanal: ChannelSendInput[] = [];
+/** O log do turno, linha a linha (JSON), para conferir o que fica registrado. */
+let linhasDoLog: string[] = [];
 
 const CONVERSA_DO_HANDLER = {
   id: CONV,
@@ -284,8 +295,8 @@ function canal() {
   };
 }
 
-function montaHandler(doGenerate: unknown, comGancho: boolean) {
-  return m.turno.createInboundTurnHandler({
+function depsDoTurno(doGenerate: unknown, comGancho: boolean) {
+  return {
     crmCfg: { supabase: {} as never },
     llmCfg: { anthropicApiKey: "fake" } as never,
     knobs: {
@@ -304,12 +315,22 @@ function montaHandler(doGenerate: unknown, comGancho: boolean) {
       },
       ...(comGancho ? { ganchoAntesDoTurno: GANCHO } : {}),
     },
-    log: m.createLogger(process.env.DEBUG_GANCHO ? process.stderr : ({ write: () => true } as never)),
+    log: m.createLogger({
+      write: (linha: string) => {
+        linhasDoLog.push(linha);
+        if (process.env.DEBUG_GANCHO) process.stderr.write(linha);
+        return true;
+      },
+    } as never),
     registry: m.createFakeRegistry(doGenerate as never),
     channel: () => canal() as never,
     clock: () => AGORA,
     sleep: async () => {},
-  });
+  };
+}
+
+function montaHandler(doGenerate: unknown, comGancho: boolean) {
+  return m.turno.createInboundTurnHandler(depsDoTurno(doGenerate, comGancho));
 }
 
 async function enfileira(inboundMessageId: string): Promise<string> {
@@ -389,6 +410,7 @@ beforeAll(async () => {
   vi.stubGlobal("fetch", fetchDublado);
   m = {
     turno: await import("@/lib/agent-engine/agent/inbound-turn"),
+    followup: await import("@/lib/agent-engine/agent/followup-turn"),
     ledger: await import("@/lib/agent-engine/edge/crm/send-ledger"),
     envio: await import("@/lib/agent-engine/edge/crm/send-message"),
     handler: await import("@/app/api/v1/messages/_handler"),
@@ -473,17 +495,19 @@ beforeEach(async () => {
   postsNaGraph = [];
   statusDaGraph = [];
   enviosAoCanal = [];
+  linhasDoLog = [];
   respostaDoGancho = async () => json({ acao: "seguir" });
   await pool.query("delete from agent_case_events where organization_id = $1", [ORG]);
   await pool.query("delete from agent_cases where organization_id = $1", [ORG]);
   await pool.query("delete from send_ledger where organization_id = $1", [ORG]);
   await pool.query("delete from messages where organization_id = $1", [ORG]);
+  await pool.query("update job_queue set status = 'done' where organization_id = $1 and status in ('pending', 'running')", [ORG]);
   // A janela do anti-spinning cruza leads e testes: a mesma resposta do modelo seria
   // vetada a partir da terceira vez.
   await pool.query("delete from outbound_copies where organization_id = $1", [ORG]);
   await pool.query(
-    "update crm_leads set custom_fields = $3::jsonb, tags = $4::text[] where organization_id = $1 and id = $2",
-    [ORG, CARD, JSON.stringify(CAMPOS_INICIAIS), ETIQUETAS_INICIAIS],
+    "update crm_leads set custom_fields = $3::jsonb, tags = $4::text[], contact_id = $5 where organization_id = $1 and id = $2",
+    [ORG, CARD, JSON.stringify(CAMPOS_INICIAIS), ETIQUETAS_INICIAIS, CONTACT],
   );
   await pool.query(
     `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
@@ -645,6 +669,33 @@ describe("4. `segurar`: o gancho responde e o turno termina", () => {
     expect(await anotacaoDoJob(jobId)).toMatchObject({ situacao: "decidido", resposta: { acao: "segurar" } });
   });
 
+  it("o turno seguinte vê o formulário enviado: `interativo` da saída é o objeto que saiu (`metadata.interactive`)", async () => {
+    respostaDoGancho = async () => json(SEGURAR);
+    const mod = modelo();
+    const handler = montaHandler(mod.doGenerate, true);
+    expect(await executa(handler, await enfileira(MSG))).toBeNull();
+
+    const nova = randomUUID();
+    await pool.query(
+      `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+         type, direction, status, body, sent_via, sent_at)
+       values ($1,$2,$3,$4,$5,'text','inbound','delivered','Recebi, já vou responder','external_device', now())`,
+      [nova, ORG, CONV, SESSION, CONTACT],
+    );
+    respostaDoGancho = async () => json({ acao: "segurar", motivo: "aguardando", enviar: [] });
+    expect(await executa(handler, await enfileira(nova))).toBeNull();
+
+    expect(pedidosAoGancho).toHaveLength(2);
+    const segundo = JSON.parse(pedidosAoGancho[1]!.corpo) as { mensagens: Array<Record<string, unknown>> };
+    expect(segundo.mensagens).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ direcao: "saida", texto: FORMULARIO.body.text, interativo: FORMULARIO }),
+        expect.objectContaining({ direcao: "entrada", texto: "Recebi, já vou responder", interativo: null }),
+      ]),
+    );
+    expect(postsNaGraph).toHaveLength(1);
+  });
+
   it("a re-execução do mesmo job não pergunta de novo ao gancho nem envia de novo", async () => {
     let chamadas = 0;
     respostaDoGancho = async () => {
@@ -667,6 +718,111 @@ describe("4. `segurar`: o gancho responde e o turno termina", () => {
       [ORG, jobId],
     );
     expect(rows).toEqual([{ seq: -1, status: "accepted" }]);
+  });
+
+  it("`enviar: []` (aguardando): grava, encerra o turno sem modelo e sem fail-safe, nada sai; a re-execução também não", async () => {
+    let chamadas = 0;
+    respostaDoGancho = async () => {
+      chamadas += 1;
+      return json({ acao: "segurar", motivo: "aguardando", enviar: [], gravar: { campos: { aguardando_desde: "2026-07-30T15:00:00Z" } } });
+    };
+    const mod = modelo();
+    const handler = montaHandler(mod.doGenerate, true);
+    const jobId = await enfileira(MSG);
+    expect(await executa(handler, jobId)).toBeNull();
+    expect(await reexecuta(handler, jobId)).toBeNull();
+
+    expect(chamadas).toBe(1);
+    expect(postsNaGraph).toEqual([]);
+    expect(enviosAoCanal).toEqual([]);
+    expect(await mensagensDeSaida()).toEqual([]);
+    expect(mod.estado.etapas).toBe(0);
+    expect(await casosAbertos()).toBe(0);
+    expect((await card()).custom_fields).toEqual({ ...CAMPOS_INICIAIS, aguardando_desde: "2026-07-30T15:00:00Z" });
+    expect(await anotacaoDoJob(jobId)).toMatchObject({ situacao: "decidido", resposta: { acao: "segurar", enviar: [] } });
+  });
+
+  it("envio parcial (o 1º saiu, o 2º a Graph recusou): grava, encerra sem o modelo e registra no log", async () => {
+    respostaDoGancho = async () =>
+      json({
+        acao: "segurar",
+        enviar: [
+          { tipo: "texto", texto: "Já te mando as perguntas." },
+          { tipo: "interativo", interactive: FORMULARIO },
+        ],
+        gravar: { campos: { enviado_em: "2026-07-30T15:00:00Z" }, etiquetas_mais: ["respondeu"] },
+      });
+    statusDaGraph = [200, 500];
+    const mod = modelo();
+    const jobId = await enfileira(MSG);
+    expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
+
+    expect(postsNaGraph.map((p) => p.type)).toEqual(["text", "interactive"]);
+    expect(mod.estado.etapas).toBe(0);
+    expect(await casosAbertos()).toBe(0);
+    const depois = await card();
+    expect(depois.custom_fields).toEqual({ ...CAMPOS_INICIAIS, enviado_em: "2026-07-30T15:00:00Z" });
+    expect(depois.tags).toEqual([...ETIQUETAS_INICIAIS, "respondeu"]);
+    const { rows } = await pool.query<{ seq: number; status: string }>(
+      "select seq, status from send_ledger where organization_id = $1 and job_id = $2 order by seq desc",
+      [ORG, jobId],
+    );
+    expect(rows.map((r) => r.seq)).toEqual([-1, -2]);
+    expect(rows[0]!.status).toBe("accepted");
+    expect(rows[1]!.status).not.toBe("accepted");
+    const parcial = linhasDoLog.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => String(l.msg).includes("envio parcial"));
+    expect(parcial).toMatchObject({ level: "warn", item: 2, enviadas: 1 });
+  });
+});
+
+describe("4b. conversa sem card do funil (contato sem `crm_lead`)", () => {
+  it("o pedido vai com `lead.id` nulo; o `segurar` envia e encerra; o `gravar` não tem onde gravar e fica no log", async () => {
+    await pool.query("update crm_leads set contact_id = null where organization_id = $1 and id = $2", [ORG, CARD]);
+    respostaDoGancho = async () =>
+      json({
+        acao: "segurar",
+        enviar: [{ tipo: "interativo", interactive: FORMULARIO }],
+        gravar: { campos: { enviado_em: "2026-07-30T15:00:00Z" }, etiquetas_mais: ["aguardando"] },
+      });
+    const mod = modelo();
+    const jobId = await enfileira(MSG);
+    expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
+
+    const pedido = JSON.parse(pedidosAoGancho[0]!.corpo) as { lead: unknown };
+    expect(pedido.lead).toEqual({ id: null, etapa: null, campos: {}, etiquetas: [] });
+    expect(postsNaGraph.map((p) => p.type)).toEqual(["interactive"]);
+    expect(mod.estado.etapas).toBe(0);
+    // O card que existia (agora sem contato) não é tocado: o gancho não cria card.
+    expect(await card()).toEqual({ custom_fields: CAMPOS_INICIAIS, tags: ETIQUETAS_INICIAIS });
+    const { rows } = await pool.query<{ n: string }>(
+      "select count(*) as n from crm_leads where organization_id = $1 and contact_id = $2",
+      [ORG, CONTACT],
+    );
+    expect(Number(rows[0]!.n)).toBe(0);
+    expect(linhasDoLog.some((l) => l.includes("sem card do funil para gravar"))).toBe(true);
+  });
+});
+
+describe("3b. o gancho só vale no turno aberto por mensagem do cliente", () => {
+  it("o turno de follow-up (`followup_turn`, retorno prometido) roda o modelo sem chamar o gancho", async () => {
+    const boundary = await criarOrigemDeFollowup(pool, ORG, CONTACT);
+    expect(boundary.conversation_id).toBe(CONV);
+    const { rows } = await pool.query<{ id: string }>(
+      `insert into job_queue (organization_id, contact_id, kind, payload, max_attempts)
+       values ($1, $2, 'followup_turn', $3::jsonb, 3) returning id`,
+      [ORG, CONTACT, JSON.stringify({ reason: "retorno combinado", promise: "voltar a falar", service_boundary: boundary })],
+    );
+    const jobId = rows[0]!.id;
+    respostaDoGancho = async () =>
+      json({ acao: "segurar", enviar: [{ tipo: "texto", texto: "não devia sair" }] });
+    const mod = modelo();
+    const handler = m.followup.createFollowupTurnHandler(depsDoTurno(mod.doGenerate, true));
+    expect(await executa(handler as never, jobId)).toBeNull();
+
+    expect(pedidosAoGancho).toEqual([]);
+    expect(mod.estado.etapas).toBeGreaterThanOrEqual(1);
+    expect(postsNaGraph.map((p) => (p.text as { body: string } | undefined)?.body)).toEqual([RESPOSTA_DO_MODELO]);
+    expect(await anotacaoDoJob(jobId)).toBeUndefined();
   });
 });
 
@@ -708,9 +864,9 @@ describe("5. falha do gancho: o modelo responde e nada é gravado", () => {
     await esperaModeloSemGravar(jobId, mod);
   });
 
-  it("resposta fora do contrato (`segurar` sem nada a enviar, e JSON quebrado)", async () => {
+  it("resposta fora do contrato (`segurar` sem a lista `enviar`, e JSON quebrado)", async () => {
     for (const corpo of [
-      JSON.stringify({ acao: "segurar", enviar: [], gravar: SEGURAR_COM_GRAVAR.gravar }),
+      JSON.stringify({ acao: "segurar", gravar: SEGURAR_COM_GRAVAR.gravar }),
       '{"acao": "segurar",',
     ]) {
       postsNaGraph = [];

@@ -29,13 +29,19 @@
  *     `metadata.interactive`) e o turno segue: o modelo lê o resumo;
  *   - `segurar`: envia cada item de `enviar`, na ordem, pela mesma cadeia de envio
  *     do aviso de escalação (`runBeforeSend`), aplica `gravar` e o turno TERMINA,
- *     sem modelo e sem fail-safe: o cliente recebeu resposta.
+ *     sem modelo e sem fail-safe: o cliente recebeu resposta. `enviar: []` é o
+ *     silêncio de propósito (o serviço acabou de mandar o formulário e a pessoa
+ *     escreveu antes de vê-lo): grava e termina, sem enviar nada. `segurar` sem a
+ *     lista `enviar` é resposta fora do contrato.
  *
  * ## Falha nunca cala o cliente
  *
  * Erro de rede, prazo estourado, status fora de 2xx, resposta fora do schema, canal
- * que não envia interativo ou envio do `segurar` que não sai: o turno roda o modelo,
- * como se o gancho não existisse, e o `gravar` daquela resposta NÃO é aplicado.
+ * que não envia interativo ou o PRIMEIRO envio do `segurar` que não sai: o turno roda
+ * o modelo, como se o gancho não existisse, e o `gravar` daquela resposta NÃO é
+ * aplicado (o card não diz "formulário enviado" sem ele ter saído). Envio parcial (o
+ * 1º saiu, um seguinte não): o que saiu fica, o `gravar` vale e o turno termina, com
+ * aviso no log; o cliente já recebeu resposta e o modelo não sabe o que saiu.
  * Os logs levam o motivo em código, nunca corpo, URL ou dado pessoal.
  *
  * ## Re-execução do job
@@ -341,8 +347,8 @@ export const respostaDoGanchoSchema = z
     resumo: z.string().trim().min(1).max(4096).nullish(),
     motivo: z.string().max(200).nullish(),
   })
-  .refine((r) => r.acao !== 'segurar' || (r.enviar?.length ?? 0) > 0, {
-    message: 'segurar sem nada a enviar deixaria o cliente sem resposta',
+  .refine((r) => r.acao !== 'segurar' || Array.isArray(r.enviar), {
+    message: 'segurar sem a lista enviar (para não enviar nada, enviar: [])',
     path: ['enviar'],
   })
   .refine((r) => JSON.stringify(r.gravar?.campos ?? {}).length <= TETO_DOS_CAMPOS_GRAVADOS, {
@@ -688,9 +694,14 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
       return { fim: false };
     }
   }
+  let enviadas = 0;
   for (const [i, item] of itens.entries()) {
     const desfecho = await enviarItem(ctx, item, -(i + 1), canalInterativo === true);
-    if (desfecho !== 'ok') {
+    if (desfecho === 'ok') {
+      enviadas += 1;
+      continue;
+    }
+    if (enviadas === 0) {
       log.warn('gancho antes do turno: envio não saiu — o turno segue para o modelo, sem gravar', {
         item: i + 1,
         desfecho,
@@ -698,9 +709,22 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
       await anotarComCuidado(ctx, { situacao: 'modelo', motivo: `envio_${desfecho}`.slice(0, 60) });
       return { fim: false };
     }
+    // O cliente já recebeu resposta: o modelo, sem saber o que saiu, repetiria.
+    log.warn('gancho antes do turno: envio parcial — o que saiu fica, o gravar vale e o turno termina sem o modelo', {
+      item: i + 1,
+      desfecho,
+      enviadas,
+      previstas: itens.length,
+    });
+    break;
   }
   await aplicarGravar(ctx, card, resposta.gravar);
-  log.info('gancho antes do turno respondeu o cliente — turno encerrado sem o modelo', { enviadas: itens.length });
+  log.info(
+    itens.length === 0
+      ? 'gancho antes do turno segurou sem enviar nada — turno encerrado sem o modelo'
+      : 'gancho antes do turno respondeu o cliente — turno encerrado sem o modelo',
+    { enviadas },
+  );
   return { fim: true };
 }
 

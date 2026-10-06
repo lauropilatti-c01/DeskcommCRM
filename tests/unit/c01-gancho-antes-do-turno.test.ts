@@ -88,6 +88,11 @@ describe("assinatura e chamada", () => {
     expect(assinaturaDoGancho(CONFIG.segredo, corpo, 1790000000)).toBe(`t=1790000000,v1=${esperado}`);
   });
 
+  it("`segurar` com `enviar: []` está no contrato (o silêncio de propósito)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ acao: "segurar", enviar: [] }), { status: 200 })));
+    expect(await chamarGancho(CONFIG, PEDIDO)).toEqual({ ok: true, resposta: { acao: "segurar", enviar: [] } });
+  });
+
   it("o POST leva o JSON do pedido e a assinatura dele", async () => {
     const fetchMock = vi.fn(async (..._a: unknown[]) => new Response(JSON.stringify({ acao: "seguir" }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -108,7 +113,7 @@ describe("assinatura e chamada", () => {
       [async () => Promise.reject(new TypeError("fetch failed")), "rede"],
       [async () => new Response("{}", { status: 500 }), "status"],
       [async () => new Response('{"acao":', { status: 200 }), "resposta_invalida"],
-      [async () => new Response(JSON.stringify({ acao: "segurar", enviar: [] }), { status: 200 }), "resposta_invalida"],
+      [async () => new Response(JSON.stringify({ acao: "segurar" }), { status: 200 }), "resposta_invalida"],
       [async () => new Response(JSON.stringify({ acao: "pular" }), { status: 200 }), "resposta_invalida"],
       [
         async () =>
