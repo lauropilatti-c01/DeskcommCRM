@@ -946,10 +946,17 @@ async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho):
     );
     ctx.log.info('gancho antes do turno: conversa passada à equipe', { motivo });
   } catch (err) {
-    if (eDeFronteira(err)) throw err;
-    ctx.log.warn('gancho antes do turno: passagem à equipe falhou', {
-      erro: err instanceof Error ? err.name : 'desconhecido',
-    });
+    // A pessoa já leu que vai falar com alguém: engolir o erro deixaria a IA ligada e a
+    // Central sem aviso. Sobe, como na passagem por pedido explícito (`inbound-turn.ts`),
+    // e o job tenta de novo: a re-execução repete a decisão anotada, os envios voltam
+    // `already_sent` pelo ledger do job e `performHumanHandoff` é idempotente.
+    if (!eDeFronteira(err)) {
+      ctx.log.error('gancho antes do turno: passagem à equipe falhou — o job tenta de novo', {
+        erro: err instanceof Error ? err.name : 'desconhecido',
+        motivo,
+      });
+    }
+    throw err;
   }
 }
 

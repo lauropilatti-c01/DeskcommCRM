@@ -52,11 +52,12 @@ interface Consulta {
 }
 
 /** Um banco de mentira: responde o que o gancho lê e guarda o que ele escreve. */
-function banco(opcoes: { comFormulario?: boolean; reconsultaJaAgendada?: boolean } = {}) {
+function banco(opcoes: { comFormulario?: boolean; reconsultaJaAgendada?: boolean; falhaNaPassagem?: boolean } = {}) {
   const consultas: Consulta[] = [];
   const db = {
     query: vi.fn(async (sql: string, params: unknown[] = []) => {
       consultas.push({ sql, params });
+      if (opcoes.falhaNaPassagem && sql.includes("force_human = true")) throw new Error("banco fora");
       if (sql.includes("max(created_at)::text")) return { rows: [{ em: "2026-10-06 21:59:00+00" }], rowCount: 1 };
       if (sql.includes("from conversations c"))
         return { rows: [{ assignee_kind: null, assigned_to_user_id: null, last_inbound_at: null, provider: "meta" }], rowCount: 1 };
@@ -79,7 +80,10 @@ function banco(opcoes: { comFormulario?: boolean; reconsultaJaAgendada?: boolean
   return { db, consultas };
 }
 
-async function rodar(resposta: unknown, opcoes: { comFormulario?: boolean; reconsultaJaAgendada?: boolean; payload?: Record<string, unknown> } = {}) {
+async function rodar(
+  resposta: unknown,
+  opcoes: { comFormulario?: boolean; reconsultaJaAgendada?: boolean; falhaNaPassagem?: boolean; payload?: Record<string, unknown> } = {},
+) {
   const { db, consultas } = banco(opcoes);
   const pedidos: string[] = [];
   vi.stubGlobal(
@@ -208,6 +212,12 @@ describe("3. `passar_a_equipe`: a passagem da palavra \"atendente\"", () => {
     expect(JSON.stringify(aviso?.params)).not.toMatch(/pre_turn_hook|formulario-aluno-zero1/);
   });
 
+  it("se a passagem falha, o erro sobe e o job tenta de novo (a pessoa já leu que vai falar com alguém)", async () => {
+    await expect(
+      rodar({ acao: "segurar", enviar: [], motivo: "aluno-suporte", passar_a_equipe: true }, { falhaNaPassagem: true }),
+    ).rejects.toThrow("banco fora");
+  });
+
   it("sem o campo, ninguém é passado", async () => {
     const { consultas } = await rodar({ acao: "segurar", enviar: [] });
     expect(consultas.some((c) => c.sql.includes("force_human = true"))).toBe(false);
@@ -259,6 +269,11 @@ describe("a reconsulta no turno", () => {
     expect(turno.slice(resolve, resolve + 1500)).toMatch(
       /if \(reconsulta && operationAgent\?\.operationMode === 'assisted'\) \{[\s\S]*?return;/,
     );
+  });
+
+  it("a reconsulta não anota a vista: a mensagem que espera na fila é decidida pelo turno dela", () => {
+    expect(turno).toMatch(/if \(!reconsulta\) await anotarUltimaInboundVista\(pool, alvo\);/);
+    expect(turno).not.toMatch(/^\s*await anotarUltimaInboundVista\(pool, alvo\);/m);
   });
 
   it("a escolta da preparação não manda a frase de espera no turno marcado", () => {

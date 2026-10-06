@@ -6737,7 +6737,10 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
       });
       return;
     }
-    await anotarUltimaInboundVista(pool, alvo);
+    // (C01, -c01.6) Nem anota a vista na reconsulta: o que o gancho envia nela não é
+    // resposta à mensagem do cliente que ainda espera o job dela na fila, e quem decide
+    // essa mensagem é o turno dela (com o gancho), não esta régua.
+    if (!reconsulta) await anotarUltimaInboundVista(pool, alvo);
     await runAgentTurn(deps, job, pool, ctx, {
       resolvedAgent,
       channelSessionId: payload.channel_session_id,
