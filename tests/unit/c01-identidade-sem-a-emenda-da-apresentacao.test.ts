@@ -621,11 +621,13 @@ describe("(C01) a ligação no código", () => {
     expect(ENVIO).toMatch(/identidade\?: string;/);
     expect(LEDGER).toMatch(/^  identidade\?: string;$/m);
     expect(LEDGER).toMatch(
-      /export function hashDoConteudo\(\s*input: Pick<Intent, "body" \| "template" \| "media" \| "identidade">,\s*\): string \{/,
+      // (C01, -c01.5) `interactive` entrou no hash com o envio interativo (item C).
+      /export function hashDoConteudo\(\s*input: Pick<Intent, "body" \| "template" \| "media" \| "identidade" \| "interactive">,\s*\): string \{/,
     );
     expect(LEDGER).toContain('return h.update(input.identidade ?? input.body).digest("hex");');
     expect(LEDGER).toMatch(
-      /input: \{ tenantId: string; jobId: string \} & Pick<Intent, "body" \| "media" \| "template" \| "identidade">,/,
+      // (C01, -c01.5, 2ª rodada) `interactive` entrou: a re-execução do gancho confere o interativo registrado.
+      /input: \{ tenantId: string; jobId: string \} & Pick<Intent, "body" \| "media" \| "template" \| "identidade" \| "interactive">,/,
     );
   });
 

@@ -42,6 +42,7 @@ import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 
 import { withFields, type Logger } from '../obs/logger';
 import {
+  COLUNAS_DO_FORMULARIO,
   corpoDaMensagem,
   getLeadContext,
   textoDoClienteNaUltimaMensagem,
@@ -115,6 +116,8 @@ import {
 } from "./abertura/checkpoint";
 import { buildOpeningMessage, ritualBlocks } from "./abertura/ritual";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
+import { rodarGanchoAntesDoTurno, trocarResumoNoContexto, type GanchoAntesDoTurnoConfig } from './gancho-antes-do-turno';
+import { camposCompactosDoCard } from '../edge/crm/card-do-contato';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { applyScheduleFollowup, type FollowupWindowKnobs } from './schedule-followup';
 import { podeExporScheduleFollowup } from '@/lib/followup/callback-policy';
@@ -1018,8 +1021,20 @@ export async function loadInboundBodyForJob(
   db: Queryable,
   input: { tenantId: string; conversationId: string; inboundMessageId: string },
 ): Promise<string | null> {
+  return (await mensagemFixadaDoJob(db, input))?.corpo ?? null;
+}
+
+/**
+ * (C01, -c01.5) A linha canônica do job e se ela é uma resposta de formulário (que fica
+ * fora das checagens determinísticas, como em `semRespostasDeFormulario`).
+ */
+export async function mensagemFixadaDoJob(
+  db: Queryable,
+  input: { tenantId: string; conversationId: string; inboundMessageId: string },
+): Promise<{ corpo: string; formulario: boolean } | null> {
   const result = await db.query<CorpoDaMensagemRow>(
-    `select type, body, media_url, media_storage_path, media_derived_text
+    `select type, body, media_url, media_storage_path, media_derived_text,
+            ${COLUNAS_DO_FORMULARIO}
        from messages
       where organization_id = $1
         and conversation_id = $2
@@ -1029,7 +1044,7 @@ export async function loadInboundBodyForJob(
     [input.tenantId, input.conversationId, input.inboundMessageId],
   );
   const row = result.rows[0];
-  return row === undefined ? null : corpoDaMensagem(row);
+  return row === undefined ? null : { corpo: corpoDaMensagem(row), formulario: row.e_formulario === true };
 }
 
 /**
@@ -1322,7 +1337,8 @@ export async function comPassagemSeAPreparacaoFalhar<T>(
  * morre com o erro original.
  *
  * Reconcilia antes do caso: o ledger deste job já tem resposta aceita ou com o canal
- * (`estadoInicialDoJob`, a mesma leitura do turno) → não dispara; o lead já está em
+ * (`estadoInicialDoJob`, a mesma leitura do turno, inclusive o que o gancho antes do
+ * turno enviou, `doGancho`) → não dispara; o lead já está em
  * passagem → não dispara. Sem conseguir ler os dois, não dispara (limite documentado em
  * `C01.md`): a frase às cegas poderia ser a segunda mensagem a um lead já respondido ou
  * já passado. Antes dos desvios determinísticos (`marca.desviosConferidos`), confere a
@@ -1340,7 +1356,10 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
   const erro = `preparação do turno: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200);
   try {
     const estado = await estadoInicialDoJob(pool, { tenantId, jobId: job.id });
-    if (estado.enviadas > 0) {
+    // (C01, -c01.5) O que o gancho antes do turno enviou neste job (posições negativas,
+    // `doGancho`) também é resposta: o formulário já saiu, e a frase de espera com a
+    // passagem por cima dele calaria a resposta que o lead mandar.
+    if (estado.enviadas + (estado.doGancho ?? 0) > 0) {
       log.info('falha na preparação na última tentativa: o lead já tem resposta deste job — sem passagem', {
         erro,
       });
@@ -1473,14 +1492,16 @@ async function mensagensSemSuspeitaDeOptOut(
   log: Logger,
 ): Promise<boolean> {
   try {
-    const { rows } = await pool.query<{ direction: string; body: string | null }>(
-      `select direction, body from messages
+    const { rows } = await pool.query<{ direction: string; body: string | null; formulario: boolean | null }>(
+      `select direction, body, (metadata->'interactive'->>'type') = 'nfm_reply' as formulario from messages
         where organization_id = $1 and conversation_id = $2
         order by created_at desc limit 20`,
       [tenantId, conversationId],
     );
     for (const m of rows) {
       if (m.direction === 'outbound') break;
+      // (C01, -c01.5) Resposta de formulário não é fala do cliente (`semRespostasDeFormulario`).
+      if (m.formulario === true) continue;
       if (m.body !== null && detectAmbiguousOptOut(m.body)) return false;
     }
     return true;
@@ -1906,6 +1927,12 @@ export interface InboundTurnKnobs {
    * Ausente = `FRASE_DE_ESPERA_PADRAO`.
    */
   fraseDeEspera?: string;
+  /**
+   * (C01, -c01.5) O gancho antes do turno (AGENT_PRE_TURN_HOOK_URL / _SECRET /
+   * _TIMEOUT_MS). Ausente = o turno é o de antes, sem nenhuma chamada a mais.
+   * Ver `gancho-antes-do-turno.ts`.
+   */
+  ganchoAntesDoTurno?: GanchoAntesDoTurnoConfig;
   /** atraso do reagendamento em veto/queued herdado da F2-06 (SEND_QUEUED_RETRY_MS) */
   queuedRetryDelayMs: number;
   /**
@@ -2176,6 +2203,20 @@ export function inboundsNaoRespondidos(messages: readonly LeadContextMessage[]):
 }
 
 /**
+ * (C01, -c01.5) O histórico sem as respostas de formulário de entrada. É dele que sai
+ * `inboundsPendentes`, a lista que as checagens determinísticas leem (pedido de
+ * humano, palavra de passagem, suspeita de opt-out, urgência). O texto de uma resposta
+ * de formulário é o resumo do gancho antes do turno ou as respostas montadas
+ * (`corpoDaMensagem`), não a fala do cliente: "atendente" marcado num formulário não é
+ * pedido de humano. Vale em qualquer turno, não só no primeiro: no retry e no job
+ * seguinte o resumo já está na linha. O formulário continua no contexto do modelo e
+ * na tela; só não entra nessa lista (nem, por ela, no briefing da passagem).
+ */
+export function semRespostasDeFormulario(messages: readonly LeadContextMessage[]): LeadContextMessage[] {
+  return messages.filter((m) => !(m.direction === 'inbound' && m.formulario === true));
+}
+
+/**
  * Parâmetros do run que DIFEREM entre inbound (F2-09) e follow-up (F3-03): os ids
  * de envio (de fonte confiável — payload do drain no inbound, row do lead no
  * follow-up, nunca do payload do modelo) e a montagem da mensagem de abertura,
@@ -2354,7 +2395,8 @@ export async function deteccoesDeterministicasDoAssistido(
     );
     if (abertura.ok) {
       contextoLido = true;
-      inboundsPendentes = inboundsNaoRespondidos(abertura.context.messages);
+      // (C01, -c01.5) Sem as respostas de formulário (`semRespostasDeFormulario`).
+      inboundsPendentes = inboundsNaoRespondidos(semRespostasDeFormulario(abertura.context.messages));
       optedOutThisTurn = abertura.context.contact.is_blocked;
       lgpd = abertura.lgpd;
     } else {
@@ -2371,12 +2413,12 @@ export async function deteccoesDeterministicasDoAssistido(
   // falhou, e aí a mensagem fixada no job é o que temos.
   if (!contextoLido && args.inboundMessageId !== undefined) {
     try {
-      const fixada = await loadInboundBodyForJob(pool, {
+      const fixada = await mensagemFixadaDoJob(pool, {
         tenantId,
         conversationId,
         inboundMessageId: args.inboundMessageId,
       });
-      if (fixada !== null && fixada.trim() !== '') inboundsPendentes = [fixada];
+      if (fixada !== null && !fixada.formulario && fixada.corpo.trim() !== '') inboundsPendentes = [fixada.corpo];
     } catch (err) {
       log.warn('modo assistido: mensagem fixada não lida — sem detecção neste turno', {
         error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
@@ -3087,7 +3129,14 @@ async function executarTurnoDoAgente(
     : await getLeadContext(
         pool,
         deps.crmCfg,
-        { tenantId, leadId, conversationId: input.conversationId, fuso: fusoDaOrg },
+        {
+          tenantId,
+          leadId,
+          conversationId: input.conversationId,
+          fuso: fusoDaOrg,
+          // (C01, -c01.5) Os campos do card só com o gancho antes do turno ligado.
+          camposDoCard: deps.knobs.ganchoAntesDoTurno !== undefined,
+        },
         turnContextKnobs,
       );
   if (!openingContext.ok) {
@@ -3095,7 +3144,9 @@ async function executarTurnoDoAgente(
     // sumiu) — ambos re-tentam pela fila e morrem em 'dead' se persistirem.
     throw new Error(`abertura do turno falhou em get_lead_context (${openingContext.error.code})`);
   }
-  const currentInboundText =
+  // (C01, -c01.5) `let`: o gancho antes do turno troca o texto neutro de uma resposta
+  // de formulário pelo resumo dela, depois das checagens que leem o texto neutro.
+  let currentInboundText =
     input.inboundMessageId === undefined
       ? null
       : await loadInboundBodyForJob(pool, {
@@ -3177,7 +3228,8 @@ async function executarTurnoDoAgente(
   //    drain coalesce no job da primeira.
   const mensagemDoJob =
     currentInboundText ?? latestInboundSignal(openingContext.context.messages);
-  const inboundsPendentes = inboundsNaoRespondidos(openingContext.context.messages);
+  // (C01, -c01.5) Sem as respostas de formulário (`semRespostasDeFormulario`).
+  const inboundsPendentes = inboundsNaoRespondidos(semRespostasDeFormulario(openingContext.context.messages));
   if (
     !preview &&
     inboundsPendentes.some(
@@ -3258,6 +3310,46 @@ async function executarTurnoDoAgente(
   // (C01, -c01.3, rodada 3) Nenhum desvio determinístico disparou: a escolta da
   // preparação pode mandar a frase de espera sem conferir a suspeita de opt-out.
   marca.desviosConferidos = true;
+
+  // (C01, -c01.5) GANCHO ANTES DO TURNO (`gancho-antes-do-turno.ts`): um serviço de fora
+  // decide, antes do roteiro e do modelo, se o turno segue (com campos gravados no card e
+  // o resumo do formulário no lugar do texto neutro) ou se ele mesmo responde o cliente.
+  // Sem `AGENT_PRE_TURN_HOOK_URL` o knob não existe e nada aqui roda. Falha do gancho =
+  // o turno segue para o modelo, como antes.
+  const gancho = deps.knobs.ganchoAntesDoTurno;
+  if (gancho !== undefined && !preview && liveJob().kind === 'inbound_turn' && !optedOutThisTurn) {
+    const desfechoDoGancho = await rodarGanchoAntesDoTurno({
+      pool,
+      log: runLog,
+      config: gancho,
+      job: liveJob(),
+      tenantId,
+      contactId: leadId,
+      conversationId: input.conversationId,
+      channelSessionId: input.channelSessionId,
+      inboundMessageId: input.inboundMessageId ?? null,
+      agentId: agentConfig?.agentId ?? null,
+      ...(agentOperation !== undefined ? { agentOperation } : {}),
+      etiquetasDoContato: openingContext.context.contact.tags,
+      channel: liveChannel(),
+      optedOutThisTurn,
+      ...(lgpd !== undefined ? { lgpd } : {}),
+      ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
+      now: clock,
+      ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+    });
+    if (desfechoDoGancho.fim) return; // o gancho respondeu o cliente: sem modelo e sem fail-safe
+    if (desfechoDoGancho.camposDoCard !== undefined) {
+      const campos = camposCompactosDoCard(desfechoDoGancho.camposDoCard);
+      if (Object.keys(campos).length > 0) openingContext.context.campos_do_card = campos;
+      else delete openingContext.context.campos_do_card;
+    }
+    if (desfechoDoGancho.resumo !== undefined) {
+      const { resumo } = desfechoDoGancho;
+      trocarResumoNoContexto(openingContext.context.messages, { sentAt: resumo.sentAt, resumo: resumo.texto }, fusoDaOrg);
+      if (resumo.mensagemId === input.inboundMessageId) currentInboundText = resumo.texto;
+    }
+  }
 
   // ROTEIRO DE ATENDIMENTO (módulo opcional `fluxos_atendimento`, #1130). Entra
   // AQUI, depois de tudo que silencia o turno — handoff humano, pausa, pedido de
@@ -4052,7 +4144,13 @@ async function executarTurnoDoAgente(
             : await getLeadContext(
                 pool,
                 deps.crmCfg,
-                { tenantId, leadId, conversationId: input.conversationId, fuso: fusoDaOrg },
+                {
+                  tenantId,
+                  leadId,
+                  conversationId: input.conversationId,
+                  fuso: fusoDaOrg,
+                  camposDoCard: deps.knobs.ganchoAntesDoTurno !== undefined,
+                },
                 turnContextKnobs,
               );
           // Sem esta linha a projeção da abertura seria decorativa: bastaria o

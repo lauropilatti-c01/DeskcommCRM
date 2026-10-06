@@ -247,6 +247,13 @@ const envSchema = z.object({
   // (C01) Frase de espera do fail-safe de vocabulário interno (3 vetos seguidos): o que o
   // cliente lê enquanto uma pessoa assume. Sem valor = `FRASE_DE_ESPERA_PADRAO` do turno.
   AGENT_FRASE_DE_ESPERA: z.string().trim().min(1).optional(),
+  // (C01, -c01.5) Gancho antes do turno: um serviço de fora decide, antes do modelo, se o
+  // turno segue (com campos gravados e a mensagem resumida) ou é respondido por ele. Liga só
+  // com URL e segredo; sem a URL o turno é o de antes. A URL é conferida no módulo
+  // (`agent/gancho-antes-do-turno.ts`): inválida desliga o gancho com aviso, não derruba o boot.
+  AGENT_PRE_TURN_HOOK_URL: z.string().trim().min(1).optional(),
+  AGENT_PRE_TURN_HOOK_SECRET: z.string().trim().min(1).optional(),
+  AGENT_PRE_TURN_HOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(4000),
   // Circuit breaker de tools por run.
   TOOL_BREAKER_EXACT_WARN: z.coerce.number().int().positive().default(2),
   TOOL_BREAKER_EXACT_BLOCK: z.coerce.number().int().positive().default(5),

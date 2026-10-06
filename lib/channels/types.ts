@@ -164,7 +164,17 @@ export interface OutboundEnvelope extends ChannelTenantScope {
    * `undefined` = envio solto, que é o caso comum.
    */
   replyToExternalId?: string | null;
+  /**
+   * (C01, -c01.5) Mensagem interativa (botão, lista, formulário): o objeto
+   * `interactive` da plataforma, já pronto. Só chega aqui para canal que o
+   * envia (`canalEnviaInterativo`, conferido pelo handler antes da linha
+   * existir); `body` continua sendo o texto que a conversa mostra.
+   */
+  interactive?: OutboundInteractive;
 }
+
+/** (C01, -c01.5) Objeto `interactive` livre: só `type` é exigido. */
+export type OutboundInteractive = { type: string } & Record<string, unknown>;
 
 /**
  * Uma conversão (hoje, a venda) no vocabulário neutro que o canal traduz — ver

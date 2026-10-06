@@ -70,6 +70,10 @@ export interface SendMessageInput {
    * (corpo antes das emendas da cadeia). Só o hash o usa; o handler recebe `body`.
    */
   identidade?: string;
+  /** (C01, -c01.5) Mensagem interativa: vai ao handler como `text` + `interactive`. */
+  interactive?: { type: string } & Record<string, unknown>;
+  /** (C01, -c01.5) Vai a `metadata.origem` da linha (ex.: `pre_turn_hook`). */
+  origem?: string;
 }
 
 /**
@@ -99,7 +103,9 @@ export function corpoDoEnvio(
         : { type: 'text' as const }),
     // Foto sem legenda vai sem `body`: o schema do envio pede corpo não vazio.
     ...(input.body !== '' || !input.media ? { body: input.body } : {}),
-    metadata: { idempotency_key: idempotencyKey },
+    // (C01, -c01.5) Botão, lista ou formulário: a linha segue `text`.
+    ...(input.interactive && !input.template && !input.media ? { interactive: input.interactive } : {}),
+    metadata: { idempotency_key: idempotencyKey, ...(input.origem ? { origem: input.origem } : {}) },
   };
 }
 

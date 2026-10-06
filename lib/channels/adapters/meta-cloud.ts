@@ -335,7 +335,10 @@ export const metaCloudAdapter: ChannelAdapter = {
       );
     }
 
+    // (C01, -c01.5) Interativo primeiro: botão, lista ou formulário vão como a
+    // plataforma os descreve, e o `body` (o texto da conversa) não sai sozinho.
     const corpo =
+      (envelope.interactive ? { type: "interactive", interactive: envelope.interactive } : null) ??
       contactPayload(envelope) ??
       mediaPayload(envelope) ??
       { type: "text", text: { body: envelope.body ?? "" } };

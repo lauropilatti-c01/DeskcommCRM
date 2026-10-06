@@ -53,6 +53,19 @@ export interface ChannelSendInput {
    * `body`; o ledger reconhece a repetição por `identidade`. Ausente = `body`.
    */
   identidade?: string;
+  /**
+   * (C01, -c01.5) Presente = mensagem INTERATIVA (botão, lista, formulário): o
+   * objeto `interactive` da plataforma, só `type` exigido. A linha da conversa
+   * continua `text` (`body` é o texto que ela mostra) com o objeto em
+   * `metadata.interactive`. Canal que não envia interativo recusa (422
+   * `interativo_nao_suportado`), e o desfecho chega como `unavailable`.
+   */
+  interactive?: { type: string } & Record<string, unknown>;
+  /**
+   * (C01, -c01.5) Quem compôs o envio, quando não é o modelo: vai a `metadata.origem`
+   * da linha da conversa (o gancho antes do turno usa `pre_turn_hook`). Ausente = nada.
+   */
+  origem?: string;
 }
 
 /**

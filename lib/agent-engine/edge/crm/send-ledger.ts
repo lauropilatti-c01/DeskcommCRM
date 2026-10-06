@@ -28,6 +28,11 @@ type Intent = {
   template?: object;
   media?: object;
   /**
+   * (C01, -c01.5) Presente = mensagem interativa. Entra no hash como a foto e o
+   * template: dois formulários diferentes com o mesmo texto são duas mensagens.
+   */
+  interactive?: object;
+  /**
    * (C01) A identidade do TEXTO, quando difere do corpo entregue: o corpo antes das
    * emendas da cadeia de envio (o texto do modelo). Entra no hash em lugar de `body`.
    * A apresentação automática (`disclosureGate`, modo `inject`) emenda a 1ª mensagem ao
@@ -103,6 +108,13 @@ function canonico(valor: unknown): string {
   }
   return JSON.stringify(valor) ?? "null";
 }
+/** (C01, -c01.5) O interativo sem `body.text`, para o hash do conteúdo. */
+function interativoSemTexto(interactive: object): object {
+  const corpo = (interactive as { body?: unknown }).body;
+  if (corpo === null || typeof corpo !== "object" || Array.isArray(corpo)) return interactive;
+  const { text: _texto, ...resto } = corpo as Record<string, unknown>;
+  return { ...interactive, body: resto };
+}
 /**
  * (C01) A identidade do CONTEÚDO de um envio, gravada em `body_hash` e usada para
  * reconhecer, em qualquer posição do job, o que o canal já aceitou.
@@ -115,9 +127,16 @@ function canonico(valor: unknown): string {
  * legenda X colidia com o texto X (achado 1 da revisão adversarial, 03/10/2026).
  */
 export function hashDoConteudo(
-  input: Pick<Intent, "body" | "template" | "media" | "identidade">,
+  input: Pick<Intent, "body" | "template" | "media" | "identidade" | "interactive">,
 ): string {
   const h = createHash("sha256");
+  if (input.interactive !== undefined) {
+    // (C01, -c01.5) Sem o texto do balão (`body.text`): o texto entra pela `identidade`
+    // ou pelo `body`, como em todo envio. A apresentação automática da 1ª mensagem
+    // emenda o texto do balão, e só na 1ª execução: com ele no hash, a re-execução não
+    // reconhecia o interativo já aceito.
+    h.update("interactive\u0000").update(canonico(interativoSemTexto(input.interactive))).update("\u0000");
+  }
   if (input.template !== undefined) h.update("template\u0000").update(canonico(input.template)).update("\u0000");
   if (input.media !== undefined) h.update("media\u0000").update(canonico(input.media)).update("\u0000");
   // (C01) O texto que identifica o envio é o de antes das emendas da cadeia, quando
@@ -331,10 +350,13 @@ export async function sendWithLedger(
  * ou a confirmação do aceito —, nunca intenção nova. A resposta aqui tem de bater
  * com o que `sendWithLedger` vai reconhecer: por isso o recibo LEGADO de foto e
  * template (hash só do texto, confirmado pela mensagem gravada) também conta.
+ *
+ * (C01, -c01.5) Também para o interativo (o gancho antes do turno pergunta isto na
+ * re-execução, antes da cadeia de envio).
  */
 export async function conteudoRegistradoNoJob(
   db: Queryable,
-  input: { tenantId: string; jobId: string } & Pick<Intent, "body" | "media" | "template" | "identidade">,
+  input: { tenantId: string; jobId: string } & Pick<Intent, "body" | "media" | "template" | "identidade" | "interactive">,
 ): Promise<boolean> {
   const store = pgSendLedger(db);
   const hash = hashDoConteudo(input);
@@ -394,6 +416,14 @@ export async function reconcileAcceptedSend(
  *   reconciliado aqui como 'failed' — a mesma reconciliação que já acontece para a
  *   mensagem entregue — e entra na lista; antes ficava pendente para sempre.
  *
+ * - `doGancho` (C01, -c01.5): o que o gancho antes do turno deixou aceito ou com o
+ *   canal, nas posições negativas (`seq < 0`), que são só dele; ausente quando zero.
+ *   Conta à parte e nunca entra nos outros: o turno do modelo que roda depois (a rajada
+ *   cresceu, o job voltou à fila e o gancho mandou seguir) não trata como resposta à
+ *   mensagem nova o que o gancho mandou antes (o fail-safe do lead sem resposta
+ *   continua armado, o teto do turno não encolhe), e nunca reaproveita a posição -1 de
+ *   um envio do gancho que falhou.
+ *
  * `{ posicao: 0, enviadas: 0, pendentes: [], falhadas: [] }` em job sem recibo.
  */
 export async function estadoInicialDoJob(
@@ -404,6 +434,7 @@ export async function estadoInicialDoJob(
   enviadas: number;
   pendentes: string[];
   falhadas: Array<{ seq: number; chave: string }>;
+  doGancho?: number;
 }> {
   const store = pgSendLedger(db);
   const { rows } = await db.query<{ seq: number | string; status: SendLedgerStatus }>(
@@ -414,8 +445,14 @@ export async function estadoInicialDoJob(
   let enviadas = 0;
   const pendentes: string[] = [];
   const falhadas: Array<{ seq: number; chave: string }> = [];
+  let doGancho = 0;
   for (const row of rows) {
     const seq = Number(row.seq);
+    // (C01, -c01.5) Posição negativa é do gancho antes do turno: contador próprio.
+    if (seq < 0) {
+      if (await saiuPeloGancho(store, input, seq, row.status)) doGancho += 1;
+      continue;
+    }
     if (row.status === "accepted") {
       enviadas += 1;
       if (seq > posicao) posicao = seq;
@@ -449,7 +486,33 @@ export async function estadoInicialDoJob(
       falhadas.push({ seq, chave: recibo.id });
     }
   }
-  return { posicao, enviadas, pendentes, falhadas };
+  return { posicao, enviadas, pendentes, falhadas, ...(doGancho > 0 ? { doGancho } : {}) };
+}
+/**
+ * (C01, -c01.5) O envio do gancho nesta posição negativa saiu ou está com o canal? A
+ * mesma reconciliação dos recibos do modelo (mensagem entregue → 'accepted'; mensagem
+ * falhada → 'failed'), sem tocar nos contadores do modelo.
+ */
+async function saiuPeloGancho(
+  store: LedgerStore,
+  input: { tenantId: string; jobId: string },
+  seq: number,
+  status: SendLedgerStatus,
+): Promise<boolean> {
+  if (status === "accepted") return true;
+  if (status !== "requested" && status !== "queued") return false;
+  const recibo = await store.find({ ...input, leadId: null, seq, body: "" });
+  const mensagem = recibo ? await store.message(input.tenantId, recibo.id) : null;
+  if (!recibo || !mensagem) return false;
+  if (["sent", "delivered", "read"].includes(mensagem.status)) {
+    await store.update(input.tenantId, recibo.id, "accepted", mensagem.id, null);
+    return true;
+  }
+  if (mensagem.status === "failed") {
+    await store.update(input.tenantId, recibo.id, "failed", mensagem.id, "handler marcou a mensagem como failed");
+    return false;
+  }
+  return true;
 }
 /**
  * (C01, rodada 7) A posição falhada que o turno deu como dica a um envio foi OCUPADA

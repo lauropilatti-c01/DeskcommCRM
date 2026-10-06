@@ -1,5 +1,6 @@
 import type { Env } from '../env';
 import type { InboundTurnKnobs } from './inbound-turn';
+import { ganchoAntesDoTurnoDoAmbiente as ganchoDoAmbiente } from './gancho-antes-do-turno';
 import {
   modoDeDivulgacaoDaInstalacao,
   promessaSemanticaDaInstalacao,
@@ -14,6 +15,8 @@ export function turnKnobsFromEnv(env: Env): InboundTurnKnobs {
     maxOutputTokens: env.AGENT_MAX_OUTPUT_TOKENS,
     maxSendsPerTurn: env.MAX_SENDS_PER_TURN,
     ...(env.AGENT_FRASE_DE_ESPERA !== undefined ? { fraseDeEspera: env.AGENT_FRASE_DE_ESPERA } : {}),
+    // (C01, -c01.5) Gancho antes do turno: só existe com URL válida e segredo.
+    ...ganchoDoAmbiente(env),
     queuedRetryDelayMs: env.SEND_QUEUED_RETRY_MS,
     respostaObsoletaTetoMs: env.RESPOSTA_OBSOLETA_TETO_MS,
     breaker: {

@@ -36,6 +36,7 @@ import {
 } from "@/lib/channels";
 import { ARCHIVED_AT, queryTolerantToMissingArchived } from "@/lib/channels/archived";
 import { conferirDefinicao } from "@/lib/channels/conferir-definicao";
+import { canalEnviaInterativo } from "@/lib/channels/interativo";
 import { estadoDaJanela } from "@/lib/channels/janela";
 import { isMediaPathOwnedBy } from "@/lib/messaging/media/upload-validation";
 import { assertUrlDeMidiaSegura } from "@/lib/messaging/media/url-de-midia-externa";
@@ -520,6 +521,22 @@ export async function sendMessageHandler(
     }
   }
 
+  // (C01, -c01.5) Mensagem interativa só sai por canal que sabe entregá-la. A
+  // recusa vem ANTES da linha existir: sem ela o adapter de outro canal mandaria
+  // só o `body`, e a pessoa receberia o texto sem o botão que ele anuncia.
+  if (
+    input.interactive &&
+    !canalEnviaInterativo(c.channel_sessions?.provider ?? DEFAULT_CHANNEL_PROVIDER)
+  ) {
+    throw new ApiError(
+      422,
+      "interativo_nao_suportado",
+      { codigo: "interativo_nao_suportado", tipo: input.interactive.type },
+      ctx.requestId,
+      "Este canal não envia mensagem interativa (botão, lista ou formulário).",
+    );
+  }
+
   if (
     input.media_storage_path &&
     !isMediaPathOwnedBy(input.media_storage_path, c.organization_id, c.id)
@@ -724,6 +741,9 @@ export async function sendMessageHandler(
     sent_at: now,
     metadata: {
       ...(input.metadata ?? {}),
+      // (C01, -c01.5) O objeto que de fato sai: a linha é `text` e o botão, a
+      // lista ou o formulário só existem aqui.
+      ...(input.interactive ? { interactive: input.interactive } : {}),
       ...(ctx.actor.type === "ai_agent" ? { ai_actor_id: ctx.actor.id } : {}),
       // Os dois nomes viajam GRAVADOS porque o balão não faz join: "Fulano ·
       // via {token}" é desenhado da própria linha. Vêm DEPOIS de
@@ -1035,6 +1055,7 @@ export async function sendMessageHandler(
           kind: input.type,
           body: input.body ?? "",
           replyToExternalId: citada?.external_id ?? null,
+          ...(input.interactive ? { interactive: input.interactive } : {}),
         }));
       }
 

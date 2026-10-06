@@ -111,6 +111,19 @@ export const sendMessageSchema = z
      * linha do token e o membership, no banco.
      */
     on_behalf_of_user_id: z.string().uuid().optional(),
+    /**
+     * (C01, -c01.5) Mensagem interativa (botão, lista, formulário do WhatsApp
+     * Flows): o objeto `interactive` da plataforma, repassado sem interpretar —
+     * só `type` é exigido. Vai só com `type: "text"`: a linha continua `text`
+     * (o CHECK de `messages.type` não muda), `body` é o texto que a conversa
+     * mostra e o objeto fica em `metadata.interactive`. Canal que não envia
+     * interativo recusa com 422 `interativo_nao_suportado`, antes da linha existir.
+     */
+    interactive: z.looseObject({ type: z.string().min(1) }).optional(),
+  })
+  .refine((d) => !d.interactive || (d.type === "text" && !d.media_url && !d.media_storage_path), {
+    message: "interactive só vai com type text e sem mídia",
+    path: ["interactive"],
   })
   .refine(
     (d) => {
