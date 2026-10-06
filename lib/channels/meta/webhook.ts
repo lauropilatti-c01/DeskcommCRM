@@ -19,6 +19,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { parseMetaInboundContact } from "@/lib/channels/meta/contact-card";
 import type { SharedContact } from "@/lib/messaging/contact-card";
+import { TEXTO_DA_RESPOSTA_DE_FORMULARIO } from "../interativo";
 import type { MetaWebhookEnvelope } from "./envelope";
 
 /** Assinatura da Meta: `sha256=<hex>` no header `X-Hub-Signature-256`. */
@@ -129,7 +130,40 @@ export interface InboundMessageEvent {
    * leitura é de `extrairAtribuicaoMeta`. Opcional porque só a ingestão o lê.
    */
   referral?: unknown;
+  /**
+   * (C01, -c01.5) Resposta a algo interativo que enviamos: formulário (WhatsApp
+   * Flows, `nfm_reply`), botão (`button_reply`), lista (`list_reply`) ou botão de
+   * modelo (`button`). Chega como `type: "text"` com o texto em `text`, e o
+   * original aqui. Ver `lerRespostaInterativa`.
+   */
+  interactive?: RespostaInterativa | null;
+  /** O tipo como a Meta mandou, quando o CRM gravou outro (`interactive`, `button`). */
+  rawType?: string | null;
+  /** `context.id`: o `wamid` da nossa mensagem que o contato respondeu. */
+  contextId?: string | null;
 }
+
+/**
+ * (C01, -c01.5) O original de uma resposta interativa, como fica em
+ * `messages.metadata.interactive`. Os nomes dos campos são os da Meta, para quem
+ * lê o metadata reconhecer o fio.
+ */
+export type RespostaInterativa =
+  | {
+      type: "nfm_reply";
+      name: string | null;
+      body: string | null;
+      /** `flow_token` de dentro de `response_json` (é lá que a Meta o põe). */
+      flow_token: string | null;
+      /** `response_json` já lido; `null` quando não é um objeto JSON válido. */
+      response: Record<string, unknown> | null;
+      /** `response_json` exatamente como chegou. */
+      raw: string | null;
+    }
+  | { type: "button_reply" | "list_reply"; id: string | null; title: string | null; description?: string }
+  | { type: "button"; payload: string | null; text: string | null }
+  /** Subtipo interativo que este código ainda não conhece: guardado inteiro. */
+  | { type: string; original: unknown };
 
 /** Status de entrega de uma mensagem que ENVIAMOS (sent/delivered/read/failed). */
 export interface MessageStatusEvent {
@@ -206,6 +240,81 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+function objeto(v: unknown): Record<string, unknown> | null {
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+/**
+ * (C01, -c01.5) Resposta interativa do contato → texto + original. **Nunca
+ * descarta**: antes deste passo a mensagem entrava com `type: "interactive"` (ou
+ * `button`), o CHECK `messages_type_check` recusava o insert e a resposta do
+ * formulário sumia, com um `failed` no log e a pessoa sem resposta.
+ *
+ * Por que `text` e não um tipo novo: o CHECK não muda sem migração, e o texto é
+ * o que o inbox, a prévia e o agente já sabem mostrar. O original fica no
+ * metadata (mesmo caminho do canal não oficial, que já grava tipos que não têm
+ * coluna como `text`).
+ *
+ * `null` quando a mensagem não é interativa.
+ */
+export function lerRespostaInterativa(
+  raw: Record<string, unknown>,
+): { texto: string; interactive: RespostaInterativa } | null {
+  const tipo = str(raw.type);
+  if (tipo === "button") {
+    // Botão de resposta rápida de um MODELO (template): `{ text, payload }`.
+    const b = objeto(raw.button) ?? {};
+    const text = str(b.text);
+    const payload = str(b.payload);
+    return { texto: text ?? payload ?? "", interactive: { type: "button", payload, text } };
+  }
+  if (tipo !== "interactive") return null;
+
+  const i = objeto(raw.interactive) ?? {};
+  const sub = str(i.type);
+  if (sub === "nfm_reply") {
+    const n = objeto(i.nfm_reply) ?? {};
+    // A Meta manda `response_json` como STRING. Um parceiro que já entregue o
+    // objeto também serve; o bruto vira a serialização dele.
+    const bruto =
+      typeof n.response_json === "string"
+        ? n.response_json
+        : objeto(n.response_json)
+          ? JSON.stringify(n.response_json)
+          : null;
+    let response: Record<string, unknown> | null = null;
+    if (bruto !== null) {
+      try {
+        response = objeto(JSON.parse(bruto));
+      } catch {
+        response = null; // JSON quebrado não derruba a entrada: o bruto fica guardado
+      }
+    }
+    return {
+      texto: TEXTO_DA_RESPOSTA_DE_FORMULARIO,
+      interactive: {
+        type: "nfm_reply",
+        name: str(n.name),
+        body: str(n.body),
+        flow_token: str(response?.flow_token),
+        response,
+        raw: bruto,
+      },
+    };
+  }
+  if (sub === "button_reply" || sub === "list_reply") {
+    const r = objeto(i[sub]) ?? {};
+    const title = str(r.title);
+    const id = str(r.id);
+    const description = str(r.description);
+    return {
+      texto: title ?? id ?? "",
+      interactive: { type: sub, id, title, ...(description ? { description } : {}) },
+    };
+  }
+  return { texto: `[${sub ?? "interactive"}]`, interactive: { type: sub ?? "interactive", original: i } };
+}
+
 /**
  * Extrai os eventos que nos interessam. **Evento desconhecido é IGNORADO, não erro** —
  * a Meta re-entrega tudo que não recebe 2xx, então devolver falha para um evento que
@@ -248,9 +357,12 @@ export function parseMetaWebhook(envelope: MetaWebhookEnvelope): MetaWebhookEven
 
           const perfil = contatos.find((c) => str(c.wa_id) === from);
           const tipo = str(raw.type) ?? "unknown";
-          const corpoMidia = tipo !== "contacts" ? (raw[tipo] as Record<string, unknown> | undefined) : undefined;
+          const interativa = lerRespostaInterativa(raw);
+          const corpoMidia =
+            tipo !== "contacts" && !interativa ? (raw[tipo] as Record<string, unknown> | undefined) : undefined;
           const sharedContact = tipo === "contacts" ? parseMetaInboundContact(raw) : null;
-          const tipoCrm = tipo === "contacts" ? "contact" : tipo;
+          const tipoCrm = interativa ? "text" : tipo === "contacts" ? "contact" : tipo;
+          const contextId = str(objeto(raw.context)?.id);
 
           out.push({
             kind: "inbound_message",
@@ -262,8 +374,9 @@ export function parseMetaWebhook(envelope: MetaWebhookEnvelope): MetaWebhookEven
             // A Meta manda epoch em SEGUNDOS, string. Passar direto ao Date daria 1970.
             sentAt: new Date(Number(str(raw.timestamp) ?? "0") * 1000),
             type: tipoCrm,
-            text:
-              tipoCrm === "text"
+            text: interativa
+              ? interativa.texto
+              : tipoCrm === "text"
                 ? str((raw.text as Record<string, unknown>)?.body)
                 : sharedContact?.name ?? null,
             ...(sharedContact ? { sharedContact } : {}),
@@ -277,6 +390,8 @@ export function parseMetaWebhook(envelope: MetaWebhookEnvelope): MetaWebhookEven
                   }
                 : null,
             referral: raw.referral ?? null,
+            ...(interativa ? { interactive: interativa.interactive, rawType: tipo } : {}),
+            ...(contextId ? { contextId } : {}),
           });
         }
         continue;

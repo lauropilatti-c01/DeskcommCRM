@@ -253,6 +253,10 @@ export async function ingestMetaInbound(
       metadata: {
         ...(e.media ? { meta_media_id: e.media.id, voice: e.media.voice } : {}),
         ...(e.sharedContact ? { shared_contact: e.sharedContact } : {}),
+        // (C01, -c01.5) Resposta interativa entra como `text`; o original fica
+        // aqui. O gancho antes do turno lê `interactive` (ver `lerRespostaInterativa`).
+        ...(e.interactive ? { interactive: e.interactive, raw_type: e.rawType ?? "interactive" } : {}),
+        ...(e.contextId ? { context_id: e.contextId } : {}),
       },
     })
     .select("id")
