@@ -95,7 +95,8 @@ export type EstadoSemPaineis =
   | "desligado" // sem gancho configurado nesta instalação
   | "sem_paineis" // o serviço respondeu 404: não oferece painéis
   | "recusado" // 401/403: a assinatura não confere
-  | "indisponivel" // rede, prazo ou status fora de 2xx
+  | "prazo" // estourou os 5 s, no pedido ou na leitura do corpo
+  | "indisponivel" // rede ou status fora de 2xx (fora 404, 401 e 403)
   | "formato" // corpo que não é JSON, ou JSON cuja raiz não é objeto
   | "grande_demais"; // mais de 2 MB
 

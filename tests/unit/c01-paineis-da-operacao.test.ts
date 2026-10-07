@@ -114,11 +114,12 @@ describe("toda falha vira um estado da tela, nunca exceção", () => {
     ["401: assinatura recusada", async () => resposta('{"erro":"assinatura"}', 401), "recusado"],
     ["403: assinatura recusada", async () => resposta("", 403), "recusado"],
     ["500", async () => resposta("falhou", 500), "indisponivel"],
+    ["405", async () => resposta("", 405), "indisponivel"],
     ["rede", async () => Promise.reject(new TypeError("fetch failed")), "indisponivel"],
     [
       "prazo",
       async () => Promise.reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
-      "indisponivel",
+      "prazo",
     ],
     ["JSON inválido", async () => resposta("<html>oi</html>"), "formato"],
     ["raiz que não é objeto", async () => resposta("[1,2,3]"), "formato"],

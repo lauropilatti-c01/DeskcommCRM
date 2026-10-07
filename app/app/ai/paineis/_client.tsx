@@ -201,7 +201,10 @@ function ConteudoDoPainel({ painel, busca }: { painel: PainelNaTela; busca: stri
   );
 }
 
-const ERROS: ReadonlySet<EstadoSemPaineis> = new Set(["recusado", "indisponivel", "formato", "grande_demais"]);
+const ERROS: ReadonlySet<EstadoSemPaineis> = new Set(["recusado", "prazo", "indisponivel", "formato", "grande_demais"]);
+
+/** Só o que pode dar certo na próxima tentativa: prazo estourado, rede ou erro do lado do serviço. */
+const VALE_TENTAR_DE_NOVO: ReadonlySet<EstadoSemPaineis | "vazio"> = new Set(["prazo", "indisponivel"]);
 
 function SemPaineis({ estado }: { estado: EstadoSemPaineis | "vazio" }) {
   const t = useT();
@@ -212,7 +215,8 @@ function SemPaineis({ estado }: { estado: EstadoSemPaineis | "vazio" }) {
     ),
     sem_paineis: t("O sistema conectado ao agente não oferece painéis."),
     recusado: t("O sistema conectado recusou a consulta porque a assinatura não confere dos dois lados."),
-    indisponivel: t("O sistema conectado não respondeu a tempo; tente de novo em alguns instantes."),
+    prazo: t("O sistema conectado não respondeu a tempo; tente de novo em alguns instantes."),
+    indisponivel: t("O sistema conectado não respondeu como esperado; tente de novo em alguns instantes."),
     formato: t("O sistema conectado respondeu num formato que esta tela não sabe ler."),
     grande_demais: t("A resposta do sistema conectado passou do tamanho que esta tela aceita."),
     vazio: t("O sistema conectado ainda não mandou nenhum painel."),
@@ -223,9 +227,8 @@ function SemPaineis({ estado }: { estado: EstadoSemPaineis | "vazio" }) {
       icon={erro ? WarningOctagon : Eye}
       headline={erro ? t("Não deu para carregar os painéis") : t("Nenhum painel para mostrar")}
       subcopy={frase[estado]}
-      // Só o serviço que não respondeu a tempo pode responder na próxima; assinatura e formato
-      // errados não mudam com um clique.
-      primary={estado === "indisponivel" ? { label: t("Tentar de novo"), onClick: () => router.refresh() } : undefined}
+      // Assinatura e formato errados não mudam com um clique.
+      primary={VALE_TENTAR_DE_NOVO.has(estado) ? { label: t("Tentar de novo"), onClick: () => router.refresh() } : undefined}
     />
   );
 }

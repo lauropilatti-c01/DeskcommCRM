@@ -123,7 +123,7 @@ export async function buscarPaineis(
       signal: AbortSignal.timeout(opts.prazoMs ?? PRAZO_DOS_PAINEIS_MS),
     });
   } catch (err) {
-    return falha("indisponivel", eTimeout(err) ? "prazo" : "rede");
+    return eTimeout(err) ? falha("prazo", "prazo") : falha("indisponivel", "rede");
   }
 
   if (res.status === 404) {
@@ -143,7 +143,7 @@ export async function buscarPaineis(
   try {
     corpo = await corpoAteOTeto(res, opts.tetoBytes ?? TETO_DA_RESPOSTA_DOS_PAINEIS);
   } catch (err) {
-    return falha("indisponivel", eTimeout(err) ? "prazo" : "rede");
+    return eTimeout(err) ? falha("prazo", "prazo") : falha("indisponivel", "rede");
   }
   if (corpo === null) return falha("grande_demais", "teto");
 

@@ -13727,6 +13727,7 @@ export const DICIONARIO: Traducoes = {
   "O sistema conectado ao agente não oferece painéis.": { es: "El sistema conectado al agente no ofrece paneles." },
   "O sistema conectado recusou a consulta porque a assinatura não confere dos dois lados.": { es: "El sistema conectado rechazó la consulta porque la firma no coincide entre los dos lados." },
   "O sistema conectado não respondeu a tempo; tente de novo em alguns instantes.": { es: "El sistema conectado no respondió a tiempo; inténtalo de nuevo en unos instantes." },
+  "O sistema conectado não respondeu como esperado; tente de novo em alguns instantes.": { es: "El sistema conectado no respondió como se esperaba; inténtalo de nuevo en unos instantes." },
   "O sistema conectado respondeu num formato que esta tela não sabe ler.": { es: "El sistema conectado respondió en un formato que esta pantalla no sabe leer." },
   "A resposta do sistema conectado passou do tamanho que esta tela aceita.": { es: "La respuesta del sistema conectado superó el tamaño que esta pantalla acepta." },
   "O sistema conectado ainda não mandou nenhum painel.": { es: "El sistema conectado todavía no envió ningún panel." },

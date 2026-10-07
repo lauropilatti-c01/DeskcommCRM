@@ -102,7 +102,8 @@ describe("a tela dos painéis", () => {
     ["desligado", "Nenhum sistema está conectado ao agente nesta instalação; quando estiver, os painéis que ele mandar aparecem aqui."],
     ["sem_paineis", "O sistema conectado ao agente não oferece painéis."],
     ["recusado", "O sistema conectado recusou a consulta porque a assinatura não confere dos dois lados."],
-    ["indisponivel", "O sistema conectado não respondeu a tempo; tente de novo em alguns instantes."],
+    ["prazo", "O sistema conectado não respondeu a tempo; tente de novo em alguns instantes."],
+    ["indisponivel", "O sistema conectado não respondeu como esperado; tente de novo em alguns instantes."],
     ["formato", "O sistema conectado respondeu num formato que esta tela não sabe ler."],
     ["grande_demais", "A resposta do sistema conectado passou do tamanho que esta tela aceita."],
   ] as const)("estado %s: uma frase, sem quebrar a página", (estado, frase) => {
@@ -110,6 +111,9 @@ describe("a tela dos painéis", () => {
     expect(screen.getByText(frase)).toBeTruthy();
     expect(screen.queryByRole("tab")).toBeNull();
     expect(container.textContent).not.toMatch(/https?:|172\.17|segredo/i);
+    // "Tentar de novo" só onde a próxima tentativa pode dar certo.
+    const tentar = screen.queryByRole("button", { name: "Tentar de novo" });
+    expect(tentar !== null).toBe(estado === "prazo" || estado === "indisponivel");
   });
 
   it("serviço sem nenhum painel tem estado vazio próprio", () => {
