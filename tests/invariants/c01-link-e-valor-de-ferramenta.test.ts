@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { tool } from "ai";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import pg from "pg";
+import { z } from "zod";
 
 import type * as InboundTurn from "@/lib/agent-engine/agent/inbound-turn";
+import type * as McpTools from "@/lib/agent-engine/edge/crm/mcp-tools";
 import type * as Providers from "@/lib/agent-engine/edge/llm/providers";
 import type * as Queue from "@/lib/agent-engine/queue/queue";
 import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
@@ -24,8 +27,40 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *     aparece no log nem no trace gravado (só no caso, que é para a equipe ler);
  *   - interruptor desligado: a trava não faz nada.
  *
+ * E a convivência com a `valor_em_dinheiro` (CRM-060), ligada pelo interruptor dela:
+ *   - o preço do curso que veio da consulta às ofertas (base externa) neste turno é
+ *     barrado por ela, mesmo com a nova ligada (a nova o liberaria);
+ *   - o salário da base passa nas duas; o inventado é barrado pela nova.
+ * A base externa é a ferramenta de verdade do turno (`crm_query_external_data`,
+ * embrulhada pelo turno); só a montagem dela pelo MCP é trocada por uma falsa.
+ *
  * Domínios, links e valores são fictícios, na forma dos reais (regra do C01.md).
  */
+
+/** O que a consulta às ofertas devolve: o preço do curso, na forma do MCP. */
+const RESULTADO_DAS_OFERTAS = {
+  content: [
+    {
+      type: "text",
+      text: JSON.stringify({ rows: [{ produto: "Plano anual", preco: 1997, parcela: "12x de R$ 166,42" }] }),
+    },
+  ],
+};
+
+vi.mock("@/lib/agent-engine/edge/crm/mcp-tools", async (importOriginal) => ({
+  ...(await importOriginal<typeof McpTools>()),
+  buildMcpTurnTools: async () => ({
+    tools: {
+      crm_query_external_data: tool({
+        description: "Consulta a base externa da organização.",
+        inputSchema: z.object({ tabela: z.string() }),
+        execute: async () => RESULTADO_DAS_OFERTAS,
+      }),
+    },
+    toolIds: ["crm_query_external_data"],
+    cleanup: async () => {},
+  }),
+}));
 
 const container = process.env.TEST_DB_CONTAINER;
 if (!container) {
@@ -63,6 +98,7 @@ const LINK_ALTERADO = "https://lp.exemplo.com.br/plano-completo/?nivel=tecnico";
 const LINK_DO_BOTAO = "https://lp.exemplo.com.br/enfases/?canal=crm&sid=dc-ab12cd34&utm_source=crm";
 const URL_FIXA = "https://ajuda.exemplo.com.br/duvidas";
 const INTERRUPTOR = "trava:link_e_valor_de_ferramenta";
+const INTERRUPTOR_DO_VALOR_EM_DINHEIRO = "trava:valor_em_dinheiro";
 
 type Modules = {
   turno: typeof InboundTurn;
@@ -86,8 +122,8 @@ const USO = {
   outputTokens: { total: 1, text: 1, reasoning: 0 },
 };
 
-/** Uma etapa do modelo falso: consultar a base RAG, ou mandar este texto. */
-type Etapa = { busca: string } | { envia: string };
+/** Uma etapa do modelo falso: consultar a base RAG, consultar a base externa, ou mandar este texto. */
+type Etapa = { busca: string } | { base: string } | { envia: string };
 
 /**
  * Modelo falso: segue o roteiro e depois encerra. Guarda o texto de cada prompt das
@@ -120,12 +156,19 @@ function modelo(roteiro: Etapa[]) {
               toolName: "search_knowledge",
               input: JSON.stringify({ query: etapa.busca }),
             }
-          : {
-              type: "tool-call" as const,
-              toolCallId: `c${estado.etapas}`,
-              toolName: "send_message",
-              input: JSON.stringify({ body: etapa.envia }),
-            },
+          : "base" in etapa
+            ? {
+                type: "tool-call" as const,
+                toolCallId: `c${estado.etapas}`,
+                toolName: "crm_query_external_data",
+                input: JSON.stringify({ tabela: etapa.base }),
+              }
+            : {
+                type: "tool-call" as const,
+                toolCallId: `c${estado.etapas}`,
+                toolName: "send_message",
+                input: JSON.stringify({ body: etapa.envia }),
+              },
       ],
       finishReason: { unified: "tool-calls" as const, raw: undefined },
       usage: USO,
@@ -292,9 +335,9 @@ beforeAll(async () => {
   await pool.query(
     `insert into ai_agent_versions (id, organization_id, agent_id, version_number, system_prompt,
                                     provider, model, channel_session_id, status, published_at, max_steps,
-                                    knowledge_source_ids)
+                                    knowledge_source_ids, tool_ids)
      values ($1,$2,$3,1,'Você é um atendente de teste.','anthropic','claude-sonnet-4-6',$4,'published',now(),8,
-             array[$5::uuid])
+             array[$5::uuid], array['crm_query_external_data'])
      on conflict (id) do nothing`,
     [VERSAO, ORG, AGENTE, SESSION, FONTE],
   );
@@ -321,6 +364,11 @@ beforeEach(async () => {
      on conflict (organization_id, layer) do update set enabled = true`,
     [ORG, INTERRUPTOR],
   );
+  // A `valor_em_dinheiro` começa sem linha (e sem JSON): desligada, como na produção.
+  await pool.query("delete from org_guardrail_layers where organization_id = $1 and layer = $2", [
+    ORG,
+    INTERRUPTOR_DO_VALOR_EM_DINHEIRO,
+  ]);
   await pool.query("delete from before_send_traces where organization_id = $1", [ORG]);
   await pool.query("delete from agent_case_events where organization_id = $1", [ORG]);
   await pool.query("delete from agent_cases where organization_id = $1", [ORG]);
@@ -454,5 +502,60 @@ describe("(C01, -c01.7) a trava 'link e valor de ferramenta' no turno inteiro", 
 
     expect(enviados.map((e) => e.body)).toEqual([corpo]);
     expect(mod.estado.prompts.join("\n")).not.toContain("link_ou_valor_sem_consulta");
+  });
+});
+
+/** Os vetos gravados no trace deste caso: (trava, código). */
+async function vetosGravados(): Promise<Array<[string | null, string | null]>> {
+  const { rows } = await pool.query<{ vetoed_gate: string | null; vetoed_code: string | null }>(
+    "select vetoed_gate, vetoed_code from before_send_traces where organization_id = $1 and vetoed_gate is not null order by created_at",
+    [ORG],
+  );
+  return rows.map((r) => [r.vetoed_gate, r.vetoed_code]);
+}
+
+describe("(C01, -c01.7) convivência com a `valor_em_dinheiro` (CRM-060), no turno inteiro", () => {
+  async function ligaValorEmDinheiro(): Promise<void> {
+    await pool.query(
+      `insert into org_guardrail_layers (organization_id, layer, enabled) values ($1, $2, true)
+       on conflict (organization_id, layer) do update set enabled = true`,
+      [ORG, INTERRUPTOR_DO_VALOR_EM_DINHEIRO],
+    );
+  }
+
+  it("o preço do curso que veio das ofertas neste turno é barrado pela `valor_em_dinheiro`, mesmo com a nova ligada", async () => {
+    await ligaValorEmDinheiro();
+    const mod = modelo([{ base: "ofertas" }, { envia: "O plano anual sai por R$ 1.997,00." }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+
+    // A consulta à base externa devolveu o preço (a 2ª etapa o leu), e a nova o liberaria.
+    expect(mod.estado.prompts[1]).toContain("Plano anual");
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  it("controle: sem a `valor_em_dinheiro`, a nova solta o preço que veio da consulta (por isso o interruptor dela)", async () => {
+    const corpo = "O plano anual sai por R$ 1.997,00.";
+    const mod = modelo([{ base: "ofertas" }, { envia: corpo }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    expect(await vetosGravados()).toEqual([]);
+  });
+
+  it("o salário da base passa nas duas", async () => {
+    await ligaValorEmDinheiro();
+    const corpo = "O salário inicial é de R$ 6.638,64.";
+    const mod = modelo([{ busca: "salário" }, { envia: corpo }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    expect(await vetosGravados()).toEqual([]);
+  });
+
+  it("o salário inventado é barrado pela nova", async () => {
+    await ligaValorEmDinheiro();
+    const mod = modelo([{ busca: "salário" }, { envia: "O salário inicial é de R$ 6.700." }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"]]);
   });
 });

@@ -11293,14 +11293,17 @@ export const DICIONARIO: Traducoes = {
   "Vale para a organização toda. Sem custo.": {
     es: "Vale para toda la organización. Sin costo.",
   },
+  "— vem da configuração da organização": {
+    es: "— viene de la configuración de la organización",
+  },
   "Só mandar link que tem de onde vir": {
     es: "Solo enviar enlaces que tengan de dónde venir",
   },
   "Barra o link que o assistente montou ou alterou: só sai o endereço que a sua base devolveu, que já foi mandado nesta conversa ou que é de um domínio que você liberou.": {
     es: "Bloquea el enlace que el asistente armó o modificó: solo sale la dirección que devolvió tu base, que ya se envió en esta conversación o que es de un dominio que habilitaste.",
   },
-  "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.": {
-    es: "Depende de la lista de dominios de cada negocio. Si el asistente insiste tres veces con un enlace sin origen, la conversación pasa a una persona del equipo y el enlace no sale.",
+  "Depende da lista de domínios de cada negócio. Para links, a que se liga nesta tela é «Link e valor só do que foi consultado». Se o assistente insistir três vezes num link sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.": {
+    es: "Depende de la lista de dominios de cada negocio. Para enlaces, la que se activa en esta pantalla es «Enlaces y valores solo de lo que se consultó». Si el asistente insiste tres veces con un enlace sin origen, la conversación pasa a una persona del equipo y el enlace no sale.",
   },
   "Valor em dinheiro só na página de matrícula": {
     es: "Valores en dinero solo en la página de matrícula",
@@ -11308,8 +11311,8 @@ export const DICIONARIO: Traducoes = {
   "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que traz os valores certos, em vez de escrever um número que pode estar errado.": {
     es: "Bloquea el mensaje con precio, cuota, intereses o descuento: el asistente envía la página, que tiene los valores correctos, en lugar de escribir un número que puede estar equivocado.",
   },
-  "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
-    es: "Cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
+  "Vem desligada: é escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
+    es: "Viene desactivada: cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
   },
   "Uma pergunta por mensagem": {
     es: "Una pregunta por mensaje",

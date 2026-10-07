@@ -2,12 +2,13 @@
  * (C01, -c01.7) GET/PUT /api/v1/ai/send-guards — as travas de envio que se ligam pela
  * tela, por organização ("Confere antes de enviar").
  *
- * Hoje uma só: `link_e_valor_de_ferramenta` (ver
- * `lib/agent-engine/guardrails/link-e-valor-de-ferramenta.ts`). A escolha fica numa
- * linha de `org_guardrail_layers` com a chave `trava:<nome>` — a coluna `layer` é
- * vocabulário aberto, então não há mudança de banco. Ausência de linha = desligada
- * (a trava vem desligada). O turno do agente lê a mesma linha
- * (`lerTravasDeEnvioDaOrg`); o GET é a conferência depois de ligar.
+ * As da lista `TRAVAS_COM_INTERRUPTOR` (`lib/agent-engine/guardrails/interruptores-de-trava.ts`):
+ * `link_e_valor_de_ferramenta` e `valor_em_dinheiro`. A escolha fica numa linha de
+ * `org_guardrail_layers` com a chave `trava:<nome>` — a coluna `layer` é vocabulário
+ * aberto, então não há mudança de banco. O GET devolve o estado que VALE, pela mesma
+ * função do turno (`interpretarTravasDeEnvio`): a linha, se existe; sem linha, a
+ * `valor_em_dinheiro` segue o `settings.travas_de_envio` de antes, e a outra fica
+ * desligada. `origem` diz de onde veio: `tela`, `configuracao` ou `padrao`.
  *
  * O mesmo molde de `/api/v1/ai/style-adjustments`: lista FECHADA no PUT (um nome fora
  * dela é recusado, e nenhuma trava fixa da cadeia se desliga por aqui), leitura por
@@ -25,7 +26,9 @@ import { roleAtLeast } from "@/lib/auth/types";
 import {
   TRAVAS_COM_INTERRUPTOR,
   chaveDoInterruptor,
-} from "@/lib/agent-engine/guardrails/link-e-valor-de-ferramenta";
+  type TravaComInterruptor,
+} from "@/lib/agent-engine/guardrails/interruptores-de-trava";
+import { interpretarTravasDeEnvio } from "@/lib/agent-engine/guardrails/travas-de-envio";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { createClient } from "@/lib/supabase/server";
 
@@ -44,20 +47,35 @@ export async function GET(): Promise<Response> {
   const { org } = authz;
 
   const db = await createClient();
-  const { data, error } = await db
-    .from("org_guardrail_layers")
-    .select("layer, enabled")
-    .eq("organization_id", org.orgId)
-    .in("layer", TRAVAS_COM_INTERRUPTOR.map(chaveDoInterruptor));
+  const [camadas, organizacao] = await Promise.all([
+    db
+      .from("org_guardrail_layers")
+      .select("layer, enabled")
+      .eq("organization_id", org.orgId)
+      .in("layer", TRAVAS_COM_INTERRUPTOR.map(chaveDoInterruptor)),
+    db.from("organizations").select("settings").eq("id", org.orgId).maybeSingle(),
+  ]);
 
-  if (error) return fail("read_failed", error.message, 500);
+  if (camadas.error) return fail("read_failed", camadas.error.message, 500);
+  if (organizacao.error) return fail("read_failed", organizacao.error.message, 500);
 
-  const escolhas = new Map((data ?? []).map((row) => [row.layer as string, row.enabled === true]));
+  const escolhas = new Map((camadas.data ?? []).map((row) => [row.layer as string, row.enabled === true]));
+  const daTela = (trava: TravaComInterruptor): boolean | null => escolhas.get(chaveDoInterruptor(trava)) ?? null;
+  const settings = (organizacao.data?.settings ?? null) as { travas_de_envio?: unknown } | null;
+  const { travas } = interpretarTravasDeEnvio(settings?.travas_de_envio ?? null, {
+    linkEValorDeFerramenta: daTela("link_e_valor_de_ferramenta"),
+    valorEmDinheiro: daTela("valor_em_dinheiro"),
+  });
+  const efetivo: Record<TravaComInterruptor, boolean> = {
+    link_e_valor_de_ferramenta: travas.linkEValorDeFerramenta,
+    valor_em_dinheiro: travas.valorEmDinheiro,
+  };
 
   return ok({
     travas: TRAVAS_COM_INTERRUPTOR.map((trava) => ({
       trava,
-      enabled: escolhas.get(chaveDoInterruptor(trava)) ?? false,
+      enabled: efetivo[trava],
+      origem: daTela(trava) !== null ? "tela" : efetivo[trava] ? "configuracao" : "padrao",
     })),
     podeEditar: roleAtLeast(org.role, "admin"),
   });

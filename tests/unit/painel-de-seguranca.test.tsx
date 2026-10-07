@@ -33,7 +33,15 @@ vi.mock("@/lib/api/client", () => ({
     get: vi.fn(async (url: string) =>
       // (C01, -c01.7) As travas que se ligam pela tela têm rota própria.
       url.includes("/send-guards")
-        ? { data: { travas: [{ trava: "link_e_valor_de_ferramenta", enabled: true }], podeEditar: true } }
+        ? {
+            data: {
+              travas: [
+                { trava: "link_e_valor_de_ferramenta", enabled: true, origem: "tela" },
+                { trava: "valor_em_dinheiro", enabled: true, origem: "configuracao" },
+              ],
+              podeEditar: true,
+            },
+          }
         : {
             data: {
               camadas: [
@@ -180,26 +188,36 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
     }
   });
 
-  it("(C01, -c01.7) a trava com interruptor na tela: liga por organização, sem custo, e diz que vem desligada", async () => {
-    // Fora da contagem das camadas pagas (o testid não começa com `conferencia-`): ela
-    // não custa consulta ao modelo. E não é fixa: não pode dizer que "não se desliga".
+  it("(C01, -c01.7) as travas com interruptor na tela: ligam por organização, sem custo, e dizem que vêm desligadas", async () => {
+    // Fora da contagem das camadas pagas (o testid não começa com `conferencia-`): elas
+    // não custam consulta ao modelo. E não são fixas: não podem dizer que "não se desliga".
     renderPainel();
     const comInterruptor = CONFERENCIAS_DE_SAIDA.filter((c) => c.interruptorNaTela !== undefined);
-    expect(comInterruptor.map((c) => c.nome)).toEqual(["link_e_valor_de_ferramenta"]);
+    expect(comInterruptor.map((c) => c.nome)).toEqual(["link_e_valor_de_ferramenta", "valor_em_dinheiro"]);
     for (const c of comInterruptor) {
       expect(c.escolha).toBeNull();
       expect(c.camada).toBeNull();
+      expect(c.opcionalNaConfiguracao).toBeUndefined();
       await waitFor(() =>
         expect(screen.getByTestId(`trava-${c.nome}-liga`)).toHaveAttribute("data-state", "checked"),
       );
       const linha = screen.getByTestId(`trava-${c.nome}`);
-      expect(linha.textContent).toContain("Ligada por você");
       expect(linha.textContent).toContain("Sem custo.");
       expect(linha.textContent).toContain("Vem desligada");
       expect(linha.textContent).not.toContain("não se desliga");
       expect(screen.queryByTestId(`conferencia-${c.nome}-fixa`)).toBeNull();
       expect(screen.queryByTestId(`conferencia-${c.nome}-opcional`)).toBeNull();
     }
+    // A tela diz de onde vem o estado que vale: a escolha na tela ou a configuração da organização.
+    expect(screen.getByTestId("trava-link_e_valor_de_ferramenta-estado").textContent).toBe("Ligada por você");
+    expect(screen.getByTestId("trava-valor_em_dinheiro-estado").textContent).toBe(
+      "Ligada — vem da configuração da organização",
+    );
+    // A de link continua sem interruptor, e a ajuda dela aponta a que se liga aqui.
+    expect(screen.queryByTestId("trava-link_permitido-liga")).toBeNull();
+    expect(screen.getByTestId("conferencia-link_permitido-opcional").textContent).toContain(
+      "Para links, a que se liga nesta tela é «Link e valor só do que foi consultado»",
+    );
   });
 
   it("as configuráveis dizem o CUSTO — é o que torna a escolha uma escolha", () => {

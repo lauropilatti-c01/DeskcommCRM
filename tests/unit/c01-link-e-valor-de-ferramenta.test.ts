@@ -269,6 +269,96 @@ describe("(C01) a configuração: interruptor na tela, URLs fixas no JSON", () =
     const semLinha = { query: async () => ({ rows: [{ travas: null, link_e_valor: null }] }) };
     expect((await lerTravasDeEnvioDaOrg(semLinha, "org-1")).travas.linkEValorDeFerramenta).toBe(false);
   });
+
+  it("`valor_em_dinheiro`: a linha da tela, se existe, manda; sem linha, vale o JSON de antes", async () => {
+    const { interpretarTravasDeEnvio, lerTravasDeEnvioDaOrg } = (await import(
+      /* @vite-ignore */ CAMINHO_DA_CONFIGURACAO
+    )) as {
+      interpretarTravasDeEnvio: (
+        v: unknown,
+        i?: { valorEmDinheiro?: boolean | null },
+      ) => { travas: { valorEmDinheiro: boolean }; invalida: boolean };
+      lerTravasDeEnvioDaOrg: (db: unknown, org: string) => Promise<{ travas: { valorEmDinheiro: boolean } }>;
+    };
+    const noJson = { valor_em_dinheiro: { ligada: true } };
+    const casos: Array<[unknown, boolean | null, boolean]> = [
+      [null, null, false], // nada liga sozinho
+      [noJson, null, true], // sem linha: o JSON de antes (o laboratório continua como está)
+      [noJson, false, false], // a linha desliga o que o JSON liga
+      [null, true, true], // a linha liga sem JSON
+      [{ valor_em_dinheiro: { ligada: false } }, true, true],
+      [{ texto_longo: { ligada: "sim" } }, true, true], // JSON inválido: a linha ainda manda
+      [{ texto_longo: { ligada: "sim" } }, null, false],
+    ];
+    for (const [json, linha, esperado] of casos) {
+      expect(
+        interpretarTravasDeEnvio(json, { valorEmDinheiro: linha }).travas.valorEmDinheiro,
+        JSON.stringify({ json, linha }),
+      ).toBe(esperado);
+    }
+    const consultas: string[] = [];
+    const db = {
+      query: async (sql: string) => {
+        consultas.push(sql);
+        return { rows: [{ travas: noJson, link_e_valor: null, valor_em_dinheiro: false }] };
+      },
+    };
+    expect((await lerTravasDeEnvioDaOrg(db, "org-1")).travas.valorEmDinheiro).toBe(false);
+    expect(consultas[0]).toContain("l.layer = 'trava:valor_em_dinheiro') as valor_em_dinheiro");
+  });
+});
+
+describe("(C01) convivência com a `valor_em_dinheiro` (CRM-060), na ordem da cadeia", () => {
+  /** O resultado da consulta às ofertas (base externa): o preço do curso, que a trava nova libera. */
+  const RESULTADO_DAS_OFERTAS = {
+    content: [{ type: "text", text: JSON.stringify({ rows: [{ produto: "Plano anual", preco: 1997, parcela: "166.42" }] }) }],
+  };
+
+  async function cadeia(body: string, opcoes: { valorEmDinheiro: boolean; linkEValor: boolean }) {
+    const { BEFORE_SEND_GATES, evaluateBeforeSend } = await import("@/lib/agent-engine/guardrails/before-send");
+    const gates = BEFORE_SEND_GATES.filter((g) =>
+      ["link_e_valor_de_ferramenta", "valor_em_dinheiro"].includes(g.name),
+    );
+    expect(gates.map((g) => g.name)).toEqual(["link_e_valor_de_ferramenta", "valor_em_dinheiro"]);
+    const liberado = await armado({ resultado: [RESULTADO_DAS_OFERTAS, RESULTADO_DA_CONSULTA] });
+    return evaluateBeforeSend(
+      {
+        body,
+        travasDeEnvio: {
+          ...(opcoes.linkEValor ? { linkEValorDeFerramenta: liberado } : {}),
+          ...(opcoes.valorEmDinheiro ? { valorEmDinheiro: true } : {}),
+        },
+      } as never,
+      gates as never,
+    );
+  }
+
+  it("o preço do curso que veio das ofertas neste turno é barrado pela `valor_em_dinheiro`, mesmo com a nova ligada", async () => {
+    const { veto, trace } = await cadeia("O plano anual sai por R$ 1.997,00 ou 12x de R$ 166,42.", {
+      valorEmDinheiro: true,
+      linkEValor: true,
+    });
+    expect(veto?.code).toBe("valor_em_dinheiro");
+    expect(trace.map((e) => [e.gate, e.verdict])).toEqual([
+      ["link_e_valor_de_ferramenta", "pass"],
+      ["valor_em_dinheiro", "veto"],
+    ]);
+    // Por isso a `valor_em_dinheiro` ganhou interruptor: sem ela, a nova soltaria o preço.
+    expect((await cadeia("O plano anual sai por R$ 1.997,00.", { valorEmDinheiro: false, linkEValor: true })).veto).toBeNull();
+  });
+
+  it("o salário da base passa nas duas", async () => {
+    const { veto, trace } = await cadeia("O salário inicial é de R$ 6.638,64.", { valorEmDinheiro: true, linkEValor: true });
+    expect(veto).toBeNull();
+    expect(trace.map((e) => e.verdict)).toEqual(["pass", "pass"]);
+  });
+
+  it("o salário inventado é barrado pela nova (a `valor_em_dinheiro` o deixaria passar)", async () => {
+    const ambas = await cadeia("O salário inicial é de R$ 6.700.", { valorEmDinheiro: true, linkEValor: true });
+    expect(ambas.veto?.code).toBe("link_ou_valor_sem_consulta");
+    const soAAntiga = await cadeia("O salário inicial é de R$ 6.700.", { valorEmDinheiro: true, linkEValor: false });
+    expect(soAAntiga.veto).toBeNull();
+  });
 });
 
 describe("(C01) a ligação no turno e na cadeia, pelo código", () => {

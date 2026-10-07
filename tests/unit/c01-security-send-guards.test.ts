@@ -25,6 +25,7 @@ describe("(C01) segurança das travas de envio ligadas pela tela", () => {
 
   it("leitura e escrita prendem a organização autenticada; o turno lê a linha da própria organização", () => {
     expect(rota).toContain('.eq("organization_id", org.orgId)');
+    expect(rota).toContain('db.from("organizations").select("settings").eq("id", org.orgId)');
     expect(rota).toContain("organization_id: org.orgId");
     expect(runtime).toContain("where l.organization_id = organizations.id");
     expect(runtime).toContain("from organizations where id = $1");
@@ -35,6 +36,12 @@ describe("(C01) segurança das travas de envio ligadas pela tela", () => {
     expect(rota).toContain("enabled: z.boolean()");
     expect(rota).toContain(".strict()");
     expect(rota).toContain("layer: chaveDoInterruptor(parsed.data.trava)");
+  });
+
+  it("o estado que a tela mostra sai da mesma função que o turno usa; o PUT não reescreve `settings`", () => {
+    expect(rota).toContain("interpretarTravasDeEnvio(settings?.travas_de_envio ?? null");
+    expect(rota).not.toMatch(/\.update\(/);
+    expect(rota.match(/\.upsert\(/g)).toHaveLength(1);
   });
 
   it("não usa service role numa rota de usuário, e audita a troca", () => {

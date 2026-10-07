@@ -79,8 +79,16 @@ function InterruptorDaTrava({ c }: { c: ConferenciaDeSaida }) {
           onCheckedChange={(enabled) => gravar.mutate({ trava, enabled })}
           aria-label={t(c.rotulo)}
         />
-        <span className="text-xs text-muted-foreground">
-          {consulta.isLoading ? t("carregando…") : ligada ? t("Ligada por você") : t("Desligada")}
+        <span data-testid={`trava-${c.nome}-estado`} className="text-xs text-muted-foreground">
+          {consulta.isLoading || atual === undefined
+            ? t("carregando…")
+            : atual.origem === "tela"
+              ? ligada
+                ? t("Ligada por você")
+                : t("Desligada por você")
+              : atual.origem === "configuracao"
+                ? `${t("Ligada")} ${t("— vem da configuração da organização")}`
+                : t("Desligada")}
         </span>
       </div>
       <p className="text-xs text-muted-foreground">

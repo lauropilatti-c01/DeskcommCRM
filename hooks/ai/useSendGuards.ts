@@ -3,12 +3,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "@/lib/api/client";
-import type { TravaComInterruptor } from "@/lib/agent-engine/guardrails/link-e-valor-de-ferramenta";
+import type { TravaComInterruptor } from "@/lib/agent-engine/guardrails/interruptores-de-trava";
 
 /** (C01, -c01.7) As travas de envio que se ligam pela tela, por organização. */
 export interface TravaDeEnvioDaTela {
   trava: TravaComInterruptor;
+  /** O estado que vale no turno do agente. */
   enabled: boolean;
+  /** De onde veio: escolha na tela, configuração da organização (JSON) ou o padrão (desligada). */
+  origem: "tela" | "configuracao" | "padrao";
 }
 
 interface Resposta {

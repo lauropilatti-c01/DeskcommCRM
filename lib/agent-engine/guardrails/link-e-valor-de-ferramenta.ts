@@ -33,25 +33,14 @@
  * `layer` é vocabulário aberto. Vem desligada.
  */
 import type { Gate } from './before-send';
+import { chaveDoInterruptor } from './interruptores-de-trava';
 import { linksNoTexto, normalizarLink } from './link-permitido';
 import { valoresEmDinheiro } from './valor-de-ferramenta';
 
 /** O nome da trava na cadeia e na configuração. */
-export const NOME_DA_TRAVA = 'link_e_valor_de_ferramenta';
+export const NOME_DA_TRAVA = 'link_e_valor_de_ferramenta' as const;
 
-/**
- * Lista FECHADA das travas que se ligam pela tela (rota `/api/v1/ai/send-guards`): a
- * rota não aceita outro nome, e nenhuma trava fixa da cadeia se desliga por ela.
- */
-export const TRAVAS_COM_INTERRUPTOR = [NOME_DA_TRAVA] as const;
-export type TravaComInterruptor = (typeof TRAVAS_COM_INTERRUPTOR)[number];
-
-/** A chave do interruptor em `org_guardrail_layers` (vocabulário aberto: sem migration). */
-export function chaveDoInterruptor(trava: TravaComInterruptor): string {
-  return `trava:${trava}`;
-}
-
-/** A chave do interruptor desta trava em `org_guardrail_layers`. */
+/** A chave do interruptor desta trava em `org_guardrail_layers` (ver `interruptores-de-trava.ts`). */
 export const INTERRUPTOR_DA_TRAVA = chaveDoInterruptor(NOME_DA_TRAVA);
 
 /** O código do veto (contador e fail-safe das travas de conteúdo). */
