@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { PainelDeSeguranca } from "@/app/app/ai/agents/[id]/_components/PainelDeSeguranca";
+import { apiClient } from "@/lib/api/client";
 import {
   CONFERENCIAS_DE_SAIDA,
   CONFERENCIA_DE_ENTRADA,
@@ -218,6 +219,19 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
     expect(screen.getByTestId("conferencia-link_permitido-opcional").textContent).toContain(
       "Para links, a que se liga nesta tela é «Link e valor só do que foi consultado»",
     );
+  });
+
+  it("(C01, revisão N10) a troca que não grava diz que não salvou, e o interruptor fica como estava", async () => {
+    vi.mocked(apiClient.put).mockRejectedValueOnce(new Error("forbidden"));
+    renderPainel();
+    const interruptor = await screen.findByTestId("trava-link_e_valor_de_ferramenta-liga");
+    await waitFor(() => expect(interruptor).toHaveAttribute("data-state", "checked"));
+    expect(screen.queryByTestId("trava-link_e_valor_de_ferramenta-erro")).toBeNull();
+    fireEvent.click(interruptor);
+    expect((await screen.findByTestId("trava-link_e_valor_de_ferramenta-erro")).textContent).toBe(
+      "Não foi possível salvar. Tente de novo.",
+    );
+    expect(interruptor).toHaveAttribute("data-state", "checked");
   });
 
   it("as configuráveis dizem o CUSTO — é o que torna a escolha uma escolha", () => {

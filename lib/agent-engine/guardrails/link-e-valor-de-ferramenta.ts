@@ -93,6 +93,41 @@ export const linkEValorDeFerramentaGate: Gate = {
   },
 };
 
+const temErro = (valor: unknown): boolean =>
+  valor !== null &&
+  typeof valor === 'object' &&
+  !Array.isArray(valor) &&
+  (valor as { erro?: unknown }).erro !== undefined &&
+  (valor as { erro?: unknown }).erro !== null &&
+  (valor as { erro?: unknown }).erro !== false;
+
+/**
+ * O resultado de consulta que é ERRO não é fonte da trava: a mensagem de erro repete o
+ * que o modelo pediu. A base externa devolve o erro como objeto comum, sem `isError`
+ * (`{ erro: "pedido_invalido", detalhe: "coluna_inexistente:<o que o modelo escreveu>" }`,
+ * em `lib/mcp/tools/dados-externos.ts`), e o MCP o entrega em `structuredContent` e como
+ * JSON no `content` de texto (`lib/mcp/server.ts`). Por ali, o "R$ 6.700" vetado voltava
+ * liberado numa coluna "salario_6700". Erro = `isError: true`, ou `erro` no próprio
+ * objeto, no `structuredContent` ou no JSON de um `content` de texto.
+ */
+export function resultadoComErro(resultado: unknown): boolean {
+  if (resultado === null || typeof resultado !== 'object') return false;
+  const r = resultado as { isError?: unknown; structuredContent?: unknown; content?: unknown };
+  if (r.isError === true || temErro(r) || temErro(r.structuredContent)) return true;
+  if (!Array.isArray(r.content)) return false;
+  for (const parte of r.content as unknown[]) {
+    const texto = (parte as { type?: unknown; text?: unknown } | null)?.text;
+    if ((parte as { type?: unknown } | null)?.type !== 'text' || typeof texto !== 'string') continue;
+    if (!texto.trimStart().startsWith('{')) continue;
+    try {
+      if (temErro(JSON.parse(texto))) return true;
+    } catch {
+      // Texto que não é JSON: não é o erro da base.
+    }
+  }
+  return false;
+}
+
 /** Os links (normalizados) e os valores (centavos) de uma lista de textos. */
 export function linksEValoresDosTextos(textos: Iterable<string>): { links: Set<string>; valores: Set<number> } {
   const links = new Set<string>();

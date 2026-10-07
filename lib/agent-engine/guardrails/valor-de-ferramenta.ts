@@ -30,7 +30,13 @@ const NUMERO_INTEIRO = `(?<![\\d.,])(${NUMERO})(?![\\d]|[.,]\\d)`;
 const MIL = '(\\s*mil\\b)?';
 const RE_COM_CIFRAO = new RegExp(`R\\$\\s*${NUMERO_INTEIRO}${MIL}`, 'gi');
 const RE_COM_REAIS = new RegExp(`${NUMERO_INTEIRO}${MIL}\\s*(?:reais|real)\\b`, 'gi');
-const RE_QUALQUER_NUMERO = new RegExp(`${NUMERO_INTEIRO}${MIL}`, 'gi');
+// Na FONTE, o número tem de estar solto: colado em letra, dígito, "_", ponto ou vírgula
+// ("salario_6700", o pedaço "a1b2" de um id) ou ligado por hífen a outro pedaço (o UUID
+// "…-4000-8000-…", a data "2026-10-07") não é valor. "6.638,64", "R$6.638,64", "1997.00"
+// e o número de um JSON (`"preco":1997`) continuam valendo.
+const SOLTO_ANTES = '(?<![\\p{L}\\p{N}_.,])(?<![\\p{L}\\p{N}]-)';
+const SOLTO_DEPOIS = '(?![\\p{L}\\p{N}_]|[.,]\\d|-[\\p{L}\\p{N}])';
+const RE_QUALQUER_NUMERO = new RegExp(`${SOLTO_ANTES}(${NUMERO})${SOLTO_DEPOIS}${MIL}`, 'giu');
 
 /** O número escrito (em reais) → centavos. `null` quando não é um número. */
 export function centavosDoNumero(escrito: string, vezesMil = false): number | null {

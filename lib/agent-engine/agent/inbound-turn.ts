@@ -77,7 +77,11 @@ import {
   type TravasArmadas,
 } from '../guardrails/travas-de-envio';
 import { lerLinksJaEnviados, lerTextosJaEnviados, linksNoTexto, normalizarLink } from '../guardrails/link-permitido';
-import { linksEValoresDosTextos, type LinkEValorArmado } from '../guardrails/link-e-valor-de-ferramenta';
+import {
+  linksEValoresDosTextos,
+  resultadoComErro,
+  type LinkEValorArmado,
+} from '../guardrails/link-e-valor-de-ferramenta';
 import { valoresNoResultado } from '../guardrails/valor-de-ferramenta';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
@@ -3799,11 +3803,15 @@ async function executarTurnoDoAgente(
     );
   }
   const liberadoPelaConversa = linksEValoresDosTextos(textosJaEnviados ?? []);
-  /** O que a trava de link e valor libera AGORA: consultas do turno, conversa, o que já saiu no turno e as URLs fixas. */
+  /**
+   * O que a trava de link e valor libera AGORA: consultas do turno, conversa, o que já
+   * saiu no turno e as URLs fixas. Sem `urlsDaBase`: ele guarda também o erro da base
+   * externa (que repete o pedido do modelo); o que é consulta sem erro já está em
+   * `urlsDaConsulta` (base externa e base RAG).
+   */
   const linkEValorLiberado = (): LinkEValorArmado => {
     const doTurno = linksEValoresDosTextos(corposEnviados);
     const links = new Set([...liberadoPelaConversa.links, ...doTurno.links, ...travasDaOrg.travas.urlsFixas]);
-    for (const url of urlsDaBase) links.add(normalizarLink(url));
     for (const url of urlsDaConsulta) links.add(normalizarLink(url));
     const valores = new Set([...liberadoPelaConversa.valores, ...doTurno.valores, ...valoresDaConsulta]);
     return { links, valores };
@@ -5697,8 +5705,9 @@ async function executarTurnoDoAgente(
                 execute: (async (...args: Parameters<typeof executeOriginal>) => {
                   const resultado = await executeOriginal(...args);
                   for (const url of urlsNoResultado(resultado)) urlsDaBase.add(url);
-                  // (C01, -c01.7) O erro da consulta não é fonte: pode repetir o que o modelo pediu.
-                  if ((resultado as { isError?: unknown } | null)?.isError !== true) registrarConsulta(resultado);
+                  // (C01, -c01.7) O erro da consulta não é fonte: repete o que o modelo pediu
+                  // (a coluna "salario_6700"). A base externa o devolve sem `isError`.
+                  if (!resultadoComErro(resultado)) registrarConsulta(resultado);
                   return resultado;
                 }) as typeof mcpTool.execute,
               };

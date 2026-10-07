@@ -91,6 +91,12 @@ function InterruptorDaTrava({ c }: { c: ConferenciaDeSaida }) {
                 : t("Desligada")}
         </span>
       </div>
+      {gravar.isError ? (
+        // O interruptor volta ao estado gravado (a consulta não foi refeita); a frase diz que a troca não valeu.
+        <p role="alert" data-testid={`trava-${c.nome}-erro`} className="text-xs text-destructive">
+          {t("Não foi possível salvar. Tente de novo.")}
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">
         <span className="font-medium text-foreground">{t("Vale para a organização toda. Sem custo.")}</span>{" "}
         {t(c.porQueNaoSeDesliga)}

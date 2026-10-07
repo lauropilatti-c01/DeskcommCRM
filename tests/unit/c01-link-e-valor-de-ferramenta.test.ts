@@ -110,6 +110,63 @@ describe("(C01) os valores em dinheiro da mensagem", () => {
     expect(valoresNoResultado({ preco_centavos: 199700 }).has(199700)).toBe(true);
     expect(valoresNoResultado("Plano anual: 6.638,64").has(663864)).toBe(true);
   });
+
+  it("(revisão, N1) na fonte, número colado em letra, '_', ponto, vírgula ou hífen de id não é valor", async () => {
+    const { valoresNoResultado } = await valores();
+    const colado = valoresNoResultado({
+      detalhe: "coluna_inexistente:salario_6700",
+      id: "a7a7a7a7-0000-4000-8000-000000006700",
+      codigo: "x6700",
+      versao: "v1.6700",
+      data: "2026-10-07",
+    });
+    for (const centavos of [670000, 400000, 800000, 202600, 700, 1000]) {
+      expect(colado.has(centavos), String(centavos)).toBe(false);
+    }
+    // O que é valor solto continua valendo: em texto, em string-número, em JSON e com "mil".
+    const solto = valoresNoResultado({
+      fato: "O salário é de R$6.638,64; o piso, 6.638,64 (nível superior).",
+      parcela: "1997.00",
+      texto: JSON.stringify({ preco: 1997, faixa: "uns 6 mil" }),
+    });
+    for (const centavos of [663864, 199700, 600000]) expect(solto.has(centavos), String(centavos)).toBe(true);
+  });
+});
+
+describe("(C01, revisão B1) o resultado de ERRO da base externa não é fonte", () => {
+  /** O erro como a base externa o devolve (sem `isError`), no formato do MCP. */
+  const ERRO = {
+    erro: "pedido_invalido",
+    mensagem: "algum campo ou operador não existe nessa tabela. Confira com crm_describe_external_data.",
+    detalhe: "coluna_inexistente:salario R$ 6.700 https://lp.exemplo.com.br/salario-inventado",
+  };
+  const ERRO_DO_MCP = { content: [{ type: "text", text: JSON.stringify(ERRO) }], structuredContent: ERRO };
+
+  it("o erro é reconhecido no `structuredContent`, no JSON do `content`, no próprio objeto e por `isError`", async () => {
+    const { resultadoComErro } = (await import(/* @vite-ignore */ CAMINHO_DA_TRAVA)) as {
+      resultadoComErro: (r: unknown) => boolean;
+    };
+    expect(resultadoComErro(ERRO_DO_MCP)).toBe(true);
+    expect(resultadoComErro({ content: ERRO_DO_MCP.content })).toBe(true);
+    expect(resultadoComErro({ structuredContent: ERRO })).toBe(true);
+    expect(resultadoComErro(ERRO)).toBe(true);
+    expect(resultadoComErro({ isError: true, content: [{ type: "text", text: "falhou" }] })).toBe(true);
+    // A consulta que deu certo é fonte.
+    const certo = { linhas: [{ produto: "Plano anual", preco: 1997 }], aviso: "dados de terceiros" };
+    expect(resultadoComErro({ content: [{ type: "text", text: JSON.stringify(certo) }], structuredContent: certo })).toBe(
+      false,
+    );
+    expect(resultadoComErro(RESULTADO_DA_CONSULTA)).toBe(false);
+    expect(resultadoComErro([{ content: "trecho da base" }])).toBe(false);
+    expect(resultadoComErro({ content: [{ type: "text", text: "{não é json" }] })).toBe(false);
+  });
+
+  it("sem a correção, o erro liberaria o valor e o link que o modelo inventou", async () => {
+    // O defeito, medido: lido como consulta, o erro traz o "R$ 6.700" e o link de volta.
+    const liberado = await armado({ resultado: ERRO_DO_MCP });
+    expect(liberado.valores.has(670000)).toBe(true);
+    expect([...liberado.links].some((l) => l.includes("salario-inventado"))).toBe(true);
+  });
 });
 
 describe("(C01) a trava 'link e valor de ferramenta'", () => {
@@ -388,9 +445,8 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
 
   it("as fontes são as ferramentas de CONSULTA: a base externa (sem o erro), a base RAG e a referência de skill", () => {
     expect(TURNO).toMatch(/if \(out\.ok\) registrarConsulta\(out\.results\);/);
-    expect(TURNO).toMatch(
-      /if \(\(resultado as \{ isError\?: unknown \} \| null\)\?\.isError !== true\) registrarConsulta\(resultado\);/,
-    );
+    // (Revisão B1) O erro da base externa não tem `isError`: quem o reconhece é `resultadoComErro`.
+    expect(TURNO).toMatch(/if \(!resultadoComErro\(resultado\)\) registrarConsulta\(resultado\);/);
     expect(TURNO).toMatch(/if \(referencia\.ok\) registrarConsulta\(referencia\.content\);/);
     expect(TURNO.match(/registrarConsulta\(/g)).toHaveLength(3); // as três fontes, e só elas
     // O histórico e as notas não são fonte: o número que o cliente citou não sai como se viesse da base.
@@ -409,8 +465,15 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
     );
   });
 
-  it("liberado = conversa + o que saiu neste turno + URLs fixas + base e consultas do turno, recalculado a cada envio", () => {
+  it("liberado = conversa + o que saiu neste turno + URLs fixas + consultas do turno, recalculado a cada envio", () => {
     expect(TURNO).toMatch(/const doTurno = linksEValoresDosTextos\(corposEnviados\);/);
+    // (Revisão B1) Sem `urlsDaBase`: ele guarda também o erro da base externa.
+    const liberacao = TURNO.slice(
+      TURNO.indexOf("const linkEValorLiberado = (): LinkEValorArmado => {"),
+      TURNO.indexOf("const linksLiberados = (): Set<string> => {"),
+    );
+    expect(liberacao.length).toBeGreaterThan(100);
+    expect(liberacao).not.toMatch(/for \(const url of urlsDaBase\)/);
     expect(TURNO).toMatch(/\.\.\.travasDaOrg\.travas\.urlsFixas\]/);
     expect(TURNO).toMatch(/for \(const url of urlsDaConsulta\) links\.add\(normalizarLink\(url\)\);/);
     expect(TURNO).toMatch(/\.\.\.valoresDaConsulta\]\);/);

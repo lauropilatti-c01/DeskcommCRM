@@ -11287,8 +11287,8 @@ export const DICIONARIO: Traducoes = {
   "Barra a mensagem com link ou valor em reais que não veio de uma consulta à sua base nesta resposta nem de uma mensagem já enviada nesta conversa: o assistente consulta de novo e usa o que voltou.": {
     es: "Bloquea el mensaje con un enlace o un valor en reales que no vino de una consulta a tu base en esta respuesta ni de un mensaje ya enviado en esta conversación: el asistente consulta de nuevo y usa lo que volvió.",
   },
-  "Vem desligada: antes de ligar, confira se a sua base traz os links e os valores que o assistente usa. Se ele insistir três vezes, a conversa passa para uma pessoa da equipe, e nada sai.": {
-    es: "Viene desactivada: antes de activarla, revisa que tu base tenga los enlaces y los valores que usa el asistente. Si insiste tres veces, la conversación pasa a una persona del equipo y no sale nada.",
+  "Vem desligada: antes de ligar, confira se a sua base traz os links e os valores que o assistente usa. Se ele insistir três vezes, a mensagem dele não sai: o cliente recebe uma frase de espera e a conversa passa para uma pessoa da equipe.": {
+    es: "Viene desactivada: antes de activarla, revisa que tu base tenga los enlaces y los valores que usa el asistente. Si insiste tres veces, su mensaje no sale: el cliente recibe una frase de espera y la conversación pasa a una persona del equipo.",
   },
   "Vale para a organização toda. Sem custo.": {
     es: "Vale para toda la organización. Sin costo.",

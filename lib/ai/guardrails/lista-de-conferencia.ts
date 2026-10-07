@@ -196,7 +196,8 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     escolha: null,
     porQueNaoSeDesliga:
       "Vem desligada: antes de ligar, confira se a sua base traz os links e os valores que o assistente usa. " +
-      "Se ele insistir três vezes, a conversa passa para uma pessoa da equipe, e nada sai.",
+      "Se ele insistir três vezes, a mensagem dele não sai: o cliente recebe uma frase de espera e a conversa " +
+      "passa para uma pessoa da equipe.",
     camada: null,
     interruptorNaTela: "link_e_valor_de_ferramenta",
   },

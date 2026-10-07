@@ -47,6 +47,9 @@ const RESULTADO_DAS_OFERTAS = {
   ],
 };
 
+/** O que a base externa falsa devolve no caso (padrão: as ofertas). */
+let respostaDaBase: unknown = RESULTADO_DAS_OFERTAS;
+
 vi.mock("@/lib/agent-engine/edge/crm/mcp-tools", async (importOriginal) => ({
   ...(await importOriginal<typeof McpTools>()),
   buildMcpTurnTools: async () => ({
@@ -54,7 +57,7 @@ vi.mock("@/lib/agent-engine/edge/crm/mcp-tools", async (importOriginal) => ({
       crm_query_external_data: tool({
         description: "Consulta a base externa da organização.",
         inputSchema: z.object({ tabela: z.string() }),
-        execute: async () => RESULTADO_DAS_OFERTAS,
+        execute: async () => respostaDaBase,
       }),
     },
     toolIds: ["crm_query_external_data"],
@@ -359,6 +362,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   enviados = [];
   linhasDoLog = [];
+  respostaDaBase = RESULTADO_DAS_OFERTAS;
   await pool.query(
     `insert into org_guardrail_layers (organization_id, layer, enabled) values ($1, $2, true)
      on conflict (organization_id, layer) do update set enabled = true`,
@@ -557,5 +561,29 @@ describe("(C01, -c01.7) convivência com a `valor_em_dinheiro` (CRM-060), no tur
     expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
     expect(enviados).toEqual([]);
     expect(await vetosGravados()).toEqual([["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"]]);
+  });
+});
+
+describe("(C01, revisão B1) o erro da base externa não libera o que o modelo inventou", () => {
+  it("vetado, o modelo consulta a base com o valor e o link no nome da coluna; o erro volta com eles, e a 2ª tentativa é vetada de novo", async () => {
+    // O erro como a base externa o devolve (sem `isError`), no formato do MCP.
+    const erro = {
+      erro: "pedido_invalido",
+      mensagem: "algum campo ou operador não existe nessa tabela. Confira com crm_describe_external_data.",
+      detalhe: "coluna_inexistente:salario R$ 6.700 https://lp.exemplo.com.br/salario-inventado",
+    };
+    respostaDaBase = { content: [{ type: "text", text: JSON.stringify(erro) }], structuredContent: erro };
+    const corpo = "O salário inicial é de R$ 6.700. Detalhes: https://lp.exemplo.com.br/salario-inventado";
+    const mod = modelo([{ envia: corpo }, { base: "salario R$ 6.700 https://lp.exemplo.com.br/salario-inventado" }, { envia: corpo }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+
+    // A consulta voltou com o erro, e o modelo o leu (a 3ª etapa o tem).
+    expect(mod.estado.prompts[2]).toContain("coluna_inexistente");
+    // Sem a correção: a 2ª tentativa sai, liberada pelo próprio erro.
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([
+      ["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"],
+      ["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"],
+    ]);
   });
 });
