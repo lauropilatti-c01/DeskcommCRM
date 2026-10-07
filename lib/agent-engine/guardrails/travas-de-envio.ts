@@ -17,11 +17,23 @@
  *
  * JSON inválido ou leitura que falha = tudo desligado, com `leituraFalhou` para quem
  * chama registrar: a trava é proteção extra, e não pode calar o agente.
+ *
+ * (C01, -c01.7) A trava `link_e_valor_de_ferramenta` é a exceção na forma de ligar: o
+ * interruptor fica na tela ("Confere antes de enviar"), numa linha de
+ * `org_guardrail_layers` (`INTERRUPTOR_DA_TRAVA`), porque na produção quem liga é o
+ * dono, e a rota `/api/v1/ai/send-guards` o devolve para conferir. Aqui, no JSON, fica
+ * só a lista de URLs que saem sempre:
+ *
+ *   { "travas_de_envio": { "link_e_valor_de_ferramenta": { "urls": ["https://exemplo.com.br/pagina"] } } }
+ *
+ * O interruptor ligado vale mesmo com o JSON inválido (a trava arma sem as URLs fixas,
+ * mais estrita): para link e dinheiro, segurar é melhor que soltar.
  */
 import { z } from 'zod';
 
 import type { Queryable } from '../queue/queue';
-import { normalizarDominio, type LinkPermitidoArmado } from './link-permitido';
+import { INTERRUPTOR_DA_TRAVA, type LinkEValorArmado } from './link-e-valor-de-ferramenta';
+import { normalizarDominio, normalizarLink, type LinkPermitidoArmado } from './link-permitido';
 
 const travaSimples = z.object({ ligada: z.boolean() }).passthrough();
 
@@ -32,6 +44,8 @@ const travasDeEnvioSchema = z
     link_permitido: travaSimples.extend({ dominios: z.array(z.string()).optional() }).optional(),
     valor_em_dinheiro: travaSimples.optional(),
     uma_pergunta: travaSimples.optional(),
+    // (C01, -c01.7) Só as URLs fixas: o interruptor fica em `org_guardrail_layers`.
+    link_e_valor_de_ferramenta: z.object({ urls: z.array(z.string()).optional() }).passthrough().optional(),
   })
   .passthrough();
 
@@ -43,6 +57,10 @@ export interface TravasDeEnvioDaOrg {
   dominiosLiberados: readonly string[];
   valorEmDinheiro: boolean;
   umaPergunta: boolean;
+  /** (C01, -c01.7) Link e valor de ferramenta: o interruptor da tela. */
+  linkEValorDeFerramenta: boolean;
+  /** As URLs que saem sempre com a trava de link e valor, já normalizadas. */
+  urlsFixas: readonly string[];
 }
 
 export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
@@ -51,6 +69,8 @@ export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
   dominiosLiberados: [],
   valorEmDinheiro: false,
   umaPergunta: false,
+  linkEValorDeFerramenta: false,
+  urlsFixas: [],
 };
 
 /**
@@ -69,16 +89,27 @@ export interface TravasArmadas {
   valorEmDinheiro?: true;
   /** Uma pergunta por mensagem: só liga ou desliga (some no turno ao chegar no limite de vetos). */
   umaPergunta?: true;
+  /** (C01, -c01.7) Link e valor de ferramenta: os links e os valores liberados neste momento do turno. */
+  linkEValorDeFerramenta?: LinkEValorArmado;
 }
 
-/** Pura: o valor de `settings.travas_de_envio` (qualquer coisa) → o que está ligado. */
-export function interpretarTravasDeEnvio(valor: unknown): {
+/**
+ * Pura: o valor de `settings.travas_de_envio` (qualquer coisa) e os interruptores da
+ * tela → o que está ligado. O interruptor da trava de link e valor vale mesmo com o
+ * JSON inválido (ver o cabeçalho).
+ */
+export function interpretarTravasDeEnvio(
+  valor: unknown,
+  interruptores: { linkEValorDeFerramenta?: boolean } = {},
+): {
   travas: TravasDeEnvioDaOrg;
   invalida: boolean;
 } {
-  if (valor === null || valor === undefined) return { travas: { ...TRAVAS_DESLIGADAS }, invalida: false };
+  const linkEValorDeFerramenta = interruptores.linkEValorDeFerramenta === true;
+  if (valor === null || valor === undefined)
+    return { travas: { ...TRAVAS_DESLIGADAS, linkEValorDeFerramenta }, invalida: false };
   const lido = travasDeEnvioSchema.safeParse(valor);
-  if (!lido.success) return { travas: { ...TRAVAS_DESLIGADAS }, invalida: true };
+  if (!lido.success) return { travas: { ...TRAVAS_DESLIGADAS, linkEValorDeFerramenta }, invalida: true };
   return {
     travas: {
       textoLongo: lido.data.texto_longo?.ligada ?? false,
@@ -88,22 +119,36 @@ export function interpretarTravasDeEnvio(valor: unknown): {
         .filter((d) => d.length > 0),
       valorEmDinheiro: lido.data.valor_em_dinheiro?.ligada ?? false,
       umaPergunta: lido.data.uma_pergunta?.ligada ?? false,
+      linkEValorDeFerramenta,
+      urlsFixas: (lido.data.link_e_valor_de_ferramenta?.urls ?? [])
+        .map((u) => normalizarLink(u.trim()))
+        .filter((u) => u.length > 0),
     },
     invalida: false,
   };
 }
 
-/** Lê as travas da organização; falha ou JSON inválido = tudo desligado, com o aviso. */
+/**
+ * Lê as travas da organização; falha ou JSON inválido = tudo desligado, com o aviso.
+ * (C01, -c01.7) Na mesma consulta, o interruptor da tela da trava de link e valor (a
+ * chave é constante do código, não entrada de ninguém).
+ */
 export async function lerTravasDeEnvioDaOrg(
   db: Queryable,
   organizationId: string,
 ): Promise<{ travas: TravasDeEnvioDaOrg; leituraFalhou: boolean }> {
   try {
-    const { rows } = await db.query<{ travas: unknown }>(
-      `select settings->'travas_de_envio' as travas from organizations where id = $1`,
+    const { rows } = await db.query<{ travas: unknown; link_e_valor?: boolean | null }>(
+      `select settings->'travas_de_envio' as travas,
+              (select l.enabled from org_guardrail_layers l
+                where l.organization_id = organizations.id
+                  and l.layer = '${INTERRUPTOR_DA_TRAVA}') as link_e_valor
+         from organizations where id = $1`,
       [organizationId],
     );
-    const { travas, invalida } = interpretarTravasDeEnvio(rows[0]?.travas ?? null);
+    const { travas, invalida } = interpretarTravasDeEnvio(rows[0]?.travas ?? null, {
+      linkEValorDeFerramenta: rows[0]?.link_e_valor === true,
+    });
     return { travas, leituraFalhou: invalida };
   } catch {
     return { travas: { ...TRAVAS_DESLIGADAS }, leituraFalhou: true };

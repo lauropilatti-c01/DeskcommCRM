@@ -63,6 +63,13 @@ export interface ConferenciaDeSaida {
    */
   opcionalNaConfiguracao?: true;
   /**
+   * (C01, -c01.7) Trava que vem desligada e se liga AQUI, por organização, com um
+   * interruptor sem custo: o nome da trava na rota `/api/v1/ai/send-guards`, que grava
+   * em `org_guardrail_layers` (ver `link-e-valor-de-ferramenta.ts`). Só com
+   * `escolha: null` e `camada: null`.
+   */
+  interruptorNaTela?: "link_e_valor_de_ferramenta";
+  /**
    * A chave da camada em `org_guardrail_layers`, quando há escolha.
    *
    * São DOIS vocabulários e eles não coincidem: aqui o nome é o do gate na cadeia
@@ -177,6 +184,19 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
       "É a mesma promessa vazia do 'vou pedir pro responsável', só que sobre agenda: o cliente " +
       "fica esperando uma confirmação que nunca foi checada. Regra fixa, sem custo.",
     camada: null,
+  },
+  {
+    nome: "link_e_valor_de_ferramenta",
+    rotulo: "Link e valor só do que foi consultado",
+    oQueProtege:
+      "Barra a mensagem com link ou valor em reais que não veio de uma consulta à sua base nesta " +
+      "resposta nem de uma mensagem já enviada nesta conversa: o assistente consulta de novo e usa o que voltou.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "Vem desligada: antes de ligar, confira se a sua base traz os links e os valores que o assistente usa. " +
+      "Se ele insistir três vezes, a conversa passa para uma pessoa da equipe, e nada sai.",
+    camada: null,
+    interruptorNaTela: "link_e_valor_de_ferramenta",
   },
   {
     nome: "link_permitido",

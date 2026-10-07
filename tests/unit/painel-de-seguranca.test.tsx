@@ -30,15 +30,20 @@ import {
  */
 vi.mock("@/lib/api/client", () => ({
   apiClient: {
-    get: vi.fn(async () => ({
-      data: {
-        camadas: [
-          { layer: "promessa_semantica", escolha: null, padraoDoAmbiente: true, efetivo: true },
-          { layer: "jailbreak", escolha: false, padraoDoAmbiente: true, efetivo: false },
-        ],
-        podeEditar: true,
-      },
-    })),
+    get: vi.fn(async (url: string) =>
+      // (C01, -c01.7) As travas que se ligam pela tela têm rota própria.
+      url.includes("/send-guards")
+        ? { data: { travas: [{ trava: "link_e_valor_de_ferramenta", enabled: true }], podeEditar: true } }
+        : {
+            data: {
+              camadas: [
+                { layer: "promessa_semantica", escolha: null, padraoDoAmbiente: true, efetivo: true },
+                { layer: "jailbreak", escolha: false, padraoDoAmbiente: true, efetivo: false },
+              ],
+              podeEditar: true,
+            },
+          },
+    ),
     put: vi.fn(async () => ({ data: {} })),
   },
 }));
@@ -146,7 +151,7 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
     renderPainel();
 
     const fixas = CONFERENCIAS_DE_SAIDA.filter(
-      (c) => c.escolha === null && c.opcionalNaConfiguracao !== true,
+      (c) => c.escolha === null && c.opcionalNaConfiguracao !== true && c.interruptorNaTela === undefined,
     );
     // 10 das 11 hoje (subiu de 9/10 quando `agenda_stall` entrou na cadeia — ver
     // `before-send.ts`). A contagem entra na asserção de propósito: se alguém tornar
@@ -172,6 +177,28 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
       expect(linha.textContent).toContain("Vem desligada");
       expect(linha.textContent).not.toContain("não se desliga");
       expect(screen.queryByTestId(`conferencia-${c.nome}-fixa`)).toBeNull();
+    }
+  });
+
+  it("(C01, -c01.7) a trava com interruptor na tela: liga por organização, sem custo, e diz que vem desligada", async () => {
+    // Fora da contagem das camadas pagas (o testid não começa com `conferencia-`): ela
+    // não custa consulta ao modelo. E não é fixa: não pode dizer que "não se desliga".
+    renderPainel();
+    const comInterruptor = CONFERENCIAS_DE_SAIDA.filter((c) => c.interruptorNaTela !== undefined);
+    expect(comInterruptor.map((c) => c.nome)).toEqual(["link_e_valor_de_ferramenta"]);
+    for (const c of comInterruptor) {
+      expect(c.escolha).toBeNull();
+      expect(c.camada).toBeNull();
+      await waitFor(() =>
+        expect(screen.getByTestId(`trava-${c.nome}-liga`)).toHaveAttribute("data-state", "checked"),
+      );
+      const linha = screen.getByTestId(`trava-${c.nome}`);
+      expect(linha.textContent).toContain("Ligada por você");
+      expect(linha.textContent).toContain("Sem custo.");
+      expect(linha.textContent).toContain("Vem desligada");
+      expect(linha.textContent).not.toContain("não se desliga");
+      expect(screen.queryByTestId(`conferencia-${c.nome}-fixa`)).toBeNull();
+      expect(screen.queryByTestId(`conferencia-${c.nome}-opcional`)).toBeNull();
     }
   });
 

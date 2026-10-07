@@ -874,6 +874,9 @@ export const AUDIT_ACTIONS = [
   // item trocado (PATCH /ai/style-adjustments). O `metadata.ajuste` nomeia o
   // item; a linha registra a decisão sem expor o prompt do agente.
   "ai.style_adjustment_changed",
+  // (C01, -c01.7) Trava de envio ligada ou desligada pela tela (PUT
+  // /ai/send-guards). O `metadata.trava` nomeia a trava (lista fechada).
+  "ai.send_guard_changed",
   /** POST /api/v1/tenants/provision — organização criada por um sistema externo (doc 38 b). */
   "tenant.created_by_provisioning",
   /**

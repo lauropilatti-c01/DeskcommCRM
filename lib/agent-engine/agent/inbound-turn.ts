@@ -76,7 +76,9 @@ import {
   TRAVAS_DESLIGADAS,
   type TravasArmadas,
 } from '../guardrails/travas-de-envio';
-import { lerLinksJaEnviados, linksNoTexto, normalizarLink } from '../guardrails/link-permitido';
+import { lerLinksJaEnviados, lerTextosJaEnviados, linksNoTexto, normalizarLink } from '../guardrails/link-permitido';
+import { linksEValoresDosTextos, type LinkEValorArmado } from '../guardrails/link-e-valor-de-ferramenta';
+import { valoresNoResultado } from '../guardrails/valor-de-ferramenta';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
@@ -532,6 +534,8 @@ export const TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE: Readonly<Record<string, string>> 
   link_nao_permitido: 'link que não veio da base',
   // (C01, -c01.3, item 3b) Ver `valor-em-dinheiro.ts`.
   valor_em_dinheiro: 'valor em dinheiro na conversa',
+  // (C01, -c01.7) Ver `link-e-valor-de-ferramenta.ts`.
+  link_ou_valor_sem_consulta: 'link ou valor que não veio de consulta',
 };
 
 /** (C01, -c01.3) O limite das travas de conteúdo: o mesmo da de vocabulário interno. */
@@ -3629,6 +3633,20 @@ async function executarTurnoDoAgente(
   // A trava "link permitido" as libera; o gate de vocabulário interno libera a ocorrência
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
   const urlsDaBase = new Set<string>();
+  // (C01, -c01.7) O que as ferramentas de CONSULTA devolveram neste turno — as URLs e os
+  // valores (em centavos) que a trava "link e valor de ferramenta" libera. As de consulta
+  // são a base externa (`FERRAMENTA_DA_BASE`), a base RAG (`search_knowledge`) e a
+  // referência de skill (`read_skill_reference`). Ficam de fora, de propósito, as que
+  // devolvem o que o cliente ou o próprio modelo escreveu (`get_lead_context`, com o
+  // histórico; `get_lead_note`, com a nota que o modelo gravou) e as de envio (o erro do
+  // `send_message` repete o link vetado por outras travas): por elas, o número que o
+  // cliente citou ou o link que o modelo inventou sairia como se viesse da base.
+  const urlsDaConsulta = new Set<string>();
+  const valoresDaConsulta = new Set<number>();
+  const registrarConsulta = (resultado: unknown): void => {
+    for (const url of urlsNoResultado(resultado)) urlsDaConsulta.add(url);
+    valoresNoResultado(resultado, valoresDaConsulta);
+  };
   // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
   // frase de espera NADA mais sai dele — nem send_message, nem send_template, nem a
   // pergunta do roteiro. Toda ferramenta de envio recusa com o mesmo erro, e o laço
@@ -3767,6 +3785,29 @@ async function executarTurnoDoAgente(
   if (travasDaOrg.travas.linkPermitido && linksJaEnviados === null) {
     runLog.warn('trava de link: leitura dos links já enviados falhou — trava desarmada neste turno');
   }
+  // (C01, -c01.7) Os links e os valores das mensagens nossas já enviadas nesta conversa
+  // (do agente, da equipe e do gancho, inclusive o botão de uma interativa), lidos uma
+  // vez, só com a trava de link e valor ligada. Leitura que falha NÃO desarma esta trava
+  // (ao contrário da de link): ela confere só com as consultas do turno e as URLs
+  // fixas. Para link e dinheiro, segurar é melhor que soltar.
+  const textosJaEnviados = travasDaOrg.travas.linkEValorDeFerramenta
+    ? await lerTextosJaEnviados(pool, { tenantId, conversationId: input.conversationId })
+    : null;
+  if (travasDaOrg.travas.linkEValorDeFerramenta && textosJaEnviados === null) {
+    runLog.warn(
+      'trava de link e valor: leitura das mensagens já enviadas falhou — confere só com as consultas deste turno',
+    );
+  }
+  const liberadoPelaConversa = linksEValoresDosTextos(textosJaEnviados ?? []);
+  /** O que a trava de link e valor libera AGORA: consultas do turno, conversa, o que já saiu no turno e as URLs fixas. */
+  const linkEValorLiberado = (): LinkEValorArmado => {
+    const doTurno = linksEValoresDosTextos(corposEnviados);
+    const links = new Set([...liberadoPelaConversa.links, ...doTurno.links, ...travasDaOrg.travas.urlsFixas]);
+    for (const url of urlsDaBase) links.add(normalizarLink(url));
+    for (const url of urlsDaConsulta) links.add(normalizarLink(url));
+    const valores = new Set([...liberadoPelaConversa.valores, ...doTurno.valores, ...valoresDaConsulta]);
+    return { links, valores };
+  };
   /** Os links liberados AGORA: os da base neste turno, os já enviados e os deste turno. */
   const linksLiberados = (): Set<string> => {
     const liberados = new Set(linksJaEnviados ?? []);
@@ -3784,6 +3825,7 @@ async function executarTurnoDoAgente(
    * ainda cabem), menos as de estilo já desarmadas no turno.
    */
   const travasArmadas = (): TravasArmadas => ({
+    ...(travasDaOrg.travas.linkEValorDeFerramenta ? { linkEValorDeFerramenta: linkEValorLiberado() } : {}),
     ...(travasDaOrg.travas.linkPermitido && linksJaEnviados !== null
       ? {
           linkPermitido: {
@@ -4363,6 +4405,7 @@ async function executarTurnoDoAgente(
         // consulta externa alimentava o conjunto, e o link legítimo do material era
         // vetado (achado 5 da 1ª revisão adversarial da -c01.3).
         if (out.ok) for (const url of urlsNoResultado(out.results)) urlsDaBase.add(url);
+        if (out.ok) registrarConsulta(out.results);
         // `chunk_id` e `knowledge_source_id` viajavam CRUS para o modelo em toda
         // busca com RAG — dois UUIDs por resultado, sem uso nenhum do lado dele
         // (nenhuma ferramenta os aceita como argumento). UUID cru na resposta ao
@@ -5342,7 +5385,7 @@ async function executarTurnoDoAgente(
       ...AGENT_TOOL_DEFS.read_skill_reference,
       execute: async ({ skill_name, ref_path }) => {
         try {
-          return await readSkillReference(
+          const referencia = await readSkillReference(
             { admin: deps.crmCfg.supabase },
             {
               organizationId: tenantId,
@@ -5351,6 +5394,9 @@ async function executarTurnoDoAgente(
               refPath: ref_path,
             },
           );
+          // (C01, -c01.7) O texto da skill é da empresa: o link e o valor dele são de consulta.
+          if (referencia.ok) registrarConsulta(referencia.content);
+          return referencia;
         } catch (err) {
           noteRunError(err instanceof Error ? err : new Error(String(err)));
           return {
@@ -5651,6 +5697,8 @@ async function executarTurnoDoAgente(
                 execute: (async (...args: Parameters<typeof executeOriginal>) => {
                   const resultado = await executeOriginal(...args);
                   for (const url of urlsNoResultado(resultado)) urlsDaBase.add(url);
+                  // (C01, -c01.7) O erro da consulta não é fonte: pode repetir o que o modelo pediu.
+                  if ((resultado as { isError?: unknown } | null)?.isError !== true) registrarConsulta(resultado);
                   return resultado;
                 }) as typeof mcpTool.execute,
               };
