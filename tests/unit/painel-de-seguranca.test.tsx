@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { PainelDeSeguranca } from "@/app/app/ai/agents/[id]/_components/PainelDeSeguranca";
+import { apiClient } from "@/lib/api/client";
 import {
   CONFERENCIAS_DE_SAIDA,
   CONFERENCIA_DE_ENTRADA,
@@ -30,15 +31,28 @@ import {
  */
 vi.mock("@/lib/api/client", () => ({
   apiClient: {
-    get: vi.fn(async () => ({
-      data: {
-        camadas: [
-          { layer: "promessa_semantica", escolha: null, padraoDoAmbiente: true, efetivo: true },
-          { layer: "jailbreak", escolha: false, padraoDoAmbiente: true, efetivo: false },
-        ],
-        podeEditar: true,
-      },
-    })),
+    get: vi.fn(async (url: string) =>
+      // (C01, -c01.7) As travas que se ligam pela tela têm rota própria.
+      url.includes("/send-guards")
+        ? {
+            data: {
+              travas: [
+                { trava: "link_e_valor_de_ferramenta", enabled: true, origem: "tela" },
+                { trava: "valor_em_dinheiro", enabled: true, origem: "configuracao" },
+              ],
+              podeEditar: true,
+            },
+          }
+        : {
+            data: {
+              camadas: [
+                { layer: "promessa_semantica", escolha: null, padraoDoAmbiente: true, efetivo: true },
+                { layer: "jailbreak", escolha: false, padraoDoAmbiente: true, efetivo: false },
+              ],
+              podeEditar: true,
+            },
+          },
+    ),
     put: vi.fn(async () => ({ data: {} })),
   },
 }));
@@ -146,7 +160,7 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
     renderPainel();
 
     const fixas = CONFERENCIAS_DE_SAIDA.filter(
-      (c) => c.escolha === null && c.opcionalNaConfiguracao !== true,
+      (c) => c.escolha === null && c.opcionalNaConfiguracao !== true && c.interruptorNaTela === undefined,
     );
     // 10 das 11 hoje (subiu de 9/10 quando `agenda_stall` entrou na cadeia — ver
     // `before-send.ts`). A contagem entra na asserção de propósito: se alguém tornar
@@ -173,6 +187,51 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
       expect(linha.textContent).not.toContain("não se desliga");
       expect(screen.queryByTestId(`conferencia-${c.nome}-fixa`)).toBeNull();
     }
+  });
+
+  it("(C01, -c01.7) as travas com interruptor na tela: ligam por organização, sem custo, e dizem que vêm desligadas", async () => {
+    // Fora da contagem das camadas pagas (o testid não começa com `conferencia-`): elas
+    // não custam consulta ao modelo. E não são fixas: não podem dizer que "não se desliga".
+    renderPainel();
+    const comInterruptor = CONFERENCIAS_DE_SAIDA.filter((c) => c.interruptorNaTela !== undefined);
+    expect(comInterruptor.map((c) => c.nome)).toEqual(["link_e_valor_de_ferramenta", "valor_em_dinheiro"]);
+    for (const c of comInterruptor) {
+      expect(c.escolha).toBeNull();
+      expect(c.camada).toBeNull();
+      expect(c.opcionalNaConfiguracao).toBeUndefined();
+      await waitFor(() =>
+        expect(screen.getByTestId(`trava-${c.nome}-liga`)).toHaveAttribute("data-state", "checked"),
+      );
+      const linha = screen.getByTestId(`trava-${c.nome}`);
+      expect(linha.textContent).toContain("Sem custo.");
+      expect(linha.textContent).toContain("Vem desligada");
+      expect(linha.textContent).not.toContain("não se desliga");
+      expect(screen.queryByTestId(`conferencia-${c.nome}-fixa`)).toBeNull();
+      expect(screen.queryByTestId(`conferencia-${c.nome}-opcional`)).toBeNull();
+    }
+    // A tela diz de onde vem o estado que vale: a escolha na tela ou a configuração da organização.
+    expect(screen.getByTestId("trava-link_e_valor_de_ferramenta-estado").textContent).toBe("Ligada por você");
+    expect(screen.getByTestId("trava-valor_em_dinheiro-estado").textContent).toBe(
+      "Ligada — vem da configuração da organização",
+    );
+    // A de link continua sem interruptor, e a ajuda dela aponta a que se liga aqui.
+    expect(screen.queryByTestId("trava-link_permitido-liga")).toBeNull();
+    expect(screen.getByTestId("conferencia-link_permitido-opcional").textContent).toContain(
+      "Para links, a que se liga nesta tela é «Link e valor só do que foi consultado»",
+    );
+  });
+
+  it("(C01, revisão N10) a troca que não grava diz que não salvou, e o interruptor fica como estava", async () => {
+    vi.mocked(apiClient.put).mockRejectedValueOnce(new Error("forbidden"));
+    renderPainel();
+    const interruptor = await screen.findByTestId("trava-link_e_valor_de_ferramenta-liga");
+    await waitFor(() => expect(interruptor).toHaveAttribute("data-state", "checked"));
+    expect(screen.queryByTestId("trava-link_e_valor_de_ferramenta-erro")).toBeNull();
+    fireEvent.click(interruptor);
+    expect((await screen.findByTestId("trava-link_e_valor_de_ferramenta-erro")).textContent).toBe(
+      "Não foi possível salvar. Tente de novo.",
+    );
+    expect(interruptor).toHaveAttribute("data-state", "checked");
   });
 
   it("as configuráveis dizem o CUSTO — é o que torna a escolha uma escolha", () => {

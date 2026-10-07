@@ -11281,14 +11281,29 @@ export const DICIONARIO: Traducoes = {
   "Esconder que é um assistente é enganar o cliente.": {
     es: "Ocultar que es un asistente es engañar al cliente.",
   },
+  "Link e valor só do que foi consultado": {
+    es: "Enlaces y valores solo de lo que se consultó",
+  },
+  "Barra a mensagem com link ou valor em reais que não veio de uma consulta à sua base nesta resposta nem de uma mensagem já enviada nesta conversa: o assistente consulta de novo e usa o que voltou.": {
+    es: "Bloquea el mensaje con un enlace o un valor en reales que no vino de una consulta a tu base en esta respuesta ni de un mensaje ya enviado en esta conversación: el asistente consulta de nuevo y usa lo que volvió.",
+  },
+  "Vem desligada: antes de ligar, confira se a sua base traz os links e os valores que o assistente usa. Se ele insistir três vezes, a mensagem dele não sai: o cliente recebe uma frase de espera e a conversa passa para uma pessoa da equipe.": {
+    es: "Viene desactivada: antes de activarla, revisa que tu base tenga los enlaces y los valores que usa el asistente. Si insiste tres veces, su mensaje no sale: el cliente recibe una frase de espera y la conversación pasa a una persona del equipo.",
+  },
+  "Vale para a organização toda. Sem custo.": {
+    es: "Vale para toda la organización. Sin costo.",
+  },
+  "— vem da configuração da organização": {
+    es: "— viene de la configuración de la organización",
+  },
   "Só mandar link que tem de onde vir": {
     es: "Solo enviar enlaces que tengan de dónde venir",
   },
   "Barra o link que o assistente montou ou alterou: só sai o endereço que a sua base devolveu, que já foi mandado nesta conversa ou que é de um domínio que você liberou.": {
     es: "Bloquea el enlace que el asistente armó o modificó: solo sale la dirección que devolvió tu base, que ya se envió en esta conversación o que es de un dominio que habilitaste.",
   },
-  "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.": {
-    es: "Depende de la lista de dominios de cada negocio. Si el asistente insiste tres veces con un enlace sin origen, la conversación pasa a una persona del equipo y el enlace no sale.",
+  "Depende da lista de domínios de cada negócio. Para links, a que se liga nesta tela é «Link e valor só do que foi consultado». Se o assistente insistir três vezes num link sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.": {
+    es: "Depende de la lista de dominios de cada negocio. Para enlaces, la que se activa en esta pantalla es «Enlaces y valores solo de lo que se consultó». Si el asistente insiste tres veces con un enlace sin origen, la conversación pasa a una persona del equipo y el enlace no sale.",
   },
   "Valor em dinheiro só na página de matrícula": {
     es: "Valores en dinero solo en la página de matrícula",
@@ -11296,8 +11311,8 @@ export const DICIONARIO: Traducoes = {
   "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que traz os valores certos, em vez de escrever um número que pode estar errado.": {
     es: "Bloquea el mensaje con precio, cuota, intereses o descuento: el asistente envía la página, que tiene los valores correctos, en lugar de escribir un número que puede estar equivocado.",
   },
-  "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
-    es: "Cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
+  "Vem desligada: é escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
+    es: "Viene desactivada: cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
   },
   "Uma pergunta por mensagem": {
     es: "Una pregunta por mensaje",
@@ -13712,6 +13727,30 @@ export const DICIONARIO: Traducoes = {
   "Não dá para ver daqui": { es: "No se puede ver desde aquí" },
   "Ajustar": { es: "Ajustar" },
   "Tudo o que se liga e desliga, se está ligado e onde se ajusta.": { es: "Todo lo que se activa y desactiva, si está activado y dónde se ajusta." },
+
+  // ─── (C01, -c01.7) PAINÉIS DA OPERAÇÃO, só leitura (app/app/ai/paineis) ───
+  "Painéis da operação": { es: "Paneles de la operación" },
+  "Mensagens prontas e informações que o seu sistema manda para consultar aqui.": { es: "Mensajes listos e información que tu sistema envía para consultar aquí." },
+  "O que o sistema conectado ao agente manda para consulta: mensagens prontas e as informações que ele usa. Esta tela só mostra; para mudar algo, altere no próprio sistema.": { es: "Lo que el sistema conectado al agente envía para consulta: mensajes listos y la información que usa. Esta pantalla solo muestra; para cambiar algo, modifícalo en el propio sistema." },
+  "Botão": { es: "Botón" },
+  "A seção “{titulo}” é de um tipo que esta tela ainda não mostra.": { es: "La sección “{titulo}” es de un tipo que esta pantalla todavía no muestra." },
+  "Uma seção deste painel é de um tipo que esta tela ainda não mostra.": { es: "Una sección de este panel es de un tipo que esta pantalla todavía no muestra." },
+  "Nada nesta seção.": { es: "Nada en esta sección." },
+  "Este painel ainda não tem nada para mostrar.": { es: "Este panel todavía no tiene nada para mostrar." },
+  "Nada nesta aba tem “{busca}”.": { es: "Nada en esta pestaña contiene “{busca}”." },
+  "Nenhum sistema está conectado ao agente nesta instalação; quando estiver, os painéis que ele mandar aparecem aqui.": { es: "Ningún sistema está conectado al agente en esta instalación; cuando lo esté, los paneles que envíe aparecerán aquí." },
+  "O sistema conectado ao agente não oferece painéis.": { es: "El sistema conectado al agente no ofrece paneles." },
+  "O sistema conectado recusou a consulta porque a assinatura não confere dos dois lados.": { es: "El sistema conectado rechazó la consulta porque la firma no coincide entre los dos lados." },
+  "O sistema conectado não respondeu a tempo; tente de novo em alguns instantes.": { es: "El sistema conectado no respondió a tiempo; inténtalo de nuevo en unos instantes." },
+  "O sistema conectado não respondeu como esperado; tente de novo em alguns instantes.": { es: "El sistema conectado no respondió como se esperaba; inténtalo de nuevo en unos instantes." },
+  "O sistema conectado respondeu num formato que esta tela não sabe ler.": { es: "El sistema conectado respondió en un formato que esta pantalla no sabe leer." },
+  "A resposta do sistema conectado passou do tamanho que esta tela aceita.": { es: "La respuesta del sistema conectado superó el tamaño que esta pantalla acepta." },
+  "O sistema conectado ainda não mandou nenhum painel.": { es: "El sistema conectado todavía no envió ningún panel." },
+  "Não deu para carregar os painéis": { es: "No se pudieron cargar los paneles" },
+  "Nenhum painel para mostrar": { es: "Ningún panel para mostrar" },
+  "Painel sem título": { es: "Panel sin título" },
+  "Atualizado em {data}": { es: "Actualizado el {data}" },
+  "Buscar nesta aba": { es: "Buscar en esta pestaña" },
 };
 
 /**

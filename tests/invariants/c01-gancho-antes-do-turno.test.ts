@@ -54,6 +54,11 @@ import type { ChannelSendInput } from "@/lib/agent-engine/channel-adapter";
  *      formulário inválido não volta a ser as respostas montadas);
  *   3. o texto montado das respostas não leva chave com nome de dado pessoal.
  *
+ * E os da -c01.7 (`apagar_memoria`): o `#zerar` do celular de teste apaga as notas do
+ * contato, só dele, e o turno seguinte não lê a memória antiga; sem a etiqueta, com a
+ * etiqueta posta pela própria resposta (também na re-execução) ou com a confirmação
+ * que não sai, nada é apagado.
+ *
  * E os da 2ª rodada da revisão (numeração do pedido):
  *   1. a resposta do formulário nunca se perde: com o gancho fora do ar no turno dela,
  *      o modelo lê as respostas (chave: valor, sem o flow_token) e o pedido seguinte a
@@ -1320,5 +1325,135 @@ describe("3ª rodada, 3. o texto montado das respostas sem dado pessoal", () => 
     expect(prompt).toContain("pergunta_1: opcao_a");
     for (const pessoal of ["5511977776666", "Fulana Formulário", "fulana@teste.example"])
       expect(prompt).not.toContain(pessoal);
+  });
+});
+
+describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", () => {
+  /** Outro contato da mesma organização, também celular de teste: nunca é o alvo. */
+  const OUTRO = "c5c5c5c5-0000-4000-8000-00000000000b";
+  const NOTA_ANTIGA = "Prefere estudar de noite (nota de teste)";
+  const NOTA_DO_OUTRO = "Nota do outro celular de teste";
+  const CONFIRMACAO = "Conversa zerada para o teste.";
+  /** A resposta do porteiro ao `#zerar`: limpa o card, confirma e pede o apagar. */
+  const ZERAR = {
+    acao: "segurar",
+    motivo: "zerar-teste",
+    enviar: [{ tipo: "texto", texto: CONFIRMACAO }],
+    gravar: { campos: { lembretes: null }, etiquetas_menos: ["aguardando"] },
+    apagar_memoria: true,
+  };
+
+  beforeAll(async () => {
+    await pool.query(
+      `insert into contacts (id, organization_id, name, phone_number, tags)
+       values ($1,$2,'Outro Teste','+5511900000882',$3::text[]) on conflict (id) do nothing`,
+      [OUTRO, ORG, ["celular-de-teste"]],
+    );
+  });
+
+  beforeEach(async () => {
+    await pool.query("delete from lead_notes where organization_id = $1", [ORG]);
+    await pool.query("update contacts set tags = '{}'::text[] where organization_id = $1 and id = $2", [ORG, CONTACT]);
+    for (const [contato, headline] of [
+      [CONTACT, NOTA_ANTIGA],
+      [CONTACT, "Já pediu o edital (nota de teste)"],
+      [OUTRO, NOTA_DO_OUTRO],
+    ] as const)
+      await pool.query(
+        "insert into lead_notes (organization_id, contact_id, headline, body, embedding) values ($1,$2,$3,'corpo de teste','[0.1,0.2]'::jsonb)",
+        [ORG, contato, headline],
+      );
+  });
+
+  async function notas(contato: string): Promise<string[]> {
+    const { rows } = await pool.query<{ headline: string }>(
+      "select headline from lead_notes where organization_id = $1 and contact_id = $2 order by headline",
+      [ORG, contato],
+    );
+    return rows.map((r) => r.headline);
+  }
+
+  const etiquetaNoCard = () =>
+    pool.query("update crm_leads set tags = $3::text[] where organization_id = $1 and id = $2", [
+      ORG,
+      CARD,
+      [...ETIQUETAS_INICIAIS, "celular-de-teste"],
+    ]);
+
+  const linhaDoLog = (trecho: string) =>
+    linhasDoLog.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => String(l.msg).includes(trecho));
+
+  it("card com a etiqueta: o `#zerar` apaga as notas do contato, só dele; o turno seguinte não lê a memória antiga", async () => {
+    await etiquetaNoCard();
+    respostaDoGancho = async () => json(ZERAR);
+    const mod = modelo();
+    const handler = montaHandler(mod.doGenerate, true);
+    expect(await executa(handler, await enfileira(await novaEntrada("#zerar")))).toBeNull();
+
+    expect(await notas(CONTACT)).toEqual([]);
+    expect(await notas(OUTRO)).toEqual([NOTA_DO_OUTRO]);
+    expect(corpos()).toEqual([CONFIRMACAO]);
+    expect(mod.estado.etapas).toBe(0);
+    expect(linhaDoLog("memória do contato apagada")).toMatchObject({ notas: 2 });
+    // O resto fica: as mensagens e o card (com o `gravar` do `#zerar`).
+    expect((await mensagensDeSaida()).map((s) => s.body)).toEqual([CONFIRMACAO]);
+    expect((await card()).tags).toEqual(["etiqueta-antiga", "celular-de-teste"]);
+
+    respostaDoGancho = async () => json({ acao: "seguir" });
+    expect(await executa(handler, await enfileira(await novaEntrada("Oi de novo")))).toBeNull();
+    const prompt = mod.estado.prompts[0]!;
+    expect(prompt).not.toContain(NOTA_ANTIGA);
+    expect(prompt).toContain("sem notas registradas para este lead");
+  });
+
+  it("a etiqueta no contato (sem ela no card) também vale", async () => {
+    await pool.query("update contacts set tags = $3::text[] where organization_id = $1 and id = $2", [
+      ORG,
+      CONTACT,
+      ["celular-de-teste"],
+    ]);
+    respostaDoGancho = async () => json(ZERAR);
+    expect(await executa(montaHandler(modelo().doGenerate, true), await enfileira(await novaEntrada("#zerar")))).toBeNull();
+    expect(await notas(CONTACT)).toEqual([]);
+    expect(await notas(OUTRO)).toEqual([NOTA_DO_OUTRO]);
+  });
+
+  it("sem a etiqueta: nada é apagado, a confirmação sai e o log diz por quê, sem dado pessoal", async () => {
+    respostaDoGancho = async () => json(ZERAR);
+    const mod = modelo();
+    expect(await executa(montaHandler(mod.doGenerate, true), await enfileira(await novaEntrada("#zerar")))).toBeNull();
+
+    expect(await notas(CONTACT)).toEqual(["Já pediu o edital (nota de teste)", NOTA_ANTIGA]);
+    expect(await notas(OUTRO)).toEqual([NOTA_DO_OUTRO]);
+    expect(corpos()).toEqual([CONFIRMACAO]);
+    expect(linhaDoLog("contato sem a etiqueta de teste")).toMatchObject({ porque: "sem_etiqueta" });
+    expect(linhaDoLog("memória do contato apagada")).toBeUndefined();
+    const recusa = JSON.stringify(linhaDoLog("contato sem a etiqueta de teste"));
+    for (const pessoal of [NOME, TELEFONE, EMAIL, NOTA_ANTIGA]) expect(recusa).not.toContain(pessoal);
+  });
+
+  it("a própria resposta pondo a etiqueta não se autoriza, nem na re-execução do job", async () => {
+    respostaDoGancho = async () => json({ ...ZERAR, gravar: { ...ZERAR.gravar, etiquetas_mais: ["celular-de-teste"] } });
+    const handler = montaHandler(modelo().doGenerate, true);
+    const jobId = await enfileira(await novaEntrada("#zerar"));
+    expect(await executa(handler, jobId)).toBeNull();
+    // O `gravar` pôs a etiqueta; a re-execução repete a decisão anotada com ela já no card.
+    expect((await card()).tags).toContain("celular-de-teste");
+    expect(await reexecuta(handler, jobId)).toBeNull();
+
+    expect(await notas(CONTACT)).toHaveLength(2);
+    expect(linhaDoLog("a própria resposta põe a etiqueta de teste")).toMatchObject({ porque: "etiqueta_na_resposta" });
+  });
+
+  it("a confirmação que não sai (a Graph recusa): nada é apagado e o modelo responde, como sem o `gravar`", async () => {
+    await etiquetaNoCard();
+    statusDaGraph = [500];
+    respostaDoGancho = async () => json(ZERAR);
+    const mod = modelo();
+    expect(await executa(montaHandler(mod.doGenerate, true), await enfileira(await novaEntrada("#zerar")))).toBeNull();
+
+    expect(await notas(CONTACT)).toHaveLength(2);
+    expect(mod.estado.etapas).toBeGreaterThanOrEqual(1);
+    expect(mod.estado.prompts[0]).toContain(NOTA_ANTIGA);
   });
 });

@@ -36,6 +36,8 @@
  * diz o CUSTO. Controle decorativo é pior que controle ausente.
  */
 
+import type { TravaComInterruptor } from "@/lib/agent-engine/guardrails/interruptores-de-trava";
+
 /** Uma conferência, como ela se apresenta a quem configura o agente. */
 export interface ConferenciaDeSaida {
   /** O `name` do gate na cadeia — a chave que casa esta lista com o runtime. */
@@ -62,6 +64,13 @@ export interface ConferenciaDeSaida {
    * onde se liga. Só com `escolha: null` e `camada: null`.
    */
   opcionalNaConfiguracao?: true;
+  /**
+   * (C01, -c01.7) Trava que vem desligada e se liga AQUI, por organização, com um
+   * interruptor sem custo: o nome da trava na rota `/api/v1/ai/send-guards`, que grava
+   * em `org_guardrail_layers` (ver `interruptores-de-trava.ts`). Só com
+   * `escolha: null` e `camada: null`.
+   */
+  interruptorNaTela?: TravaComInterruptor;
   /**
    * A chave da camada em `org_guardrail_layers`, quando há escolha.
    *
@@ -179,6 +188,20 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     camada: null,
   },
   {
+    nome: "link_e_valor_de_ferramenta",
+    rotulo: "Link e valor só do que foi consultado",
+    oQueProtege:
+      "Barra a mensagem com link ou valor em reais que não veio de uma consulta à sua base nesta " +
+      "resposta nem de uma mensagem já enviada nesta conversa: o assistente consulta de novo e usa o que voltou.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "Vem desligada: antes de ligar, confira se a sua base traz os links e os valores que o assistente usa. " +
+      "Se ele insistir três vezes, a mensagem dele não sai: o cliente recebe uma frase de espera e a conversa " +
+      "passa para uma pessoa da equipe.",
+    camada: null,
+    interruptorNaTela: "link_e_valor_de_ferramenta",
+  },
+  {
     nome: "link_permitido",
     rotulo: "Só mandar link que tem de onde vir",
     oQueProtege:
@@ -186,7 +209,8 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
       "que já foi mandado nesta conversa ou que é de um domínio que você liberou.",
     escolha: null,
     porQueNaoSeDesliga:
-      "Depende da lista de domínios de cada negócio. Se o assistente insistir três vezes num link " +
+      "Depende da lista de domínios de cada negócio. Para links, a que se liga nesta tela é " +
+      "«Link e valor só do que foi consultado». Se o assistente insistir três vezes num link " +
       "sem origem, a conversa passa para uma pessoa da equipe, e o link não sai.",
     camada: null,
     opcionalNaConfiguracao: true,
@@ -199,10 +223,11 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
       "traz os valores certos, em vez de escrever um número que pode estar errado.",
     escolha: null,
     porQueNaoSeDesliga:
-      "É escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três " +
-      "vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.",
+      "Vem desligada: é escolha de cada negócio dizer ou não o valor na conversa. Se o assistente " +
+      "insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.",
     camada: null,
-    opcionalNaConfiguracao: true,
+    // (C01, -c01.7) Antes só se ligava no JSON da organização; agora também aqui.
+    interruptorNaTela: "valor_em_dinheiro",
   },
   {
     nome: "uma_pergunta",

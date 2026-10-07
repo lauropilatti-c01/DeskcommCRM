@@ -10,7 +10,8 @@
  *    que o vocabulário interno já usa: a consulta externa e, desde a rodada 2, a base RAG
  *    do agente, `search_knowledge`);
  * 2. o link que já foi mandado nesta conversa (por pessoa da equipe ou pelo agente),
- *    lido uma vez por turno (`lerLinksJaEnviados`);
+ *    lido uma vez por turno (`lerLinksJaEnviados`) — desde a -c01.7, também o do botão
+ *    de uma mensagem interativa (`metadata.interactive`);
  * 3. qualquer link de um domínio da lista da organização (`dominios`, o domínio ou
  *    subdomínio dele).
  *
@@ -183,6 +184,50 @@ export function renderVetoDeLink(fora: readonly string[]): string {
   );
 }
 
+/** Todas as strings de um valor JSON, em profundidade (o objeto da mensagem interativa). */
+function stringsDe(valor: unknown, achadas: string[], profundidade = 0): string[] {
+  if (profundidade > 8 || valor === null || valor === undefined) return achadas;
+  if (typeof valor === 'string') achadas.push(valor);
+  else if (Array.isArray(valor)) for (const item of valor) stringsDe(item, achadas, profundidade + 1);
+  else if (typeof valor === 'object')
+    for (const item of Object.values(valor as Record<string, unknown>)) stringsDe(item, achadas, profundidade + 1);
+  return achadas;
+}
+
+/**
+ * Os textos já mandados nesta conversa (por qualquer pessoa, pelo agente ou pelo gancho
+ * antes do turno), um por string: o corpo e, na mensagem interativa, cada texto do
+ * objeto (`metadata.interactive`). (C01, -c01.7) O botão com link (`cta_url`) leva o
+ * endereço só no objeto — o corpo é o texto do balão —, e o link que o gancho mandou
+ * assim era vetado quando o agente o repetia. `null` quando a leitura falha.
+ */
+export async function lerTextosJaEnviados(
+  db: Queryable,
+  input: { tenantId: string; conversationId: string },
+): Promise<string[] | null> {
+  try {
+    const { rows } = await db.query<{ body: string | null; interativo?: unknown }>(
+      `select body, metadata->'interactive' as interativo
+         from messages
+        where organization_id = $1
+          and conversation_id = $2
+          and direction = 'outbound'
+          and (body is not null or metadata ? 'interactive')
+        order by created_at desc
+        limit 500`,
+      [input.tenantId, input.conversationId],
+    );
+    const textos: string[] = [];
+    for (const row of rows) {
+      if (typeof row.body === 'string') textos.push(row.body);
+      stringsDe(row.interativo, textos);
+    }
+    return textos;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Os links já mandados nesta conversa (por qualquer pessoa ou pelo agente), normalizados.
  * `null` quando a leitura falha: quem chama desarma a trava no turno (proteção a mais
@@ -192,25 +237,9 @@ export async function lerLinksJaEnviados(
   db: Queryable,
   input: { tenantId: string; conversationId: string },
 ): Promise<Set<string> | null> {
-  try {
-    const { rows } = await db.query<{ body: string | null }>(
-      `select body
-         from messages
-        where organization_id = $1
-          and conversation_id = $2
-          and direction = 'outbound'
-          and body is not null
-        order by created_at desc
-        limit 500`,
-      [input.tenantId, input.conversationId],
-    );
-    const links = new Set<string>();
-    for (const row of rows) {
-      if (typeof row.body !== 'string') continue;
-      for (const link of linksNoTexto(row.body)) links.add(normalizarLink(link));
-    }
-    return links;
-  } catch {
-    return null;
-  }
+  const textos = await lerTextosJaEnviados(db, input);
+  if (textos === null) return null;
+  const links = new Set<string>();
+  for (const texto of textos) for (const link of linksNoTexto(texto)) links.add(normalizarLink(link));
+  return links;
 }
