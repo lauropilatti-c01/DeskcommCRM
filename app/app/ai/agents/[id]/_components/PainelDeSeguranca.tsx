@@ -45,6 +45,7 @@ import {
   useSetGuardrailLayer,
   type CamadaDeSeguranca,
 } from "@/hooks/ai/useGuardrailLayers";
+import { useSendGuards, useSetSendGuard } from "@/hooks/ai/useSendGuards";
 
 import {
   CONFERENCIAS_DE_SAIDA,
@@ -52,6 +53,57 @@ import {
   type ConferenciaDeSaida,
 } from "@/lib/ai/guardrails/lista-de-conferencia";
 import { AjustesDeEstilo } from "./AjustesDeEstilo";
+
+/**
+ * (C01, -c01.7) O interruptor de uma trava que se liga pela tela, por organização, sem
+ * custo (`/api/v1/ai/send-guards`). O testid NÃO começa com `conferencia-`: a contagem
+ * de interruptores das conferências é a das camadas que custam uma consulta ao modelo
+ * (`painel-de-seguranca.test.tsx`), e esta não custa.
+ */
+function InterruptorDaTrava({ c }: { c: ConferenciaDeSaida }) {
+  const t = useT();
+  const consulta = useSendGuards();
+  const gravar = useSetSendGuard();
+  const trava = c.interruptorNaTela;
+  const atual = consulta.data?.travas?.find((item) => item.trava === trava);
+  const ligada = atual?.enabled ?? false;
+  const podeEditar = consulta.data?.podeEditar ?? false;
+  if (trava === undefined) return null;
+  return (
+    <div data-testid={`trava-${c.nome}`} className="space-y-1">
+      <div className="flex items-center gap-2">
+        <Switch
+          data-testid={`trava-${c.nome}-liga`}
+          checked={ligada}
+          disabled={!podeEditar || consulta.isLoading || gravar.isPending}
+          onCheckedChange={(enabled) => gravar.mutate({ trava, enabled })}
+          aria-label={t(c.rotulo)}
+        />
+        <span data-testid={`trava-${c.nome}-estado`} className="text-xs text-muted-foreground">
+          {consulta.isLoading || atual === undefined
+            ? t("carregando…")
+            : atual.origem === "tela"
+              ? ligada
+                ? t("Ligada por você")
+                : t("Desligada por você")
+              : atual.origem === "configuracao"
+                ? `${t("Ligada")} ${t("— vem da configuração da organização")}`
+                : t("Desligada")}
+        </span>
+      </div>
+      {gravar.isError ? (
+        // O interruptor volta ao estado gravado (a consulta não foi refeita); a frase diz que a troca não valeu.
+        <p role="alert" data-testid={`trava-${c.nome}-erro`} className="text-xs text-destructive">
+          {t("Não foi possível salvar. Tente de novo.")}
+        </p>
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        <span className="font-medium text-foreground">{t("Vale para a organização toda. Sem custo.")}</span>{" "}
+        {t(c.porQueNaoSeDesliga)}
+      </p>
+    </div>
+  );
+}
 
 function Conferencia({
   c,
@@ -85,7 +137,9 @@ function Conferencia({
       <div className="space-y-1">
         <p className="text-sm font-medium">{t(c.rotulo)}</p>
         <p className="text-xs text-muted-foreground">{t(c.oQueProtege)}</p>
-        {c.escolha === null && c.opcionalNaConfiguracao === true ? (
+        {c.escolha === null && c.interruptorNaTela !== undefined ? (
+          <InterruptorDaTrava c={c} />
+        ) : c.escolha === null && c.opcionalNaConfiguracao === true ? (
           // (C01, -c01.3) Opcional por organização: não é fixa nem tem interruptor aqui.
           <p data-testid={`conferencia-${c.nome}-opcional`} className="text-xs text-muted-foreground">
             <span className="font-medium text-foreground">
