@@ -13712,6 +13712,29 @@ export const DICIONARIO: Traducoes = {
   "Não dá para ver daqui": { es: "No se puede ver desde aquí" },
   "Ajustar": { es: "Ajustar" },
   "Tudo o que se liga e desliga, se está ligado e onde se ajusta.": { es: "Todo lo que se activa y desactiva, si está activado y dónde se ajusta." },
+
+  // ─── (C01, -c01.7) PAINÉIS DA OPERAÇÃO, só leitura (app/app/ai/paineis) ───
+  "Painéis da operação": { es: "Paneles de la operación" },
+  "Mensagens prontas e informações que o seu sistema manda para consultar aqui.": { es: "Mensajes listos e información que tu sistema envía para consultar aquí." },
+  "O que o sistema conectado ao agente manda para consulta: mensagens prontas e as informações que ele usa. Esta tela só mostra; para mudar algo, altere no próprio sistema.": { es: "Lo que el sistema conectado al agente envía para consulta: mensajes listos y la información que usa. Esta pantalla solo muestra; para cambiar algo, modifícalo en el propio sistema." },
+  "Botão": { es: "Botón" },
+  "A seção “{titulo}” é de um tipo que esta tela ainda não mostra.": { es: "La sección “{titulo}” es de un tipo que esta pantalla todavía no muestra." },
+  "Uma seção deste painel é de um tipo que esta tela ainda não mostra.": { es: "Una sección de este panel es de un tipo que esta pantalla todavía no muestra." },
+  "Nada nesta seção.": { es: "Nada en esta sección." },
+  "Este painel ainda não tem nada para mostrar.": { es: "Este panel todavía no tiene nada para mostrar." },
+  "Nada nesta aba tem “{busca}”.": { es: "Nada en esta pestaña contiene “{busca}”." },
+  "Nenhum sistema está conectado ao agente nesta instalação; quando estiver, os painéis que ele mandar aparecem aqui.": { es: "Ningún sistema está conectado al agente en esta instalación; cuando lo esté, los paneles que envíe aparecerán aquí." },
+  "O sistema conectado ao agente não oferece painéis.": { es: "El sistema conectado al agente no ofrece paneles." },
+  "O sistema conectado recusou a consulta porque a assinatura não confere dos dois lados.": { es: "El sistema conectado rechazó la consulta porque la firma no coincide entre los dos lados." },
+  "O sistema conectado não respondeu a tempo; tente de novo em alguns instantes.": { es: "El sistema conectado no respondió a tiempo; inténtalo de nuevo en unos instantes." },
+  "O sistema conectado respondeu num formato que esta tela não sabe ler.": { es: "El sistema conectado respondió en un formato que esta pantalla no sabe leer." },
+  "A resposta do sistema conectado passou do tamanho que esta tela aceita.": { es: "La respuesta del sistema conectado superó el tamaño que esta pantalla acepta." },
+  "O sistema conectado ainda não mandou nenhum painel.": { es: "El sistema conectado todavía no envió ningún panel." },
+  "Não deu para carregar os painéis": { es: "No se pudieron cargar los paneles" },
+  "Nenhum painel para mostrar": { es: "Ningún panel para mostrar" },
+  "Painel sem título": { es: "Panel sin título" },
+  "Atualizado em {data}": { es: "Actualizado el {data}" },
+  "Buscar nesta aba": { es: "Buscar en esta pestaña" },
 };
 
 /**

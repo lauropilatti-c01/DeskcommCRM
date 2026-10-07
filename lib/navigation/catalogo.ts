@@ -592,6 +592,18 @@ export const NAV_CATALOG = [
     minRole: "manager",
   },
   {
+    // (C01, -c01.7) Só leitura: o conteúdo vem do serviço do gancho antes do turno
+    // (`lib/ai/paineis`). Sem gancho configurado, a tela explica o estado vazio.
+    // SEM `sidebar`, como as vizinhas: consulta de poucas vezes, pelo hub e pelo ⌘K.
+    href: "/app/ai/paineis",
+    label: "Painéis da operação",
+    description: "Mensagens prontas e informações que o seu sistema manda para consultar aqui.",
+    icon: "Eye",
+    group: "ia",
+    section: "Ensinar o agente",
+    minRole: "manager",
+  },
+  {
     href: "/app/ai/cases",
     label: "Casos",
     description: "Os atendimentos que o agente conduziu, do início ao desfecho.",
