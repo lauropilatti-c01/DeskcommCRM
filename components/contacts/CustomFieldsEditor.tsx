@@ -58,6 +58,9 @@ export function CustomFieldsEditor({ fields, value, onChange, disabled, classNam
     onChange({ ...value, [key]: v });
   }
 
+  // Campo largo (texto longo, sim/não) usa `md:col-span-full`, nunca
+  // `md:col-span-2`: o painel do inbox força `md:grid-cols-1`, e o span de 2
+  // criava uma coluna implícita que punha os rótulos uns sobre os outros.
   return (
     <div className={cn("grid grid-cols-1 gap-4 md:grid-cols-2", className)}>
       {fields.map((f) => {
@@ -74,7 +77,7 @@ export function CustomFieldsEditor({ fields, value, onChange, disabled, classNam
         switch (f.type) {
           case "textarea":
             return (
-              <div key={f.key} className="space-y-2 md:col-span-2">
+              <div key={f.key} className="space-y-2 md:col-span-full">
                 {labelEl}
                 <Textarea
                   id={id}
@@ -165,7 +168,7 @@ export function CustomFieldsEditor({ fields, value, onChange, disabled, classNam
           }
           case "boolean":
             return (
-              <div key={f.key} className="flex items-center justify-between gap-4 md:col-span-2">
+              <div key={f.key} className="flex items-center justify-between gap-4 md:col-span-full">
                 {labelEl}
                 <Switch
                   id={id}
