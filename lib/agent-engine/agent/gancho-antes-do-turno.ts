@@ -40,6 +40,14 @@
  * `resumo` vazio vale ausente; `resumo` e `motivo` longos demais são cortados, sem
  * derrubar a resposta.
  *
+ * (C01, -c01.7) `apagar_memoria: true`, com `seguir` ou `segurar`: apaga a memória do
+ * contato (`lead_notes`: as notas, o índice que o turno monta delas e o embedding de
+ * cada uma) junto com o `gravar` e nas mesmas condições dele. Só para o celular de
+ * teste: o contato ou um card dele tem de ter a etiqueta `ETIQUETA_DO_CELULAR_DE_TESTE`,
+ * conferida no banco na mesma instrução que apaga. Sem a etiqueta, com a etiqueta posta
+ * pela própria resposta ou com erro na leitura: nada é apagado, fica no log e o turno
+ * segue. Não mexe em mensagens, casos, campos, card nem no checkpoint do contato.
+ *
  * ## Falha nunca cala o cliente
  *
  * Erro de rede, prazo estourado, status fora de 2xx, resposta fora do schema, canal
@@ -427,6 +435,8 @@ export const respostaDoGanchoSchema = z
     reconsultar_em_s: z.number().int().min(RECONSULTA_MINIMA_S).max(RECONSULTA_MAXIMA_S).nullish(),
     /** (C01, -c01.6) Só com `segurar`: depois dos envios, passa a conversa à equipe. */
     passar_a_equipe: z.boolean().nullish(),
+    /** (C01, -c01.7) Apagar a memória do contato; só vale no celular de teste (`apagarMemoriaDoContato`). */
+    apagar_memoria: z.boolean().nullish(),
   })
   .refine((r) => r.acao !== 'segurar' || Array.isArray(r.enviar), {
     message: 'segurar sem a lista enviar (para não enviar nada, enviar: [])',
@@ -774,6 +784,8 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
 
   if (resposta.acao === 'seguir') {
     await guardServiceEffect();
+    // Antes do `gravar`: a etiqueta conferida é a de antes desta resposta.
+    await apagarMemoriaSePedida(ctx, resposta);
     const gravou = await aplicarGravar(ctx, card, resposta.gravar);
     const relido = gravou ? await lerCardComCuidado(ctx) : null;
     const campos = relido !== null ? { camposDoCard: relido.campos } : {};
@@ -840,6 +852,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     });
     break;
   }
+  await apagarMemoriaSePedida(ctx, resposta);
   await aplicarGravar(ctx, card, resposta.gravar);
   if (decisao.formulario !== null) {
     try {
@@ -963,6 +976,79 @@ async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho, 
       });
     }
     throw err;
+  }
+}
+
+/**
+ * (C01, -c01.7) A etiqueta que autoriza `apagar_memoria`: o contato, ou um card dele, a
+ * tem (comparada já normalizada, como o banco guarda). Constante genérica, sem nada de
+ * uma organização: quem usa o `#zerar` no celular de teste põe essa etiqueta nele.
+ */
+export const ETIQUETA_DO_CELULAR_DE_TESTE = 'celular-de-teste';
+
+/**
+ * (C01, -c01.7) Apaga a memória do contato (`lead_notes`) só se o contato ou um card
+ * dele tiver `ETIQUETA_DO_CELULAR_DE_TESTE`. Conferir e apagar numa instrução só: não há
+ * janela entre a etiqueta lida e as notas apagadas. O índice da memória e o embedding
+ * são da própria linha e saem com ela. Só lê `contacts.tags` e `crm_leads.tags`; só
+ * apaga `lead_notes` daquele contato naquela organização.
+ */
+export async function apagarMemoriaDoContato(
+  db: Queryable,
+  organizationId: string,
+  contactId: string,
+): Promise<{ autorizado: boolean; apagadas: number }> {
+  const { rows } = await db.query<{ autorizado: boolean; apagadas: number }>(
+    `with autorizado as (
+       select (
+         exists (select 1 from contacts c, unnest(c.tags) as t(tag)
+                  where c.organization_id = $1 and c.id = $2 and lower(btrim(t.tag)) = $3)
+         or exists (select 1 from crm_leads l, unnest(l.tags) as t(tag)
+                     where l.organization_id = $1 and l.contact_id = $2 and lower(btrim(t.tag)) = $3)
+       ) as ok
+     ),
+     apagadas as (
+       delete from lead_notes n
+        where n.organization_id = $1 and n.contact_id = $2 and (select ok from autorizado)
+       returning n.id
+     )
+     select (select ok from autorizado) as autorizado, (select count(*) from apagadas)::int as apagadas`,
+    [organizationId, contactId, ETIQUETA_DO_CELULAR_DE_TESTE],
+  );
+  return { autorizado: rows[0]?.autorizado === true, apagadas: Number(rows[0]?.apagadas ?? 0) };
+}
+
+/**
+ * (C01, -c01.7) `apagar_memoria`. Recusa, sem apagar nada e com o motivo no log: o
+ * contato sem a etiqueta de teste; a própria resposta pondo a etiqueta
+ * (`gravar.etiquetas_mais`, que valeria na re-execução); erro na leitura. Um erro do
+ * gancho nunca apaga a memória de quem não é celular de teste. Falhar aqui não cala o
+ * cliente: o turno segue.
+ */
+async function apagarMemoriaSePedida(ctx: ContextoDoGancho, resposta: RespostaDoGancho): Promise<void> {
+  if (resposta.apagar_memoria !== true) return;
+  if (normalizarTags(resposta.gravar?.etiquetas_mais ?? []).includes(ETIQUETA_DO_CELULAR_DE_TESTE)) {
+    ctx.log.warn('gancho antes do turno: memória não apagada — a própria resposta põe a etiqueta de teste', {
+      porque: 'etiqueta_na_resposta',
+    });
+    return;
+  }
+  try {
+    await guardServiceEffect();
+    const { autorizado, apagadas } = await apagarMemoriaDoContato(ctx.pool, ctx.tenantId, ctx.contactId);
+    if (!autorizado) {
+      ctx.log.warn('gancho antes do turno: memória não apagada — contato sem a etiqueta de teste', {
+        porque: 'sem_etiqueta',
+      });
+      return;
+    }
+    ctx.log.info('gancho antes do turno: memória do contato apagada (celular de teste)', { notas: apagadas });
+  } catch (err) {
+    if (eDeFronteira(err)) throw err;
+    ctx.log.warn('gancho antes do turno: memória não apagada — a leitura da etiqueta falhou', {
+      porque: 'erro',
+      erro: err instanceof Error ? err.name : 'desconhecido',
+    });
   }
 }
 
