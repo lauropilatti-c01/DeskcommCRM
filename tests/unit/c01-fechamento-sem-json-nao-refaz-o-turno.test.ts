@@ -15,6 +15,9 @@
  *   - a chamada que LANÇA (provedor, prazo, lease, fronteira) sobe como antes.
  * O turno inteiro, contra Postgres, em `tests/invariants/c01-fechamento-sem-json-nao-refaz-o-turno`.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
@@ -190,6 +193,23 @@ describe("(C01) o que não muda", () => {
       conteudoDoFechamento({ fechar: naSegunda, leadTemResposta: true, anterior: async () => ANTERIOR }),
     ).rejects.toThrow("provedor fora do ar");
     expect(naSegunda).toHaveBeenCalledTimes(2);
+  });
+
+  it("`service_boundary_stale` não refaz o turno: o worker cancela o job (terminal), nunca o devolve à fila", () => {
+    // O piloto-1 (07/10) terminou com `attempts = 3` e `last_error = service_boundary_stale`,
+    // o que parecia repetição POR esse erro. Não foi: as tentativas 1 e 2 caíram no
+    // fechamento sem JSON (gravador: texto vazio às 22:12:36 e 22:13:12) e voltaram pelo
+    // `failJob`; só a 3ª lançou `StaleServiceBoundaryError` — a cópia do agente foi pausada
+    // às 22:13:53 (`ai_agent.paused` no `api_audit_log`), e o `insertCheckpoint` →
+    // `guardServiceEffect` → `assertAgentOperationPg` a recusou — e o worker a cancelou.
+    // O `last_error` guarda só a última. Esta é a regra que mantém isso verdade.
+    const fonte = readFileSync(join(process.cwd(), "workers/agent-worker/main.ts"), "utf8").replace(/\s+/gu, " ");
+    expect(fonte).toContain(
+      "const terminal = err instanceof StaleServiceBoundaryError || ehVetoPermanenteDeNegocio(err);",
+    );
+    expect(fonte).toContain(
+      "if (terminal) { await cancelJob(pool, job.id, workerId, errMsg(err), claimOfJob(job)?.acquired_at); }",
+    );
   });
 
   it("parseCheckpointText mantém as mensagens de erro (o last_error da fila e os logs as leem)", async () => {
