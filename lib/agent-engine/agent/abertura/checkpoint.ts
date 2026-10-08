@@ -159,6 +159,20 @@ export async function insertCheckpoint(
 }
 
 /**
+ * (C01) O fechamento respondeu, mas sem um checkpoint utilizável: sem JSON, JSON
+ * inválido ou shape inválido. Classe própria para `conteudoDoFechamento` separar
+ * esta falha da chamada que LANÇA (provedor, prazo, lease, fronteira), que segue o
+ * caminho de sempre. As mensagens são as de antes: o `last_error` da fila e os
+ * logs continuam dizendo o mesmo.
+ */
+export class FechamentoSemCheckpointError extends Error {
+  constructor(mensagem: string) {
+    super(mensagem);
+    this.name = 'FechamentoSemCheckpointError';
+  }
+}
+
+/**
  * Extrai e valida o JSON do fechamento. Tolerante a cerca de código e prosa em
  * volta (pega do primeiro '{' ao último '}'); inválido → erro SEM o texto do
  * modelo na mensagem (pode carregar PII da conversa) — o job re-tenta.
@@ -167,13 +181,15 @@ export function parseCheckpointText(text: string): CheckpointContent {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start === -1 || end <= start) {
-    throw new Error('fechamento do turno sem JSON de checkpoint — run re-tentado pela fila');
+    throw new FechamentoSemCheckpointError(
+      'fechamento do turno sem JSON de checkpoint — run re-tentado pela fila',
+    );
   }
   let raw: unknown;
   try {
     raw = JSON.parse(text.slice(start, end + 1));
   } catch {
-    throw new Error(
+    throw new FechamentoSemCheckpointError(
       'JSON de checkpoint inválido no fechamento do turno — run re-tentado pela fila',
     );
   }
@@ -182,9 +198,68 @@ export function parseCheckpointText(text: string): CheckpointContent {
     const issues = parsed.error.issues
       .map((i) => `${i.path.join('.') || '(raiz)'}: ${i.code}`)
       .join('; ');
-    throw new Error(
+    throw new FechamentoSemCheckpointError(
       `checkpoint do fechamento com shape inválido (${issues}) — run re-tentado pela fila`,
     );
   }
   return parsed.data;
+}
+
+/**
+ * (C01) O FECHAMENTO DO TURNO QUE JÁ FALOU COM O LEAD NUNCA DEVOLVE O TURNO À FILA.
+ *
+ * O erro de `parseCheckpointText` devolvia o job inteiro à fila DEPOIS de as
+ * mensagens terem saído; a nova tentativa refazia o turno do zero e o lead recebia
+ * outra mensagem, com outras palavras (o recibo do `send_ledger` só barra conteúdo
+ * igual). Medido no laboratório da C01 (rodada geral-1, 07/10/2026): 7 de 116
+ * fechamentos (~6%) pararam sem o JSON — o modelo escreveu uma mensagem ao lead ou
+ * devolveu texto vazio — e os 7 turnos mandaram uma mensagem a mais.
+ *
+ * Com resposta ao lead neste job: UMA nova chamada de fechamento, igual à primeira;
+ * sem JSON de novo, o checkpoint MÍNIMO e o turno conclui. O mínimo é o do turno
+ * anterior (compromissos, objeções e resumo, o que validar), com `next_action` nulo
+ * — a do turno anterior já foi cumprida por este, e repeti-la no topo do próximo
+ * prompt é o defeito do #510 — e a declaração AUSENTE: o "fechamento incompleto,
+ * turno a investigar" que a coluna nula e o Operador já entendem (`declaracao.ts`).
+ *
+ * Sem resposta ao lead, nada muda: o erro sobe na primeira chamada e a fila refaz o
+ * turno, que ainda não falou. Só a falha do PARSE entra aqui; a chamada que lança
+ * sobe como antes, na primeira e na nova tentativa.
+ */
+export async function conteudoDoFechamento<T>(opcoes: {
+  /** A chamada de fechamento: o texto do modelo (já tratado) e o resultado dela. */
+  fechar: () => Promise<{ texto: string; chamada: T }>;
+  /** O lead já recebeu (ou vai receber) mensagem deste job: refazer o turno mandaria outra. */
+  leadTemResposta: boolean;
+  /** O checkpoint do turno anterior; lido só se o mínimo for preciso. */
+  anterior: () => Promise<unknown>;
+}): Promise<{ content: CheckpointContent; chamada: T; minimo: boolean }> {
+  const primeira = await opcoes.fechar();
+  try {
+    return { content: parseCheckpointText(primeira.texto), chamada: primeira.chamada, minimo: false };
+  } catch (err) {
+    if (!opcoes.leadTemResposta || !(err instanceof FechamentoSemCheckpointError)) throw err;
+  }
+  const segunda = await opcoes.fechar();
+  try {
+    return { content: parseCheckpointText(segunda.texto), chamada: segunda.chamada, minimo: false };
+  } catch (err) {
+    if (!(err instanceof FechamentoSemCheckpointError)) throw err;
+  }
+  return { content: checkpointMinimo(await opcoes.anterior()), chamada: segunda.chamada, minimo: true };
+}
+
+/** (C01) O checkpoint mínimo herdado do anterior: cada campo só se validar. */
+function checkpointMinimo(anterior: unknown): CheckpointContent {
+  const a = (anterior ?? {}) as Record<string, unknown>;
+  const lista = (valor: unknown): string[] => {
+    const lido = z.array(z.string()).safeParse(valor);
+    return lido.success ? lido.data : [];
+  };
+  return {
+    commitments: lista(a.commitments),
+    objections: lista(a.objections),
+    next_action: null,
+    rolling_summary: typeof a.rolling_summary === 'string' ? a.rolling_summary : '',
+  };
 }
