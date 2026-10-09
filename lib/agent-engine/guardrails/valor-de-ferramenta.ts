@@ -19,17 +19,15 @@
  * existe na base; errar na mensagem vetaria texto que não fala de dinheiro.
  */
 import { linksNoTexto } from './link-permitido';
+import { textoSemAcento, valoresEmReais } from './texto-afirmavel';
 
 // Número em reais, nas formas que aparecem: milhar com ponto ("6.638,64", "1.997"),
 // milhar com vírgula ("1,997.00"), sem milhar ("1997", "166,42", "1997.00"). A ordem
 // das alternativas importa: a de milhar vem antes, para "1.997" não virar "1".
 const NUMERO =
   '\\d{1,3}(?:\\.\\d{3})+(?:,\\d{1,2})?|\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|\\d+(?:[.,]\\d{1,2})?';
-// Não começa nem termina no meio de outro número ("1997.001" não vira "1997.00").
-const NUMERO_INTEIRO = `(?<![\\d.,])(${NUMERO})(?![\\d]|[.,]\\d)`;
+// (-c01.8, 3ª revisão) Na mensagem, o valor é lido por `valoresEmReais` (abaixo).
 const MIL = '(\\s*mil\\b)?';
-const RE_COM_CIFRAO = new RegExp(`R\\$\\s*${NUMERO_INTEIRO}${MIL}`, 'gi');
-const RE_COM_REAIS = new RegExp(`${NUMERO_INTEIRO}${MIL}\\s*(?:reais|real)\\b`, 'gi');
 // Na FONTE, o número tem de estar solto: colado em letra, dígito, "_", ponto ou vírgula
 // ("salario_6700", o pedaço "a1b2" de um id) ou ligado por hífen a outro pedaço (o UUID
 // "…-4000-8000-…", a data "2026-10-07") não é valor. "6.638,64", "R$6.638,64", "1997.00"
@@ -59,25 +57,44 @@ function semLinks(texto: string): string {
 }
 
 /**
+ * (C01, -c01.8, 3ª revisão) Na MENSAGEM, o valor é a expressão monetária inteira, lida
+ * como a trava do texto afirmável a lê (`valoresEmReais`): "R$ 5 e 50 centavos" e "5
+ * reais e 50" valem 5,50; "R$ 5 000" (espaço comum, fino ou não separável) e "R$ 5
+ * mil", 5.000. Antes o "R$ 5" de cada uma valia 5, e passava com a ferramenta dizendo
+ * 5. A forma em dúvida não vira valor: é contada à parte (`emDuvida`) e a trava a barra
+ * — o que ainda parece dinheiro fora das expressões lidas ("R$ 5,5", "R$ 5,000", "R$ 5
+ * milhões", "R$ 5 k", "50 centavos") e a expressão seguida de "e" + número ou "meio"
+ * ("R$ 5 e meio", "R$ 5 e 500 centavos").
+ */
+const AINDA_E_DINHEIRO =
+  /r\$ ?\d|\b\d[\d.,]*(?: ?(?:mil|milh\w*|bilh\w*|mi|bi|k))?(?: de)? ?(?:reais|real)\b|\b\d[\d.,]* ?centavos?\b/g;
+const CONTINUA_O_VALOR = /^ (?:e|mais) (?:\d|meio\b|meia\b)/;
+
+/** Os valores em dinheiro da mensagem, em centavos e na ordem, e quantas formas ficaram em dúvida. */
+export function lerValoresEmDinheiro(texto: string): { valores: number[]; emDuvida: number } {
+  const t = textoSemAcento(texto);
+  const valores: number[] = [];
+  let emDuvida = 0;
+  let fora = '';
+  let i = 0;
+  for (const { ini, fim, centavos } of valoresEmReais(t)) {
+    if (CONTINUA_O_VALOR.test(t.slice(fim))) emDuvida++;
+    else valores.push(centavos);
+    fora += `${t.slice(i, ini)} | `;
+    i = fim;
+  }
+  fora += t.slice(i);
+  emDuvida += fora.match(AINDA_E_DINHEIRO)?.length ?? 0;
+  return { valores, emDuvida };
+}
+
+/**
  * Os valores em dinheiro da mensagem, em centavos, na ordem: "R$ 1.997", "R$ 1.997,00",
- * "R$1997", "R$ 166,42", "R$ 6 mil", "1.997 reais". Número sem "R$" nem "reais"
- * ("12x", "60 metas") não é dinheiro.
+ * "R$1997", "R$ 166,42", "R$ 6 mil", "1.997 reais", "R$ 5 e 50 centavos". Número sem "R$"
+ * nem "reais" ("12x", "60 metas") não é dinheiro; a forma em dúvida fica de fora.
  */
 export function valoresEmDinheiro(texto: string): number[] {
-  const t = semLinks(texto);
-  const achados: Array<{ ini: number; centavos: number }> = [];
-  for (const re of [RE_COM_CIFRAO, RE_COM_REAIS]) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(t)) !== null) {
-      // O lugar do NÚMERO (não do "R$"): "R$ 10 reais" casa nas duas formas e conta uma vez.
-      const ini = m.index + m[0].indexOf(m[1] ?? '');
-      if (achados.some((a) => a.ini === ini)) continue;
-      const centavos = centavosDoNumero(m[1] ?? '', m[2] !== undefined);
-      if (centavos !== null) achados.push({ ini, centavos });
-    }
-  }
-  return achados.sort((a, b) => a.ini - b.ini).map((a) => a.centavos);
+  return lerValoresEmDinheiro(texto).valores;
 }
 
 /** Todo número de um texto livre, em centavos (o "1.997" vale 1.997 reais). */
@@ -94,6 +111,9 @@ function numerosNoTexto(texto: string, achados: Set<number>): void {
       if (sem !== null) achados.add(sem);
     }
   }
+  // (3ª revisão) E a expressão monetária inteira, como a mensagem é lida: "R$ 5 e 50
+  // centavos" na fonte libera 5,50; "R$ 5 000", 5.000.
+  for (const { centavos } of valoresEmReais(textoSemAcento(texto))) achados.add(centavos);
 }
 
 /** Chave que diz que o número já está em centavos (`preco_centavos`, `amount_cents`). */

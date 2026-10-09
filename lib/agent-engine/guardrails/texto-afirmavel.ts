@@ -128,25 +128,46 @@ function centavosDoValor(numero: string, mil: boolean, centavos: string | undefi
   return valor + Number(centavos ?? '0');
 }
 
-/** (3ª revisão) Cada valor em reais do texto na forma única "r$ N,CC" ("r$ 5 mil" → "r$ 5000,00"). */
-export function valoresNaFormaUnica(t: string): string {
-  return t.replace(VALOR_EM_REAIS, (_, n1, mil1, c1, n2, mil2, c2) => {
-    const c = centavosDoValor(n1 ?? n2, (mil1 ?? mil2) !== undefined, c1 ?? c2);
-    return `r$ ${Math.floor(c / 100)},${String(c % 100).padStart(2, '0')}`;
-  });
+/**
+ * (3ª revisão) Os valores em reais de `t` (já em `textoSemAcento`), com a posição e o valor
+ * em centavos. Também a trava de valor de ferramenta lê a mensagem por aqui.
+ */
+export function valoresEmReais(t: string): Array<{ ini: number; fim: number; centavos: number }> {
+  const achados: Array<{ ini: number; fim: number; centavos: number }> = [];
+  VALOR_EM_REAIS.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = VALOR_EM_REAIS.exec(t)) !== null) {
+    const centavos = centavosDoValor(m[1] ?? m[4] ?? '', (m[2] ?? m[5]) !== undefined, m[3] ?? m[6]);
+    achados.push({ ini: m.index, fim: m.index + m[0].length, centavos });
+  }
+  return achados;
 }
 
-/** O texto como as travas de valor o leem: sem links, sem acento, minúsculo, espaço simples, valores na forma única. */
-export function textoParaConferir(texto: string): string {
+/** (3ª revisão) Cada valor em reais do texto na forma única "r$ N,CC" ("r$ 5 mil" → "r$ 5000,00"). */
+export function valoresNaFormaUnica(t: string): string {
+  let saida = '';
+  let i = 0;
+  for (const { ini, fim, centavos } of valoresEmReais(t)) {
+    saida += `${t.slice(i, ini)}r$ ${Math.floor(centavos / 100)},${String(centavos % 100).padStart(2, '0')}`;
+    i = fim;
+  }
+  return saida + t.slice(i);
+}
+
+/** O texto sem links, sem acento, minúsculo e com espaço simples. */
+export function textoSemAcento(texto: string): string {
   let t = texto;
   for (const link of linksNoTexto(texto)) t = t.split(link).join(' ');
-  return valoresNaFormaUnica(
-    t
-      .normalize('NFKD')
-      .replace(/[̀-ͯ]/g, '')
-      .toLowerCase()
-      .replace(/\s+/g, ' '),
-  );
+  return t
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+/** O texto como as travas de valor o leem: `textoSemAcento`, com os valores na forma única. */
+export function textoParaConferir(texto: string): string {
+  return valoresNaFormaUnica(textoSemAcento(texto));
 }
 
 /** A frase para comparar: sem os espaços das pontas e sem a pontuação do fim. */

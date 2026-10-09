@@ -89,6 +89,18 @@ describe("(C01) os valores em dinheiro da mensagem", () => {
     expect(valoresEmDinheiro("R$ 10 reais")).toEqual([1000]);
   });
 
+  it("(-c01.8, 3ª revisão) a expressão inteira: centavos à parte, milhar com espaço e 'mil'", async () => {
+    const { valoresEmDinheiro } = await valores();
+    expect(valoresEmDinheiro("R$ 5 e 50 centavos")).toEqual([550]);
+    expect(valoresEmDinheiro("5 reais e 50")).toEqual([550]);
+    expect(valoresEmDinheiro("R$ 5 000")).toEqual([500000]);
+    expect(valoresEmDinheiro("R$ 5 000 e R$ 5 000,00")).toEqual([500000, 500000]);
+    expect(valoresEmDinheiro("R$ 5 mil")).toEqual([500000]);
+    // A forma em dúvida não vira valor (e a trava a barra).
+    expect(valoresEmDinheiro("R$ 5 e meio")).toEqual([]);
+    expect(valoresEmDinheiro("R$ 5 milhões")).toEqual([]);
+  });
+
   it("número sem R$ nem 'reais' não é dinheiro: 12x, metas, dias, vagas, o número dentro do link", async () => {
     const { valoresEmDinheiro } = await valores();
     for (const texto of [
@@ -246,6 +258,72 @@ describe("(C01) a trava 'link e valor de ferramenta'", () => {
       expect(v.code).toBe("link_ou_valor_sem_consulta");
       expect(v.detail).toEqual({ links: 0, valores: 1 });
     }
+  });
+
+  it("o valor é a expressão monetária inteira: com 5 devolvido, 'R$ 5 e 50 centavos', 'R$ 5 000' e 'R$ 5 e meio' são barrados (-c01.8, 3ª revisão)", async () => {
+    const liberado = await armado({ resultado: { desconto: 5 } });
+    for (const frase of ["O cupom abate R$ 5.", "O cupom abate R$5,00.", "O cupom abate 5 reais.", "Abate R$ 5,00, no cartão."]) {
+      expect((await avaliar(frase, liberado)).pass, frase).toBe(true);
+    }
+    for (const frase of [
+      "O cupom abate R$ 5 e 50 centavos.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 milhões.",
+      "O cupom abate 5 milhões de reais.",
+      "O cupom abate R$ 5 e meio.",
+      "O cupom abate 5 reais e 50.",
+      "O cupom abate 5 reais e 50 centavos.",
+      "O cupom abate R$ 5 e 500 centavos.",
+      "O cupom abate R$ 5, e mais 50 centavos.",
+      "O cupom abate R$ 5 mil.",
+      "O cupom abate R$ 5,50.",
+      "O cupom abate R$ 5.999.",
+    ]) {
+      const v = await avaliar(frase, liberado);
+      expect(v.pass, frase).toBe(false);
+      expect(v.code).toBe("link_ou_valor_sem_consulta");
+    }
+  });
+
+  it("o valor inteiro igual ao devolvido passa em qualquer escrita; a forma ambígua é barrada (3ª revisão)", async () => {
+    const mil = await armado({ resultado: { desconto: 5000 } });
+    for (const frase of [
+      "Abate R$ 5.000.",
+      "Abate R$ 5 000.",
+      "Abate R$ 5 000.",
+      "Abate R$ 5 000,00.",
+      "Abate R$ 5 mil.",
+      "Abate 5 mil reais.",
+      "Abate R$ 5.000,00.",
+    ]) {
+      expect((await avaliar(frase, mil)).pass, frase).toBe(true);
+    }
+    for (const frase of ["Abate R$ 5.000,50.", "Abate R$ 5 mil e 500.", "Abate R$ 5 000 000."]) {
+      expect((await avaliar(frase, mil)).pass, frase).toBe(false);
+    }
+    const cincoECinquenta = await armado({ resultado: { desconto: 5.5 } });
+    for (const frase of ["Abate R$ 5,50.", "Abate R$ 5 e 50 centavos.", "Abate 5 reais e 50."]) {
+      expect((await avaliar(frase, cincoECinquenta)).pass, frase).toBe(true);
+    }
+    // A forma em dúvida não vira valor nenhum: barrada mesmo com todos os candidatos devolvidos.
+    const todos = await armado({ resultado: { a: 5, b: 5.5, c: 5000, d: 0.5, e: 500 } });
+    for (const frase of ["Abate R$ 5,5.", "Abate R$ 5,000.", "Abate R$ 5 00.", "Abate R$ 5,00 000.", "Abate R$ 5 k."]) {
+      expect((await avaliar(frase, todos)).pass, frase).toBe(false);
+    }
+    // O texto da fonte também é lido inteiro: "R$ 5 e 50 centavos" no fato libera 5,50.
+    const fato = await armado({ resultado: { texto: "O cupom abate R$ 5 e 50 centavos." } });
+    expect((await avaliar("O cupom abate R$ 5,50.", fato)).pass).toBe(true);
+  });
+
+  it("a mensagem nossa já enviada libera o valor inteiro dela, não o pedaço (3ª revisão)", async () => {
+    const liberado = await armado({ jaEnviados: ["O cupom abate R$ 5 e 50 centavos."] });
+    expect((await avaliar("Como falei, o cupom abate R$ 5,50.", liberado)).pass).toBe(true);
+    expect((await avaliar("Como falei, o cupom abate R$ 5.", liberado)).pass).toBe(false);
+    const ambigua = await armado({ jaEnviados: ["O cupom abate R$ 5 e meio."] });
+    expect((await avaliar("O cupom abate R$ 5.", ambigua)).pass).toBe(false);
   });
 
   it("valor sem R$ não é dinheiro: '12x' passa mesmo sem nada liberado", async () => {
