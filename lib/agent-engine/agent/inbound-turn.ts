@@ -115,6 +115,7 @@ import {
 import {
   CHECKPOINT_INSTRUCTION,
   checkpointContentSchema,
+  conteudoDoFechamento,
   insertCheckpoint,
   parseCheckpointText,
   type CheckpointContent,
@@ -6246,40 +6247,58 @@ async function executarTurnoDoAgente(
       avisarSemCandidato(preview);
       return;
     }
-    const closing = await runModelCall(
-      pool,
-      deps.llmCfg,
-      {
-        tenantId,
-        leadId: leadId || null,
-        jobId: job?.id,
-        purpose: 'checkpoint',
-        ...(agentConfig !== null
-          ? {
-              model: agentConfig.model,
-              llmOverride: {
-                provider: agentConfig.provider,
-                credentialId: agentConfig.credentialId,
-              },
-            }
-          : {}),
-        system,
-        messages: [
-          // prune: o checkpoint reusa a abertura só como texto — a mídia nativa (cara) já
-          // fez seu trabalho na 1ª chamada e não precisa ir de novo.
-          ...openingTextOnly,
-          ...responseMessages,
-          { role: 'user', content: CHECKPOINT_INSTRUCTION },
-        ],
+    // (C01) Fechamento sem JSON depois de resposta ao lead: uma nova chamada e, se
+    // preciso, o checkpoint mínimo — o turno não volta à fila para mandar outra
+    // mensagem. Sem resposta ao lead (e na prévia), o erro sobe como antes. Ver
+    // `conteudoDoFechamento`.
+    const fechamento = await conteudoDoFechamento({
+      fechar: async () => {
+        const chamada = await runModelCall(
+          pool,
+          deps.llmCfg,
+          {
+            tenantId,
+            leadId: leadId || null,
+            jobId: job?.id,
+            purpose: 'checkpoint',
+            ...(agentConfig !== null
+              ? {
+                  model: agentConfig.model,
+                  llmOverride: {
+                    provider: agentConfig.provider,
+                    credentialId: agentConfig.credentialId,
+                  },
+                }
+              : {}),
+            system,
+            messages: [
+              // prune: o checkpoint reusa a abertura só como texto — a mídia nativa (cara) já
+              // fez seu trabalho na 1ª chamada e não precisa ir de novo.
+              ...openingTextOnly,
+              ...responseMessages,
+              { role: 'user', content: CHECKPOINT_INSTRUCTION },
+            ],
+          },
+          { registry: deps.registry, log: runLog },
+        );
+        return {
+          chamada,
+          texto: chamada.result.text.replace(
+            /https:\/\/meet\.google\.com\/[a-zA-Z0-9-]+/g,
+            '[link da reunião disponível na Agenda]',
+          ),
+        };
       },
-      { registry: deps.registry, log: runLog },
-    );
-    const content = parseCheckpointText(
-      closing.result.text.replace(
-        /https:\/\/meet\.google\.com\/[a-zA-Z0-9-]+/g,
-        '[link da reunião disponível na Agenda]',
-      ),
-    );
+      leadTemResposta: !preview && leadTemResposta,
+      anterior: () => latestCheckpoint(pool, tenantId, leadId),
+    });
+    const closing = fechamento.chamada;
+    const content = fechamento.content;
+    if (fechamento.minimo) {
+      runLog.warn(
+        'fechamento do turno sem JSON de checkpoint duas vezes, depois de resposta ao lead — checkpoint mínimo gravado, turno não refeito',
+      );
+    }
 
     if (preview) {
       preview.result.checkpoint = content;
@@ -6293,6 +6312,42 @@ async function executarTurnoDoAgente(
     // faria a seguir.
     const checkpointAnterior = await latestCheckpoint(pool, tenantId, leadId);
     await insertCheckpoint(pool, { tenantId, leadId, jobId: liveJob().id, content });
+
+    // (C01) Checkpoint mínimo: a resposta ao lead saiu e o registro do turno não. O
+    // aviso abre SEMPRE, com o Operador ligado ou não: desligado, ninguém apura a
+    // promessa sintética (`PROMESSA_DO_FECHAMENTO_FALHO`); ligado, qualquer
+    // ferramenta que ele chame, até uma consulta, conta como dono na apuração e
+    // dispensaria o aviso. O texto não afirma o que ninguém verificou: o Conversador
+    // pode ter agendado o retorno antes de responder. Gravado antes do Operador, é o
+    // aviso aberto da conversa: o do catch do enfileiramento e o do Operador, mesmo
+    // kind e mesma ref, não duplicam (`kind_e_ref`).
+    if (fechamento.minimo) {
+      try {
+        await insertInboxItem(
+          pool,
+          tenantId,
+          {
+            kind: 'promise_unfulfilled',
+            severity: 'warn',
+            title: 'O registro de um atendimento falhou depois da resposta ao cliente',
+            body:
+              'A resposta ao cliente saiu, mas o registro do turno falhou. Confira na conversa ' +
+              'se ela prometeu retorno, horário ou verificação e se já existe retorno agendado ' +
+              'antes de agir.',
+            refKind: 'conversation',
+            refId: input.conversationId,
+          },
+          'kind_e_ref',
+        );
+      } catch (erroDoAviso) {
+        runLog.error('aviso do fechamento sem checkpoint não foi gravado', {
+          error: (erroDoAviso instanceof Error
+            ? erroDoAviso.message
+            : String(erroDoAviso)
+          ).slice(0, 120),
+        });
+      }
+    }
 
     // ── O TURNO DO OPERADOR (spec 16 §3.2) ─────────────────────────────────────
     //
@@ -6387,7 +6442,8 @@ async function executarTurnoDoAgente(
       content,
     );
 
-    if (mudanca.emit) {
+    // (C01) O checkpoint mínimo não é o que a IA pensou: nada a mostrar na timeline.
+    if (mudanca.emit && !fechamento.minimo) {
       try {
         const r = await emitAgentActivityForContact({
           pool,
