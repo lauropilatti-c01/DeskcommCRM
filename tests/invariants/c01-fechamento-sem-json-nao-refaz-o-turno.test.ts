@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
+import type * as Checkpoint from "@/lib/agent-engine/agent/abertura/checkpoint";
 import type * as InboundTurn from "@/lib/agent-engine/agent/inbound-turn";
 import type * as Providers from "@/lib/agent-engine/edge/llm/providers";
 import type * as Queue from "@/lib/agent-engine/queue/queue";
@@ -23,8 +24,9 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *
  * O que se prova, do jeito que o cliente sentiria:
  *   - fechamento vazio duas vezes depois da resposta: UMA mensagem ao lead, job
- *     concluído na 1ª tentativa, checkpoint mínimo gravado (o do turno anterior,
- *     `next_action` nulo, declaração ausente). Sem a correção: duas mensagens;
+ *     concluído na 1ª tentativa, checkpoint mínimo gravado (o do turno anterior, com a
+ *     promessa sintética e a próxima ação da equipe) e, sem Operador (papel desligado,
+ *     como aqui), o aviso na Central. Sem a correção: duas mensagens;
  *   - fechamento vazio e depois JSON: uma mensagem, o checkpoint do modelo;
  *   - turno que não falou com o lead: o job volta à fila como antes.
  */
@@ -57,6 +59,7 @@ const MENSAGEM_DO_CLIENTE_EM = "2026-07-30T14:55:00Z";
 
 type Modules = {
   turno: typeof InboundTurn;
+  checkpoint: typeof Checkpoint;
   queue: typeof Queue;
   createLogger: typeof ObsLogger.createLogger;
   createFakeRegistry: typeof Providers.createFakeRegistry;
@@ -234,6 +237,17 @@ async function rodaPelaFila(
   return { jobId: job.id, erros, status: rows[0]!.status, attempts: rows[0]!.attempts };
 }
 
+/** Os avisos de promessa abertos na Central para a conversa. */
+async function avisosDaConversa() {
+  const { rows } = await pool.query<{ title: string; severity: string; status: string }>(
+    `select title, severity, status from agent_inbox_items
+      where organization_id = $1 and kind = 'promise_unfulfilled'
+        and ref_kind = 'conversation' and ref_id = $2`,
+    [ORG, CONV],
+  );
+  return rows;
+}
+
 /** Os checkpoints gravados por este job. */
 async function checkpointsDoJob(jobId: string) {
   const { rows } = await pool.query<{
@@ -253,6 +267,7 @@ async function checkpointsDoJob(jobId: string) {
 beforeAll(async () => {
   m = {
     turno: await import("@/lib/agent-engine/agent/inbound-turn"),
+    checkpoint: await import("@/lib/agent-engine/agent/abertura/checkpoint"),
     queue: await import("@/lib/agent-engine/queue/queue"),
     createLogger: (await import("@/lib/agent-engine/obs/logger")).createLogger,
     createFakeRegistry: (await import("@/lib/agent-engine/edge/llm/providers")).createFakeRegistry,
@@ -318,6 +333,7 @@ beforeEach(async () => {
   await pool.query("delete from send_ledger where organization_id = $1", [ORG]);
   await pool.query("delete from messages where organization_id = $1 and direction = 'outbound'", [ORG]);
   await pool.query("delete from lead_checkpoints where organization_id = $1", [ORG]);
+  await pool.query("delete from agent_inbox_items where organization_id = $1", [ORG]);
   // O checkpoint do turno anterior: o que o mínimo herda.
   await pool.query(
     `insert into lead_checkpoints (organization_id, contact_id, commitments, objections, next_action, rolling_summary, declaracao)
@@ -344,9 +360,22 @@ describe("(C01) fechamento sem JSON depois da resposta ao lead: o turno não é 
       {
         commitments: ["retornar amanhã"],
         objections: ["acha caro"],
-        next_action: null,
+        next_action: m.checkpoint.PROXIMA_ACAO_DO_FECHAMENTO_FALHO,
         rolling_summary: "resumo do turno anterior",
-        declaracao: null,
+        declaracao: {
+          intencoes: [],
+          promessas: [{ o_que: m.checkpoint.PROMESSA_DO_FECHAMENTO_FALHO, prazo: null }],
+          nada_a_declarar: false,
+        },
+      },
+    ]);
+    // O agente daqui tem o Operador desligado: ninguém apuraria a promessa, e o aviso
+    // vai direto à Central, na conversa.
+    expect(await avisosDaConversa()).toEqual([
+      {
+        title: "O registro de um atendimento falhou depois da resposta ao cliente",
+        severity: "warn",
+        status: "open",
       },
     ]);
   });
@@ -364,6 +393,7 @@ describe("(C01) fechamento sem JSON depois da resposta ao lead: o turno não é 
     expect(gravados).toHaveLength(1);
     expect(gravados[0]!.rolling_summary).toBe("resumo escrito pelo modelo");
     expect(gravados[0]!.declaracao).toEqual({ intencoes: [], promessas: [], nada_a_declarar: true });
+    expect(await avisosDaConversa()).toEqual([]);
   });
 });
 

@@ -217,10 +217,16 @@ export function parseCheckpointText(text: string): CheckpointContent {
  *
  * Com resposta ao lead neste job: UMA nova chamada de fechamento, igual à primeira;
  * sem JSON de novo, o checkpoint MÍNIMO e o turno conclui. O mínimo é o do turno
- * anterior (compromissos, objeções e resumo, o que validar), com `next_action` nulo
- * — a do turno anterior já foi cumprida por este, e repeti-la no topo do próximo
- * prompt é o defeito do #510 — e a declaração AUSENTE: o "fechamento incompleto,
- * turno a investigar" que a coluna nula e o Operador já entendem (`declaracao.ts`).
+ * anterior (compromissos, objeções e resumo, o que validar) com a pendência DESTE
+ * turno, que ninguém registrou: o que a resposta prometeu ("te chamo amanhã às
+ * 10h") se perdeu com o fechamento. Por isso a declaração não fica ausente — com
+ * ela nula, `promessasEmAberto` dá zero e a apuração de responsável do Operador
+ * nem roda — e leva UMA promessa sintética (`PROMESSA_DO_FECHAMENTO_FALHO`), que
+ * faz o Operador apurar e, sem dono, abrir a promessa sem responsável na Central.
+ * A `next_action` do anterior não volta (já foi cumprida por este, e repeti-la no
+ * topo do próximo prompt é o defeito do #510): no lugar dela, a conferência, com a
+ * equipe como responsável (`PROXIMA_ACAO_DO_FECHAMENTO_FALHO`). Sem Operador, o
+ * aviso vai direto à Central (`inbound-turn.ts`).
  *
  * Sem resposta ao lead, nada muda: o erro sobe na primeira chamada e a fila refaz o
  * turno, que ainda não falou. Só a falha do PARSE entra aqui; a chamada que lança
@@ -249,6 +255,21 @@ export async function conteudoDoFechamento<T>(opcoes: {
   return { content: checkpointMinimo(await opcoes.anterior()), chamada: segunda.chamada, minimo: true };
 }
 
+/**
+ * (C01) A promessa sintética do checkpoint mínimo. Não diz o que foi prometido —
+ * ninguém sabe, o fechamento falhou —, diz onde conferir. Vai ao briefing do
+ * Operador e ao da passagem para pessoa; o Conversador não a lê.
+ */
+export const PROMESSA_DO_FECHAMENTO_FALHO =
+  '(C01) o fechamento do turno falhou depois da resposta ao lead: conferir na conversa se ela prometeu retorno, horário ou verificação';
+
+/**
+ * (C01) A próxima ação do checkpoint mínimo, com o responsável na frente. É lida
+ * pelo próximo turno (bloco "Checkpoint anterior") e por quem abre o caso.
+ */
+export const PROXIMA_ACAO_DO_FECHAMENTO_FALHO =
+  '(C01) Equipe: conferir na conversa se a última resposta ao lead prometeu retorno, horário ou verificação e garantir que alguém cumpra (o fechamento daquele turno falhou)';
+
 /** (C01) O checkpoint mínimo herdado do anterior: cada campo só se validar. */
 function checkpointMinimo(anterior: unknown): CheckpointContent {
   const a = (anterior ?? {}) as Record<string, unknown>;
@@ -259,7 +280,12 @@ function checkpointMinimo(anterior: unknown): CheckpointContent {
   return {
     commitments: lista(a.commitments),
     objections: lista(a.objections),
-    next_action: null,
+    next_action: PROXIMA_ACAO_DO_FECHAMENTO_FALHO,
     rolling_summary: typeof a.rolling_summary === 'string' ? a.rolling_summary : '',
+    declaracao: {
+      intencoes: [],
+      promessas: [{ o_que: PROMESSA_DO_FECHAMENTO_FALHO, prazo: null }],
+      nada_a_declarar: false,
+    },
   };
 }

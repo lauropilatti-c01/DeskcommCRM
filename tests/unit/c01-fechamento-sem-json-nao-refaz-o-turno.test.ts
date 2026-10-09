@@ -10,7 +10,8 @@
  *
  * As regras, por comportamento, com a chamada de fechamento falsa:
  *   - com resposta ao lead: UMA nova chamada de fechamento; sem JSON de novo, o checkpoint
- *     mínimo (o do turno anterior, `next_action` nulo, declaração ausente) e nada sobe;
+ *     mínimo (o do turno anterior, com a promessa sintética e a próxima ação da equipe:
+ *     `c01-fechamento-falho-deixa-pendencia`) e nada sobe;
  *   - sem resposta ao lead: o erro de sempre, com a mesma mensagem, e uma chamada só;
  *   - a chamada que LANÇA (provedor, prazo, lease, fronteira) sobe como antes.
  * O turno inteiro, contra Postgres, em `tests/invariants/c01-fechamento-sem-json-nao-refaz-o-turno`.
@@ -21,6 +22,10 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
+import {
+  PROMESSA_DO_FECHAMENTO_FALHO,
+  PROXIMA_ACAO_DO_FECHAMENTO_FALHO,
+} from "@/lib/agent-engine/agent/abertura/checkpoint";
 
 /** Importado na hora: sem a mudança a função não existe e cada caso reprova por si. */
 const CAMINHO = "@/lib/agent-engine/agent/abertura/checkpoint";
@@ -48,6 +53,16 @@ async function conteudoDoFechamento(opcoes: {
   }
   return m.conteudoDoFechamento(opcoes);
 }
+
+/** O que o mínimo põe de seu: a pendência do turno cujo fechamento falhou. */
+const PENDENCIA = {
+  next_action: PROXIMA_ACAO_DO_FECHAMENTO_FALHO,
+  declaracao: {
+    intencoes: [],
+    promessas: [{ o_que: PROMESSA_DO_FECHAMENTO_FALHO, prazo: null }],
+    nada_a_declarar: false,
+  },
+};
 
 const JSON_OK = JSON.stringify({
   commitments: ["mandar o link"],
@@ -95,12 +110,9 @@ describe("(C01) fechamento sem JSON depois de resposta ao lead", () => {
     expect(r.content).toEqual({
       commitments: ["retornar amanhã"],
       objections: ["acha caro"],
-      next_action: null,
       rolling_summary: "o lead quer a turma da Petrobras",
+      ...PENDENCIA,
     });
-    // Declaração AUSENTE (não `nada_a_declarar`): é o "fechamento incompleto" que o
-    // Operador e a coluna nula já entendem.
-    expect(r.content.declaracao).toBeUndefined();
   });
 
   it("uma mensagem de WhatsApp no lugar do JSON e depois JSON quebrado → checkpoint mínimo", async () => {
@@ -140,7 +152,7 @@ describe("(C01) fechamento sem JSON depois de resposta ao lead", () => {
       anterior: async () => null,
     });
     expect(r.minimo).toBe(true);
-    expect(r.content).toEqual({ commitments: [], objections: [], next_action: null, rolling_summary: "" });
+    expect(r.content).toEqual({ commitments: [], objections: [], rolling_summary: "", ...PENDENCIA });
   });
 
   it("checkpoint anterior com coluna quebrada → herda só o que valida", async () => {
@@ -149,7 +161,7 @@ describe("(C01) fechamento sem JSON depois de resposta ao lead", () => {
       leadTemResposta: true,
       anterior: async () => ({ ...ANTERIOR, commitments: "não é lista", rolling_summary: null }),
     });
-    expect(r.content).toEqual({ commitments: [], objections: ["acha caro"], next_action: null, rolling_summary: "" });
+    expect(r.content).toEqual({ commitments: [], objections: ["acha caro"], rolling_summary: "", ...PENDENCIA });
   });
 });
 
