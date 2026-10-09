@@ -389,7 +389,9 @@ describe("(C01) a ligação no turno", () => {
     // que não chegou deixavam sair a resposta desatualizada ou pulavam o aviso (ver
     // `tests/invariants/c01-handoff-depois-de-envio-falhado.test.ts`).
     expect(FONTE).not.toMatch(/seq === 0/);
-    expect(FONTE.match(/!leadTemResposta &&/g)).toHaveLength(3);
+    // (-c01.8, 2ª revisão) A 4ª: a mensagem vetada por estilo só sai depois do laço se
+    // nenhuma mensagem chegou ao lead no turno.
+    expect(FONTE.match(/!leadTemResposta &&/g)).toHaveLength(4);
     expect(FONTE.match(/!leadTemResposta \|\| respostaAoLead === null/g)).toHaveLength(1);
     expect(FONTE).toMatch(/let seq = estadoInicial\.enviadas;\n(?: {2}\/\/.*\n)*\s*let leadTemResposta = estadoInicial\.enviadas > 0;/);
     // (-c01.3, rodada 3) A evidência é marcada logo depois do aceite do canal, antes de

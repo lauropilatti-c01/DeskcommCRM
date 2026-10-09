@@ -55,6 +55,9 @@ const TEM_DE_VETAR = [
   // (Rodada 2, achado 3 da 1ª revisão da -c01.3) "real" no singular, como `extractPromises` lê.
   "A matrícula custa 1 real.",
   "Fica 1 real por dia de estudo.",
+  // (-c01.8, 3ª revisão) Centavos também são dinheiro.
+  "O cupom abate 50 centavos.",
+  "Sai por 99 centavos por dia.",
 ];
 
 const NAO_PODE_VETAR = [
@@ -190,8 +193,9 @@ describe("(C01) a configuração e a ligação no turno e na cadeia", () => {
 
   it("é trava de conteúdo, e o turno a arma só com ela ligada", () => {
     expect(TURNO).toMatch(/valor_em_dinheiro: 'valor em dinheiro na conversa',/);
+    // (-c01.8) Armada com os textos afirmáveis da base neste turno (`c01-texto-afirmavel-da-base-passa`).
     expect(TURNO).toMatch(
-      /\.\.\.\(travasDaOrg\.travas\.valorEmDinheiro \? \{ valorEmDinheiro: true as const \} : \{\}\),/,
+      /\.\.\.\(travasDaOrg\.travas\.valorEmDinheiro \? \{ valorEmDinheiro: \{ textosAfirmaveis: \[\.\.\.textosAfirmaveis\] \} \} : \{\}\),/,
     );
   });
 });

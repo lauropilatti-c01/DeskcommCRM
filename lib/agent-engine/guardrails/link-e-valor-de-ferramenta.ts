@@ -35,7 +35,7 @@
 import type { Gate } from './before-send';
 import { chaveDoInterruptor } from './interruptores-de-trava';
 import { linksNoTexto, normalizarLink } from './link-permitido';
-import { valoresEmDinheiro } from './valor-de-ferramenta';
+import { lerValoresEmDinheiro, valoresEmDinheiro } from './valor-de-ferramenta';
 
 /** O nome da trava na cadeia e na configuração. */
 export const NOME_DA_TRAVA = 'link_e_valor_de_ferramenta' as const;
@@ -53,11 +53,15 @@ export interface LinkEValorArmado {
   valores: ReadonlySet<number>;
 }
 
-/** O que a mensagem tem fora do liberado — só as contagens (nunca o trecho). */
+/**
+ * O que a mensagem tem fora do liberado — só as contagens (nunca o trecho). (-c01.8, 3ª
+ * revisão) A forma de valor em dúvida ("R$ 5 e meio", "R$ 5,5") conta como fora.
+ */
 export function foraDoLiberado(body: string, trava: LinkEValorArmado): { links: number; valores: number } {
+  const lidos = lerValoresEmDinheiro(body);
   return {
     links: linksNoTexto(body).filter((l) => !trava.links.has(normalizarLink(l))).length,
-    valores: valoresEmDinheiro(body).filter((v) => !trava.valores.has(v)).length,
+    valores: lidos.valores.filter((v) => !trava.valores.has(v)).length + lidos.emDuvida,
   };
 }
 

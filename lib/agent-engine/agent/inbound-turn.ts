@@ -83,6 +83,7 @@ import {
   type LinkEValorArmado,
 } from '../guardrails/link-e-valor-de-ferramenta';
 import { valoresNoResultado } from '../guardrails/valor-de-ferramenta';
+import { textosAfirmaveisNoResultado } from '../guardrails/texto-afirmavel';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
@@ -3652,6 +3653,11 @@ async function executarTurnoDoAgente(
     for (const url of urlsNoResultado(resultado)) urlsDaConsulta.add(url);
     valoresNoResultado(resultado, valoresDaConsulta);
   };
+  // (C01, -c01.8) Os textos afirmáveis que a base EXTERNA devolveu neste turno (a linha com
+  // o texto para o cliente e a marca de afirmar verdadeira — `texto-afirmavel.ts`): o
+  // trecho exato deles passa pela trava `valor_em_dinheiro`. Só a base externa, e só a
+  // consulta sem erro: nem a base RAG, nem o histórico, nem as notas.
+  const textosAfirmaveis = new Set<string>();
   // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
   // frase de espera NADA mais sai dele — nem send_message, nem send_template, nem a
   // pergunta do roteiro. Toda ferramenta de envio recusa com o mesmo erro, e o laço
@@ -3828,6 +3834,11 @@ async function executarTurnoDoAgente(
   // por turno. No limite a trava fica desarmada pelo resto do turno.
   const vetosDeEstilo = new Map<string, number>();
   const estiloDesarmado = (codigo: string): boolean => (vetosDeEstilo.get(codigo) ?? 0) >= MAX_VETOS_DE_ESTILO;
+  // (C01, -c01.8) O envio que uma trava de ESTILO vetou e que ainda espera a reescrita. Se
+  // o laço acabar sem nova tentativa de envio (sem etapa: `max_steps`, consultas que gastaram
+  // as etapas, teto de tokens), ele sai depois do laço com as travas de estilo desarmadas:
+  // estilo nunca abre caso, nunca manda a frase de espera, nunca passa à equipe.
+  let envioVetadoPorEstilo = null as { trava: string; entrada: { body: string; produto_codigo?: string } } | null;
   /**
    * (C01, -c01.3) O que o `send_message` arma em cada tentativa: as travas ligadas na
    * organização, com o que cada uma precisa saber do turno AGORA (quantas mensagens
@@ -3843,17 +3854,19 @@ async function executarTurnoDoAgente(
           },
         }
       : {}),
-    ...(travasDaOrg.travas.valorEmDinheiro ? { valorEmDinheiro: true as const } : {}),
+    ...(travasDaOrg.travas.valorEmDinheiro ? { valorEmDinheiro: { textosAfirmaveis: [...textosAfirmaveis] } } : {}),
     ...(travasDaOrg.travas.umaPergunta && !estiloDesarmado('uma_pergunta')
       ? { umaPergunta: true as const }
       : {}),
-    ...(travasDaOrg.travas.textoLongo &&
-    (agentConfig?.splitMessages ?? false) &&
-    !estiloDesarmado('texto_longo')
+    // (C01, -c01.8) Com o divisor desligado, a trava confere o tamanho da mensagem inteira
+    // (`texto_longo.max_caracteres`, padrão 700): uma mensagem por resposta.
+    ...(travasDaOrg.travas.textoLongo && !estiloDesarmado('texto_longo')
       ? {
           textoLongo: {
-            maxChars: agentConfig?.splitMaxChars ?? 600,
             restantes: maxSendsPerTurn - seq,
+            ...((agentConfig?.splitMessages ?? false)
+              ? { maxChars: agentConfig?.splitMaxChars ?? 600 }
+              : { maxChars: travasDaOrg.travas.textoLongoMaxCaracteres, semDivisor: true as const }),
           },
         }
       : {}),
@@ -4425,6 +4438,8 @@ async function executarTurnoDoAgente(
     send_message: tool({
       ...AGENT_TOOL_DEFS.send_message,
       execute: async ({ body, produto_codigo }) => {
+        // (C01, -c01.8) Uma tentativa nova substitui a que o estilo vetou.
+        envioVetadoPorEstilo = null;
         // CORPO VAZIO NÃO SAI. Medido ao vivo (2026-09-19): o `gpt-4o-mini`
         // chamou `send_message` várias vezes com corpo que virou vazio e o
         // WhatsApp do cliente recebeu bolhas em branco. O schema garante
@@ -4811,6 +4826,10 @@ async function executarTurnoDoAgente(
             const vetos = (vetosDeEstilo.get(chain.code) ?? 0) + 1;
             vetosDeEstilo.set(chain.code, vetos);
             if (vetos < MAX_VETOS_DE_ESTILO) {
+              envioVetadoPorEstilo = {
+                trava: chain.code,
+                entrada: { body, ...(produto_codigo !== undefined ? { produto_codigo } : {}) },
+              };
               return { ok: false, error: { code: chain.code, message: chain.message } };
             }
             runLog.info('trava de estilo no limite: desarmada no turno, a mensagem sai sem ela', {
@@ -5709,6 +5728,14 @@ async function executarTurnoDoAgente(
                   // (C01, -c01.7) O erro da consulta não é fonte: repete o que o modelo pediu
                   // (a coluna "salario_6700"). A base externa o devolve sem `isError`.
                   if (!resultadoComErro(resultado)) registrarConsulta(resultado);
+                  // (C01, -c01.8) E os textos afirmáveis, só com a trava de valor ligada.
+                  if (travasDaOrg.travas.valorEmDinheiro && !resultadoComErro(resultado)) {
+                    textosAfirmaveisNoResultado(
+                      resultado,
+                      travasDaOrg.travas.colunasDoTextoAfirmavel,
+                      textosAfirmaveis,
+                    );
+                  }
                   return resultado;
                 }) as typeof mcpTool.execute,
               };
@@ -6105,6 +6132,43 @@ async function executarTurnoDoAgente(
           },
         );
       }
+    }
+
+    // ═══ (C01, -c01.8) TRAVA DE ESTILO SEM ETAPA PARA REESCREVER ═══
+    //
+    // O 1º veto de estilo ensina e espera a reescrita na etapa seguinte. Se ela não veio
+    // (o veto caiu na última etapa, as consultas gastaram as etapas, o teto de tokens
+    // cortou), a mensagem vetada sai agora, inteira, com as travas de estilo desarmadas
+    // no turno — antes de o corte abaixo abrir caso, mandar a frase de espera e passar a
+    // conversa a uma pessoa por uma questão de estilo (1ª revisão da -c01.8). Ela passa
+    // pela cadeia inteira de novo: uma trava de CONTEÚDO ainda veta, e aí vale o caminho
+    // dela. Preview fica de fora (não tem lead).
+    // Só se NENHUMA mensagem saiu no turno, conferido agora, depois do laço: o SDK roda em
+    // paralelo as chamadas de uma mesma etapa, e a curta pode ter saído enquanto a longa
+    // era vetada (2ª revisão da -c01.8). Sem soltar, também não há passagem: o corte
+    // abaixo só age sem resposta ao lead.
+    if (
+      !preview &&
+      envioVetadoPorEstilo !== null &&
+      !leadTemResposta &&
+      corposEnviados.length === 0 &&
+      runError === null &&
+      !outcomes.some((o) => o.kind === 'failed') &&
+      !passadoAoHumano &&
+      !turnoDescartado &&
+      turnoVaiFalarComOLead(liveJob())
+    ) {
+      const { trava, entrada } = envioVetadoPorEstilo;
+      envioVetadoPorEstilo = null;
+      for (const codigo of Object.keys(TRAVAS_DE_ESTILO)) vetosDeEstilo.set(codigo, MAX_VETOS_DE_ESTILO);
+      runLog.info('trava de estilo sem etapa para reescrever: desarmada no turno, a mensagem sai sem ela', {
+        trava,
+      });
+      await rawTools.send_message?.execute?.(entrada, {
+        toolCallId: 'c01-estilo-sem-etapa',
+        messages: [],
+        context: undefined,
+      });
     }
 
     // ═══ (C01, rodada 8) O LAÇO FOI CORTADO POR NOSSO TETO ANTES DE QUALQUER MENSAGEM AO LEAD ═══
