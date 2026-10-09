@@ -37,8 +37,11 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * (C01, -c01.8, CRM-085) E o que esta versão muda nas duas travas de texto:
  *   - o texto afirmável da base (salário, cupom) passa pela `valor_em_dinheiro` com a
  *     consulta no turno; com a marca falsa, sem consulta ou com o preço junto, barrado;
+ *     o preço com o mesmo número do salário e a linha de preço marcada como afirmável
+ *     (assunto fora da lista), barrados (1ª revisão independente);
  *   - sem o divisor de bolhas, a `texto_longo` veta acima de 700 caracteres uma vez e
- *     deixa sair na 2ª (estilo: sem caso, sem passagem).
+ *     deixa sair na 2ª (estilo: sem caso, sem passagem); sem etapa para reescrever
+ *     (`max_steps` 1, ou as consultas gastando as etapas), sai inteira depois do laço.
  *
  * Domínios, links e valores são fictícios, na forma dos reais (regra do C01.md).
  */
@@ -616,8 +619,8 @@ describe("(C01, -c01.8) o texto afirmável da base passa pela `valor_em_dinheiro
   it("consulta os fatos e manda o salário e o cupom afirmáveis com o texto da base: sai", async () => {
     await ligaValorEmDinheiro();
     respostaDaBase = linhasDaBase([
-      { chave: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
-      { chave: "cupom", texto_para_o_lead: CUPOM, pode_afirmar: true },
+      { chave: "salario", assunto: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+      { chave: "cupom", assunto: "desconto", texto_para_o_lead: CUPOM, pode_afirmar: true },
     ]);
     const corpo = `${SALARIO}\n\n${CUPOM}`;
     const mod = modelo([{ base: "fatos" }, { envia: corpo }]);
@@ -628,7 +631,7 @@ describe("(C01, -c01.8) o texto afirmável da base passa pela `valor_em_dinheiro
 
   it("o mesmo cupom de linha com a marca de afirmar falsa é barrado", async () => {
     await ligaValorEmDinheiro();
-    respostaDaBase = linhasDaBase([{ chave: "cupom", texto_para_o_lead: CUPOM, pode_afirmar: false }]);
+    respostaDaBase = linhasDaBase([{ chave: "cupom", assunto: "desconto", texto_para_o_lead: CUPOM, pode_afirmar: false }]);
     const mod = modelo([{ base: "fatos" }, { envia: CUPOM }]);
     expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
     expect(enviados).toEqual([]);
@@ -652,10 +655,32 @@ describe("(C01, -c01.8) o texto afirmável da base passa pela `valor_em_dinheiro
   it("o preço do curso que veio junto, numa linha de oferta, continua barrado", async () => {
     await ligaValorEmDinheiro();
     respostaDaBase = linhasDaBase([
-      { chave: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+      { chave: "salario", assunto: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
       { produto: "Plano anual", preco_total: 1997, pode_afirmar: true, condicao: "Aberta até 31/10." },
     ]);
     const mod = modelo([{ base: "fatos e ofertas" }, { envia: `${SALARIO} O plano anual sai por R$ 1.997,00.` }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  // (1ª revisão da -c01.8) Os furos reproduzidos pela revisão independente.
+  it("o preço com o mesmo número do salário, ao lado da frase do salário, é barrado", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([
+      { chave: "salario", assunto: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+    ]);
+    const mod = modelo([{ base: "fatos" }, { envia: `${SALARIO} O preço do curso é de R$ 7.412,35.` }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  it("linha de preço marcada como afirmável, com assunto fora da lista, não libera", async () => {
+    await ligaValorEmDinheiro();
+    const PRECO = "O curso custa R$ 997 no cartão.";
+    respostaDaBase = linhasDaBase([{ chave: "preco", assunto: "preco", texto_para_o_lead: PRECO, pode_afirmar: true }]);
+    const mod = modelo([{ base: "fatos" }, { envia: PRECO }]);
     expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
     expect(enviados).toEqual([]);
     expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
@@ -699,6 +724,71 @@ describe("(C01, -c01.8) 'até 700 caracteres' com o divisor de bolhas desligado 
       );
       expect(contato[0]!.force_human).toBe(false);
     } finally {
+      await ligaTextoLongo(false);
+    }
+  });
+
+  /** Publica uma versão igual à do teste com `max_steps = n` (a publicada é imutável); `null` volta à original. */
+  async function maxSteps(n: number | null): Promise<void> {
+    if (n === null) {
+      await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO, AGENTE]);
+      return;
+    }
+    const versao = `a7a7a7a7-0000-4000-8000-${String(100 + n).padStart(12, "0")}`;
+    await pool.query(
+      `insert into ai_agent_versions (id, organization_id, agent_id, version_number, system_prompt,
+                                      provider, model, channel_session_id, status, published_at, max_steps,
+                                      knowledge_source_ids, tool_ids)
+       values ($1,$2,$3,$4,'Você é um atendente de teste.','anthropic','claude-sonnet-4-6',$5,'published',now(),$6,
+               array[$7::uuid], array['crm_query_external_data'])
+       on conflict (id) do nothing`,
+      [versao, ORG, AGENTE, 100 + n, SESSION, n, FONTE],
+    );
+    await pool.query("update ai_agents set published_version_id = $1 where id = $2", [versao, AGENTE]);
+  }
+  /** O veto de estilo sem etapa para reescrever: a mensagem sai inteira, sem caso, sem frase de espera, sem passagem. */
+  async function saiInteiraSemPassagem(corpo: string): Promise<void> {
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    const vetos = await vetosGravados();
+    expect(vetos.length).toBeGreaterThan(0);
+    expect(vetos.every(([trava]) => trava === "texto_longo")).toBe(true);
+    expect(linhasDoLog.join("")).toContain("trava de estilo sem etapa para reescrever");
+    const { rows: casos } = await pool.query("select 1 from agent_cases where organization_id = $1", [ORG]);
+    expect(casos).toEqual([]);
+    const { rows: contato } = await pool.query<{ force_human: boolean }>(
+      "select force_human from contacts where organization_id = $1 and id = $2",
+      [ORG, CONTACT],
+    );
+    expect(contato[0]!.force_human).toBe(false);
+  }
+
+  it("max_steps = 1: o veto cai na única etapa; a mensagem sai inteira, sem caso nem passagem", async () => {
+    await ligaTextoLongo(true);
+    await maxSteps(1);
+    try {
+      const longo = comTamanho(701, "O cronograma diz o que estudar em cada meta, e você segue no seu ritmo. ");
+      const mod = modelo([{ envia: longo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+      expect(mod.estado.etapas).toBe(1);
+      await saiInteiraSemPassagem(longo);
+    } finally {
+      await maxSteps(null);
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("as consultas gastam as etapas e o veto cai na última: a mensagem sai inteira, sem caso nem passagem", async () => {
+    await ligaTextoLongo(true);
+    await maxSteps(3);
+    respostaDaBase = linhasDaBase([]);
+    try {
+      const longo = comTamanho(701, "Os simulados são comentados e cronometrados, no estilo da banca da prova. ");
+      const mod = modelo([{ base: "fatos" }, { base: "ofertas" }, { envia: longo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+      expect(mod.estado.etapas).toBe(3);
+      await saiInteiraSemPassagem(longo);
+    } finally {
+      await maxSteps(null);
       await ligaTextoLongo(false);
     }
   });

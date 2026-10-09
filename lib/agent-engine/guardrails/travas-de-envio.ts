@@ -40,13 +40,16 @@
  *       "texto_longo":       { "ligada": true, "max_caracteres": 700 },
  *       "valor_em_dinheiro": { "ligada": true,
  *                              "texto_afirmavel": { "coluna_texto": "texto_para_o_lead",
- *                                                   "coluna_pode_afirmar": "pode_afirmar" } } } }
+ *                                                   "coluna_pode_afirmar": "pode_afirmar",
+ *                                                   "coluna_assunto": "assunto",
+ *                                                   "assuntos": ["salario", "desconto"] } } } }
  *
  * - `texto_longo.max_caracteres`: o limite da mensagem quando o divisor de bolhas está
  *   desligado (uma mensagem por resposta); padrão `MAX_CARACTERES_SEM_DIVISOR`. Com o
  *   divisor ligado, a trava continua contando bolhas.
- * - `valor_em_dinheiro.texto_afirmavel`: as colunas da linha afirmável da base externa
- *   (ver `texto-afirmavel.ts`); padrão `COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL`.
+ * - `valor_em_dinheiro.texto_afirmavel`: as colunas da linha afirmável da base externa e
+ *   os assuntos que liberam valor, uma lista de PERMITIDOS (ver `texto-afirmavel.ts`);
+ *   cada chave ausente vale o padrão `COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL`.
  */
 import { z } from 'zod';
 
@@ -67,11 +70,17 @@ const travasDeEnvioSchema = z
     texto_longo: travaSimples.extend({ max_caracteres: z.number().int().positive().optional() }).optional(),
     // `dominios`: os domínios cujo link sai sempre (o domínio e os subdomínios dele).
     link_permitido: travaSimples.extend({ dominios: z.array(z.string()).optional() }).optional(),
-    // (C01, -c01.8) `texto_afirmavel`: as colunas da linha afirmável da base externa.
+    // (C01, -c01.8) `texto_afirmavel`: as colunas da linha afirmável da base externa e os
+    // assuntos que liberam valor (cada chave ausente = o padrão).
     valor_em_dinheiro: travaSimples
       .extend({
         texto_afirmavel: z
-          .object({ coluna_texto: z.string().min(1), coluna_pode_afirmar: z.string().min(1) })
+          .object({
+            coluna_texto: z.string().min(1).optional(),
+            coluna_pode_afirmar: z.string().min(1).optional(),
+            coluna_assunto: z.string().min(1).optional(),
+            assuntos: z.array(z.string().min(1)).optional(),
+          })
           .optional(),
       })
       .optional(),
@@ -146,6 +155,19 @@ export interface InterruptoresDaTela {
   valorEmDinheiro?: boolean | null;
 }
 
+/** (C01, -c01.8) As colunas e os assuntos do texto afirmável: cada chave ausente = o padrão. */
+function colunasDoTextoAfirmavel(
+  lido: { coluna_texto?: string; coluna_pode_afirmar?: string; coluna_assunto?: string; assuntos?: string[] } | undefined,
+): ColunasDoTextoAfirmavel {
+  if (lido === undefined) return COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL;
+  return {
+    texto: lido.coluna_texto ?? COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL.texto,
+    podeAfirmar: lido.coluna_pode_afirmar ?? COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL.podeAfirmar,
+    assunto: lido.coluna_assunto ?? COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL.assunto,
+    assuntos: lido.assuntos ?? COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL.assuntos,
+  };
+}
+
 /**
  * Pura: o valor de `settings.travas_de_envio` (qualquer coisa) e os interruptores da
  * tela → o que está ligado. O interruptor vale mesmo com o JSON inválido; o da
@@ -173,12 +195,7 @@ export function interpretarTravasDeEnvio(
         .map(normalizarDominio)
         .filter((d) => d.length > 0),
       valorEmDinheiro: valorEmDinheiroDaTela ?? lido.data.valor_em_dinheiro?.ligada ?? false,
-      colunasDoTextoAfirmavel: lido.data.valor_em_dinheiro?.texto_afirmavel
-        ? {
-            texto: lido.data.valor_em_dinheiro.texto_afirmavel.coluna_texto,
-            podeAfirmar: lido.data.valor_em_dinheiro.texto_afirmavel.coluna_pode_afirmar,
-          }
-        : COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL,
+      colunasDoTextoAfirmavel: colunasDoTextoAfirmavel(lido.data.valor_em_dinheiro?.texto_afirmavel),
       umaPergunta: lido.data.uma_pergunta?.ligada ?? false,
       linkEValorDeFerramenta,
       urlsFixas: (lido.data.link_e_valor_de_ferramenta?.urls ?? [])

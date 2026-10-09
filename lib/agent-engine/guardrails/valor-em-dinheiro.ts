@@ -23,11 +23,15 @@
  * expressão do cargo ("salário inicial é de R$ …", "piso salarial de …"), nunca numa
  * frase com palavra de pagamento ou do curso ("Pix", "à vista", "boleto", "plano"…).
  *
- * (C01, -c01.8, CRM-085 da C01) O texto que a base manda dizer passa: o trecho exato de um
- * texto afirmável que uma consulta à base externa devolveu NESTE turno (o salário com o
- * valor exato, o cupom de desconto aprovado, "mais de 2 mil" da apresentação) é apagado
- * antes da procura — ver `texto-afirmavel.ts`. Oferta, link, linha com a marca falsa,
- * histórico e notas não liberam nada: o preço do curso continua barrado.
+ * (C01, -c01.8, CRM-085 da C01) O texto que a base manda dizer passa: o valor que cai
+ * inteiro dentro de uma frase igual à de um texto afirmável que uma consulta à base
+ * externa devolveu NESTE turno (o salário com o valor exato, o cupom de desconto
+ * aprovado, "mais de 2 mil" da apresentação), ou dentro desse texto inteiro, não conta —
+ * ver `texto-afirmavel.ts`. Cada valor é procurado no texto ORIGINAL, com o contexto
+ * inteiro: nada é apagado antes da procura (apagar o trecho aprovado tirava o "cupom" de
+ * "cupom de 5% ou 10%", e o 10% saía; 1ª revisão da -c01.8). Oferta, link, linha com a
+ * marca falsa ou com assunto fora da lista, histórico e notas não liberam nada: o preço
+ * do curso continua barrado.
  *
  * Trava de CONTEÚDO: contador e fail-safe da promessa semântica
  * (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE` em `inbound-turn.ts`).
@@ -35,7 +39,7 @@
 import type { Gate } from './before-send';
 import { linksNoTexto } from './link-permitido';
 import { extractPromises } from './promise/engine';
-import { semOsTrechosDaBase } from './texto-afirmavel';
+import { trechosAprovados } from './texto-afirmavel';
 
 /** As formas da M1 que `extractPromises` não lê, sobre o texto em minúsculas e sem acento. */
 const FORMAS_DA_M1: readonly RegExp[] = [
@@ -125,19 +129,26 @@ function semLinks(texto: string): string {
   return t;
 }
 
+/** A chave de um valor do detector de promessas, para descontar o que veio da base. */
+const chaveDaPromessa = (p: ReturnType<typeof extractPromises>[number]): string =>
+  `${p.kind}:${p.value}:${p.moeda ?? ''}`;
+
 /**
  * Os trechos com valor em dinheiro do curso (vazio = nenhum). (-c01.8) `afirmaveis`: os
- * textos afirmáveis da base neste turno; o trecho exato deles não conta.
+ * textos afirmáveis da base neste turno; o valor que cai inteiro num trecho aprovado
+ * deles (`trechosAprovados`) não conta. A procura é sempre no texto inteiro.
  */
 export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = []): string[] {
   const original = semLinks(body);
-  const daBase = semOsTrechosDaBase(semAcento(original), afirmaveis);
-  const t = daBase.texto;
+  const t = semAcento(original);
+  const aprovados = afirmaveis.length > 0 ? trechosAprovados(t, afirmaveis) : [];
+  const daBase = (ini: number, fim: number): boolean => aprovados.some(([a, b]) => ini >= a && fim <= b);
   const trechos: string[] = [];
   for (const re of FORMAS_DA_M1) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(t)) !== null) {
+      if (daBase(m.index, m.index + m[0].length)) continue;
       if (FATO_DO_CARGO.test(t.slice(0, m.index)) && !PAGAMENTO_OU_CURSO.test(fraseEm(t, m.index))) continue;
       trechos.push(m[0]);
     }
@@ -145,19 +156,32 @@ export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = 
   PORCENTAGEM.lastIndex = 0;
   let p: RegExpExecArray | null;
   while ((p = PORCENTAGEM.exec(t)) !== null) {
+    if (daBase(p.index, p.index + p[0].length)) continue;
     const depois = t.slice(p.index + p[0].length);
     if (PALAVRA_DE_DESCONTO.test(fraseEm(t, p.index)) || PAGAMENTO_LOGO_DEPOIS.test(depois)) trechos.push(p[0]);
   }
   // O que o detector de promessas lê e a lista acima não cobre (euro, "N% off",
   // "desconto de N%", "parcelado em 12x"). Real (R$, reais, real) fica com a lista acima,
   // que lê as mesmas formas e conhece a isenção do salário.
-  // (-c01.8) Com trecho da base apagado, o detector lê o texto apagado (ele não depende de
-  // acento nem de maiúscula); sem, o original, como antes.
+  // (-c01.8) O detector não dá a posição: ele lê o texto inteiro, e cada valor que ele
+  // acha dentro de um trecho aprovado desconta UMA ocorrência igual (o mesmo valor fora
+  // do trecho continua contando).
   if (trechos.length === 0) {
-    for (const p of extractPromises(daBase.apagou ? t : original)) {
-      if (p.kind === 'discount') trechos.push(`${p.value}%`);
-      else if (p.kind === 'installments') trechos.push(`${p.value}x`);
-      else if (p.moeda === 'EUR') trechos.push('€');
+    const daBaseNoDetector = new Map<string, number>();
+    for (const [a, b] of aprovados) {
+      for (const q of extractPromises(t.slice(a, b))) {
+        daBaseNoDetector.set(chaveDaPromessa(q), (daBaseNoDetector.get(chaveDaPromessa(q)) ?? 0) + 1);
+      }
+    }
+    for (const q of extractPromises(aprovados.length > 0 ? t : original)) {
+      const restam = daBaseNoDetector.get(chaveDaPromessa(q)) ?? 0;
+      if (restam > 0) {
+        daBaseNoDetector.set(chaveDaPromessa(q), restam - 1);
+        continue;
+      }
+      if (q.kind === 'discount') trechos.push(`${q.value}%`);
+      else if (q.kind === 'installments') trechos.push(`${q.value}x`);
+      else if (q.moeda === 'EUR') trechos.push('€');
     }
   }
   return trechos;
@@ -188,7 +212,7 @@ export function renderVetoDeDinheiro(trechos: readonly string[]): string {
       .join(', ')}). Nesta conversa, valor, parcela, juros e desconto ficam na página de ` +
     'matrícula: mande o link exato da página que a base devolver e diga que lá estão as formas de ' +
     'pagamento, sem escrever nenhum número de dinheiro. Só sai o número que a base devolveu numa ' +
-    'consulta deste turno, num texto que ela marca como afirmável, copiado com as mesmas palavras em ' +
-    'volta (consulte de novo, se preciso).'
+    'consulta deste turno, num texto que ela marca como afirmável, copiado na frase inteira, como veio ' +
+    '(consulte de novo, se preciso).'
   );
 }

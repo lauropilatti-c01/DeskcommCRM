@@ -7,11 +7,17 @@
  * porcentagem do cupom aprovado — e deixava passar o cupom ainda não liberado quando
  * escrito como "cupom de 5%" (o "%" só contava com "desconto" ou "off").
  *
- * Agora o trecho exato de um texto afirmável (linha da base externa com o texto para o
- * cliente e a marca de afirmar verdadeira) que uma consulta devolveu neste turno não
- * conta; o resto continua como era, e a porcentagem com cupom ou forma de pagamento
- * passa a contar. Nomes e valores são fictícios, na forma dos reais (regra do C01.md:
- * nada da C01 no código).
+ * Agora o valor dentro da FRASE INTEIRA de um texto afirmável (linha da base externa com
+ * o texto para o cliente, a marca de afirmar verdadeira e um assunto da lista de
+ * permitidos) que uma consulta devolveu neste turno não conta, nem o valor dentro desse
+ * texto inteiro; o resto continua como era, procurado no texto original, e a porcentagem
+ * com cupom ou forma de pagamento passa a contar. Nomes e valores são fictícios, na forma
+ * dos reais (regra do C01.md: nada da C01 no código).
+ *
+ * (1ª revisão da -c01.8) Os furos que a revisão independente reproduziu viraram casos:
+ * o salário liberava "O preço do curso é de R$ 7.412,35." (bastavam 2 palavras em volta);
+ * apagar o trecho aprovado tirava o "cupom" de "cupom de 5% ou 10%"; uma linha de preço
+ * marcada como afirmável liberava o preço.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -32,13 +38,15 @@ const APRESENTACAO =
   "O último concurso técnico ainda vale e segue chamando aprovados: só em Operação, já foram mais de 2 mil.";
 const PROVA_SOCIAL = "Nossos alunos eram cerca de 1% dos inscritos e ficaram com 10% das vagas.";
 
-const fato = (texto: string, podeAfirmar: unknown = true) => ({
+/** Uma linha da view de fatos; o assunto padrão é o de um fato que libera valor. */
+const fato = (texto: string, podeAfirmar: unknown = true, assunto: unknown = "salario") => ({
   chave: "fato_exemplo",
-  assunto: "exemplo",
+  assunto,
   texto_para_o_lead: texto,
   status: "confirmado",
   pode_afirmar: podeAfirmar,
 });
+const cupom = (texto: string, podeAfirmar: unknown = true) => fato(texto, podeAfirmar, "desconto");
 /** O resultado de `crm_query_external_data` como o MCP o entrega ao turno. */
 const consulta = (linhas: Array<Record<string, unknown>>) => {
   const r = { tabela: "fatos_do_agente", colunas: Object.keys(linhas[0] ?? {}), linhas, linhas_devolvidas: linhas.length };
@@ -57,12 +65,17 @@ const OFERTA = {
 const LINK = { plano_id: "plano_completo", url: "https://lp.exemplo.com.br/plano-completo?preco=1997", pode_enviar: true };
 
 type Veredito = { pass: boolean; code?: string; reason?: string; detail?: Record<string, unknown> };
+type Colunas = { texto: string; podeAfirmar: string; assunto: string; assuntos: readonly string[] };
 type Modulos = {
   valorEmDinheiroGate: { evaluate: (ctx: unknown) => Veredito };
-  textosAfirmaveisNoResultado: (r: unknown, colunas?: { texto: string; podeAfirmar: string }) => Set<string>;
+  trechosDeDinheiro: (body: string, afirmaveis?: readonly string[]) => string[];
+  textosAfirmaveisNoResultado: (r: unknown, colunas?: Colunas) => Set<string>;
 };
 async function modulos(): Promise<Modulos> {
-  const trava = (await import(/* @vite-ignore */ CAMINHO_DA_TRAVA)) as Pick<Modulos, "valorEmDinheiroGate">;
+  const trava = (await import(/* @vite-ignore */ CAMINHO_DA_TRAVA)) as Pick<
+    Modulos,
+    "valorEmDinheiroGate" | "trechosDeDinheiro"
+  >;
   const texto = (await import(/* @vite-ignore */ CAMINHO_DO_TEXTO)) as Pick<Modulos, "textosAfirmaveisNoResultado">;
   return { ...trava, ...texto };
 }
@@ -75,30 +88,49 @@ async function avaliar(body: string, ...resultados: unknown[]): Promise<Veredito
 }
 
 describe("(C01, -c01.8) os textos afirmáveis de um resultado da base externa", () => {
-  it("só a linha com o texto e a marca de afirmar estritamente verdadeira", async () => {
+  it("só a linha com o texto, a marca de afirmar estritamente verdadeira e assunto permitido", async () => {
     const { textosAfirmaveisNoResultado } = await modulos();
-    const r = consulta([fato(SALARIO), fato(CUPOM_5, false), fato(APRESENTACAO, "true"), fato("   "), OFERTA, LINK]);
+    const r = consulta([fato(SALARIO), cupom(CUPOM_5, false), fato(APRESENTACAO, "true"), fato("   "), OFERTA, LINK]);
     expect([...textosAfirmaveisNoResultado(r)]).toEqual([SALARIO]);
     // Pelo JSON do `content` também (o MCP entrega os dois).
     expect([...textosAfirmaveisNoResultado({ content: r.content })]).toEqual([SALARIO]);
   });
 
-  it("as colunas são as da configuração", async () => {
+  it("lista de permitidos, falha fechada: assunto fora da lista ou ausente não libera", async () => {
     const { textosAfirmaveisNoResultado } = await modulos();
-    const r = consulta([{ frase: SALARIO, afirmar: true }, fato(APRESENTACAO)]);
-    expect([...textosAfirmaveisNoResultado(r, { texto: "frase", podeAfirmar: "afirmar" })]).toEqual([SALARIO]);
+    const PRECO = "O curso custa R$ 997.";
+    const semAssunto = { texto_para_o_lead: PRECO, pode_afirmar: true };
+    const r = consulta([fato(PRECO, true, "preco"), fato(PRECO, true, "produto"), fato(PRECO, true, null), semAssunto]);
+    expect([...textosAfirmaveisNoResultado(r)]).toEqual([]);
+    // Os assuntos padrão: salário, edital, calendário, apresentação e desconto.
+    const padrao = consulta([
+      fato(SALARIO),
+      cupom(CUPOM_5),
+      fato(APRESENTACAO, true, "calendario"),
+      fato("A banca é a Exemplo.", true, "edital"),
+      fato("Para trabalhar lá, o caminho é o concurso.", true, "apresentacao"),
+    ]);
+    expect(textosAfirmaveisNoResultado(padrao).size).toBe(5);
+  });
+
+  it("as colunas e os assuntos são os da configuração", async () => {
+    const { textosAfirmaveisNoResultado } = await modulos();
+    const r = consulta([{ frase: SALARIO, afirmar: true, tema: "cargo" }, fato(APRESENTACAO)]);
+    const colunas = { texto: "frase", podeAfirmar: "afirmar", assunto: "tema", assuntos: ["cargo"] };
+    expect([...textosAfirmaveisNoResultado(r, colunas)]).toEqual([SALARIO]);
+    expect([...textosAfirmaveisNoResultado(r, { ...colunas, assuntos: [] })]).toEqual([]);
   });
 });
 
 describe("(C01, -c01.8) a trava 'valor em dinheiro' com o texto afirmável da base", () => {
   it("'5%' do fato afirmável do turno passa", async () => {
     expect((await avaliar(DESCONTO_5)).pass).toBe(false);
-    expect((await avaliar(DESCONTO_5, consulta([fato(DESCONTO_5)]))).pass).toBe(true);
-    expect((await avaliar(CUPOM_5, consulta([fato(CUPOM_5)]))).pass).toBe(true);
-    expect((await avaliar(CUPOM_10, consulta([fato(CUPOM_10)]))).pass).toBe(true);
-    // Com outras palavras antes e depois do trecho: o que vale é o trecho exato.
+    expect((await avaliar(DESCONTO_5, consulta([cupom(DESCONTO_5)]))).pass).toBe(true);
+    expect((await avaliar(CUPOM_5, consulta([cupom(CUPOM_5)]))).pass).toBe(true);
+    expect((await avaliar(CUPOM_10, consulta([cupom(CUPOM_10)]))).pass).toBe(true);
+    // Com outras frases antes e depois: o que vale é a frase inteira da base.
     expect(
-      (await avaliar(`Entendo! ${CUPOM_5.replace("Pra", "pra")} Quer o link?`, consulta([fato(CUPOM_5)]))).pass,
+      (await avaliar(`Entendo! ${CUPOM_5.replace("Pra", "pra")} Quer o link?`, consulta([cupom(CUPOM_5)]))).pass,
     ).toBe(true);
   });
 
@@ -112,41 +144,70 @@ describe("(C01, -c01.8) a trava 'valor em dinheiro' com o texto afirmável da ba
   );
 
   it.each([CUPOM_5, CUPOM_10, DESCONTO_5])("'5%' de linha com a marca de afirmar falsa é barrado: %s", async (frase) => {
-    expect((await avaliar(frase, consulta([fato(frase, false)]))).pass, frase).toBe(false);
-    expect((await avaliar(frase, consulta([fato(frase, null)]))).pass, frase).toBe(false);
+    expect((await avaliar(frase, consulta([cupom(frase, false)]))).pass, frase).toBe(false);
+    expect((await avaliar(frase, consulta([cupom(frase, null)]))).pass, frase).toBe(false);
   });
 
   it("o número de um texto afirmável não libera o mesmo número noutra frase", async () => {
     // "10%" da prova social não vira desconto; "5%" do cupom não vira "5 reais".
     expect((await avaliar("Consigo 10% de desconto no cartão.", consulta([fato(PROVA_SOCIAL)]))).pass).toBe(false);
     expect((await avaliar("Fica com 10% de desconto.", consulta([fato(PROVA_SOCIAL)]))).pass).toBe(false);
-    expect((await avaliar("Consigo um cupom de 5 reais.", consulta([fato(CUPOM_5)]))).pass).toBe(false);
-    expect((await avaliar("Te dou 5% de desconto no cartão.", consulta([fato(CUPOM_5)]))).pass).toBe(false);
+    expect((await avaliar("Consigo um cupom de 5 reais.", consulta([cupom(CUPOM_5)]))).pass).toBe(false);
+    expect((await avaliar("Te dou 5% de desconto no cartão.", consulta([cupom(CUPOM_5)]))).pass).toBe(false);
   });
 
-  it("salário exato do fato passa; arredondado, não", async () => {
+  it("o preço com o mesmo número do salário é barrado; juntos, só a frase do salário passa", async () => {
+    const { trechosDeDinheiro } = await modulos();
+    const r = consulta([fato(SALARIO)]);
+    const PRECO = "O preço do curso é de R$ 7.412,35.";
+    expect((await avaliar(PRECO, r)).pass).toBe(false);
+    expect((await avaliar("O curso sai por R$ 7.412,35 no regime administrativo.", r)).pass).toBe(false);
+    expect((await avaliar(`${SALARIO} O preço do curso também é de R$ 7.412,35.`, r)).pass).toBe(false);
+    // Só a frase do preço conta: a do salário, igual à da base, não.
+    expect(trechosDeDinheiro(SALARIO, [SALARIO])).toEqual([]);
+    expect(trechosDeDinheiro(`${SALARIO} O preço do curso também é de R$ 7.412,35.`, [SALARIO])).toHaveLength(1);
+    expect(trechosDeDinheiro(`O preço do curso também é de R$ 7.412,35. ${SALARIO}`, [SALARIO])).toHaveLength(1);
+  });
+
+  it("cada valor é lido no texto original, com o contexto inteiro (nada é apagado antes)", async () => {
+    // O texto inteiro da base dentro de uma frase maior libera só o pedaço dele.
+    const A = "Consigo um cupom de 5%";
+    const B = "Consigo um cupom de 5% no cartão";
+    for (const [frase, base] of [
+      ["Consigo um cupom de 5% ou 10% para você.", A],
+      ["Consigo um cupom de 5% no cartão ou 10% no pix.", B],
+      ["5% no cartão ou 10% no pix.", "5% no cartão"],
+    ] as const) {
+      expect((await avaliar(frase, consulta([cupom(base)]))).pass, frase).toBe(false);
+    }
+    // Controle: o texto inteiro da base, sozinho, passa.
+    expect((await avaliar(`${A}.`, consulta([cupom(A)]))).pass).toBe(true);
+    expect((await avaliar(`Boa notícia: ${B}!`, consulta([cupom(B)]))).pass).toBe(true);
+  });
+
+  it("salário exato do fato passa na frase inteira; arredondado ou pela metade, não", async () => {
     const r = consulta([fato(SALARIO)]);
     expect((await avaliar(SALARIO)).pass).toBe(false);
     expect((await avaliar(SALARIO, r)).pass).toBe(true);
+    // Maiúsculas, espaço não separável e a pontuação do fim não contam.
+    expect((await avaliar(`Boa pergunta! ${SALARIO.toUpperCase().replace(/ /g, "\u00a0").slice(0, -1)}`, r)).pass).toBe(
+      true,
+    );
     expect(
       (await avaliar("Boa pergunta! O salário base de nível técnico é de R$ 7.412,35 no regime administrativo.", r))
         .pass,
-    ).toBe(true);
-    expect((await avaliar("O salário base de nível técnico é de R$ 7.400 no regime administrativo.", r)).pass).toBe(
-      false,
-    );
-    expect((await avaliar("O salário base de nível técnico é de R$ 7412 no regime administrativo.", r)).pass).toBe(
-      false,
-    );
+    ).toBe(false);
+    expect((await avaliar(SALARIO.replace("R$ 7.412,35", "R$ 7.400"), r)).pass).toBe(false);
+    expect((await avaliar(SALARIO.replace("R$ 7.412,35", "R$ 7412"), r)).pass).toBe(false);
   });
 
   it("a apresentação passa ('mais de 2 mil')", async () => {
     expect((await avaliar(APRESENTACAO)).pass).toBe(false);
-    expect((await avaliar(APRESENTACAO, consulta([fato(APRESENTACAO)]))).pass).toBe(true);
+    expect((await avaliar(APRESENTACAO, consulta([fato(APRESENTACAO, true, "calendario")]))).pass).toBe(true);
   });
 
   it("preço do curso vindo de consulta de oferta ou link continua barrado", async () => {
-    const r = consulta([fato(SALARIO), fato(CUPOM_5), OFERTA, LINK]);
+    const r = consulta([fato(SALARIO), cupom(CUPOM_5), OFERTA, LINK]);
     for (const frase of [
       "O Plano Completo sai por R$ 1.997 no cartão.",
       "Fica em 12x de R$ 166,42.",
@@ -155,9 +216,16 @@ describe("(C01, -c01.8) a trava 'valor em dinheiro' com o texto afirmável da ba
     ]) {
       expect((await avaliar(frase, r)).pass, frase).toBe(false);
     }
-    // O trecho afirmável não abre brecha para o preço na mesma mensagem.
+    // O texto afirmável não abre brecha para o preço na mesma mensagem.
     expect((await avaliar(`${CUPOM_5} O Plano Completo sai por R$ 1.997.`, r)).pass).toBe(false);
     expect((await avaliar(`${SALARIO} E o curso sai por 12x de R$ 166,42.`, r)).pass).toBe(false);
+  });
+
+  it("linha de preço marcada como afirmável, com assunto fora da lista ou sem assunto, não libera", async () => {
+    const PRECO = "O curso custa R$ 997.";
+    expect((await avaliar(PRECO, consulta([fato(PRECO, true, "preco")]))).pass).toBe(false);
+    expect((await avaliar(PRECO, consulta([fato(PRECO, true, "oferta")]))).pass).toBe(false);
+    expect((await avaliar(PRECO, consulta([{ texto_para_o_lead: PRECO, pode_afirmar: true }]))).pass).toBe(false);
   });
 
   it("valor do histórico ou das notas continua barrado (só a consulta do turno libera)", async () => {
@@ -186,9 +254,9 @@ describe("(C01, -c01.8) a trava 'valor em dinheiro' com o texto afirmável da ba
     }
   });
 
-  it("o veto ensina a copiar o trecho da base", async () => {
+  it("o veto ensina a copiar a frase inteira da base", async () => {
     const v = await avaliar(CUPOM_5);
-    expect(v.reason).toMatch(/consulta deste turno, num texto que ela marca como afirmável, copiado com as mesmas palavras/);
+    expect(v.reason).toMatch(/consulta deste turno, num texto que ela marca como afirmável, copiado na frase inteira, como veio/);
     expect(v.detail).toEqual({ trechos: 1 });
   });
 });
@@ -198,23 +266,31 @@ describe("(C01, -c01.8) a configuração e a ligação no turno", () => {
 
   it("as colunas vêm de `valor_em_dinheiro.texto_afirmavel`; ausente = o padrão", async () => {
     const { interpretarTravasDeEnvio } = (await import(/* @vite-ignore */ CAMINHO_DA_CONFIGURACAO)) as {
-      interpretarTravasDeEnvio: (v: unknown) => {
-        travas: { colunasDoTextoAfirmavel: { texto: string; podeAfirmar: string } };
-        invalida: boolean;
-      };
+      interpretarTravasDeEnvio: (v: unknown) => { travas: { colunasDoTextoAfirmavel: Colunas }; invalida: boolean };
     };
-    expect(interpretarTravasDeEnvio({}).travas.colunasDoTextoAfirmavel).toEqual({
+    const PADRAO = {
       texto: "texto_para_o_lead",
       podeAfirmar: "pode_afirmar",
-    });
+      assunto: "assunto",
+      assuntos: ["salario", "edital", "calendario", "apresentacao", "desconto"],
+    };
+    expect(interpretarTravasDeEnvio({}).travas.colunasDoTextoAfirmavel).toEqual(PADRAO);
     expect(
       interpretarTravasDeEnvio({
         valor_em_dinheiro: { ligada: true, texto_afirmavel: { coluna_texto: "frase", coluna_pode_afirmar: "afirmar" } },
       }).travas.colunasDoTextoAfirmavel,
-    ).toEqual({ texto: "frase", podeAfirmar: "afirmar" });
+    ).toEqual({ ...PADRAO, texto: "frase", podeAfirmar: "afirmar" });
     expect(
-      interpretarTravasDeEnvio({ valor_em_dinheiro: { ligada: true, texto_afirmavel: { coluna_texto: "" } } }).invalida,
-    ).toBe(true);
+      interpretarTravasDeEnvio({
+        valor_em_dinheiro: { ligada: true, texto_afirmavel: { coluna_assunto: "tema", assuntos: ["salario"] } },
+      }).travas.colunasDoTextoAfirmavel,
+    ).toEqual({ ...PADRAO, assunto: "tema", assuntos: ["salario"] });
+    for (const errado of [{ coluna_texto: "" }, { assuntos: [""] }, { assuntos: "salario" }, { coluna_assunto: 1 }]) {
+      expect(
+        interpretarTravasDeEnvio({ valor_em_dinheiro: { ligada: true, texto_afirmavel: errado } }).invalida,
+        JSON.stringify(errado),
+      ).toBe(true);
+    }
   });
 
   it("só a consulta sem erro à base externa alimenta os textos afirmáveis, e só com a trava ligada", () => {

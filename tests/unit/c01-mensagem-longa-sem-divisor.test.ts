@@ -122,4 +122,18 @@ describe("(C01, -c01.8) a ligação no turno, pelo código", () => {
     expect(TURNO).toMatch(/export const MAX_VETOS_DE_ESTILO = 2;/);
     expect(TURNO).toMatch(/runLog\.info\('trava de estilo no limite: desarmada no turno, a mensagem sai sem ela'/);
   });
+
+  it("sem etapa para reescrever, a mensagem vetada por estilo sai antes do corte que passa à equipe (1ª revisão)", () => {
+    const pendente = TURNO.indexOf("// ═══ (C01, -c01.8) TRAVA DE ESTILO SEM ETAPA PARA REESCREVER ═══");
+    const corte = TURNO.indexOf("await passarAoHumanoSemResposta(turn.corte);");
+    expect(pendente).toBeGreaterThan(0);
+    expect(corte).toBeGreaterThan(pendente);
+    const bloco = TURNO.slice(pendente, corte);
+    expect(bloco).toMatch(/for \(const codigo of Object\.keys\(TRAVAS_DE_ESTILO\)\) vetosDeEstilo\.set\(codigo, MAX_VETOS_DE_ESTILO\);/);
+    expect(bloco).toMatch(/runLog\.info\('trava de estilo sem etapa para reescrever: desarmada no turno, a mensagem sai sem ela'/);
+    expect(bloco).toMatch(/await rawTools\.send_message\?\.execute\?\.\(entrada, \{/);
+    // O envio pendente nasce no 1º veto de estilo e morre em qualquer tentativa nova.
+    expect(TURNO).toMatch(/if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*envioVetadoPorEstilo = \{/);
+    expect(TURNO).toMatch(/execute: async \(\{ body, produto_codigo \}\) => \{\s*\/\/ \(C01, -c01\.8\)[^\n]*\n\s*envioVetadoPorEstilo = null;/);
+  });
 });
