@@ -1457,3 +1457,128 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     expect(mod.estado.prompts[0]).toContain(NOTA_ANTIGA);
   });
 });
+
+
+// (C01) Recibo opaco do piloto: o fallback não conhece as respostas.
+describe("c01 — recibo opaco do piloto recupera no mesmo job, sem IA às cegas", () => {
+  const OPACO = { formulario: "qualificacao-motor-v1", receipt: "recibo-ficticio-piloto",
+    flow_token: "token-ficticio-piloto" };
+  const RESUMO = "Pedido original: como estudar? Formação: Técnico em Mecânica, cursando; elegibilidade a confirmar.";
+  const RECUPERADO = { acao: "seguir", motivo: "formulario-piloto", enviar: [], resumo: RESUMO,
+    gravar: { campos: { formulario_versao: "qualificacao-motor-v1", escolaridade: "Cursando",
+      elegibilidade: "A confirmar", formacao_chave: "Técnico em Mecânica" }, etiquetas_mais: ["formulario-respondido"] } };
+
+  async function linha(id: string) {
+    const { rows } = await pool.query("select body, metadata from messages where id=$1", [id]);
+    return rows[0]!;
+  }
+  async function esperaPendente(id: string, job: string, mod: ReturnType<typeof modelo>) {
+    expect(mod.estado.etapas).toBe(0);
+    expect(postsNaGraph).toHaveLength(0);
+    expect((await linha(id)).metadata.gancho_processado).not.toBe(true);
+    expect((await card()).custom_fields.formulario_versao).toBeUndefined();
+    expect(await anotacaoDoJob(job)).toMatchObject({situacao:"piloto_pendente",formulario:{mensagem_id:id}});
+    const logs = linhasDoLog.join("\n");
+    expect(logs).not.toContain(OPACO.receipt);
+    expect(logs).not.toContain(OPACO.flow_token);
+  }
+
+  for (const falha of ["500", "timeout", "403", "sem_resumo"]) {
+    it(`${falha}: não chama IA; a recuperação reconsulta o mesmo recibo e não duplica a resposta`, async () => {
+      const id = await respostaDeFormulario({resposta:OPACO});
+      const job = await enfileira(id);
+      respostaDoGancho = async (init) => {
+        if (falha === "timeout") return new Promise<Response>((_,reject) =>
+          init.signal!.addEventListener("abort",() => reject(init.signal!.reason)));
+        return falha === "sem_resumo" ? json({acao:"seguir"}) : json({},Number(falha));
+      };
+      const mod = modelo();
+      const h = montaHandler(mod.doGenerate,true);
+      const erro = await executa(h,job);
+      expect(erro?.name).toBe("formulario_piloto_pendente");
+      await esperaPendente(id,job,mod);
+      respostaDoGancho = async (init) => {
+        expect(JSON.parse(String(init.body)).formulario.resposta).toEqual(OPACO);
+        return json(RECUPERADO);
+      };
+      expect(await reexecuta(h,job)).toBeNull();
+      expect(pedidosAoGancho).toHaveLength(2);
+      expect(mod.estado.prompts[0]).toContain(RESUMO);
+      expect((await card()).custom_fields).toMatchObject(RECUPERADO.gravar.campos);
+      expect((await linha(id)).metadata.gancho_processado).toBe(true);
+      expect((await linha(id)).metadata.interactive.response).toEqual(OPACO);
+      expect((await linha(id)).body).toBe(RESUMO);
+      const novoModelo = modelo();
+      expect(await reexecuta(montaHandler(novoModelo.doGenerate,true),job)).toBeNull();
+      expect(pedidosAoGancho).toHaveLength(2);
+      expect(postsNaGraph).toHaveLength(1);
+      expect(await mensagensDeSaida()).toHaveLength(1);
+      const { rows } = await pool.query("select status from send_ledger where job_id=$1",[job]);
+      expect(rows).toEqual([{status:"accepted"}]);
+    });
+  }
+
+  it("pendência persistida protege o retry quando a montagem do pedido falha", async () => {
+    const id = await respostaDeFormulario({resposta:OPACO});
+    const job = await enfileira(id);
+    respostaDoGancho = async () => json({},500);
+    const mod = modelo();
+    const h = montaHandler(mod.doGenerate,true);
+    expect((await executa(h,job))?.name).toBe("formulario_piloto_pendente");
+    await pool.query("update job_queue set status='pending',locked_by=null,locked_at=null,run_after=now() - interval '1 second' where id=$1",[job]);
+    const quebrado = new Proxy(pool, {get(target,key) {
+      if (key === "query") return async (sql: string,...args: unknown[]) => {
+        if (sql.includes("from crm_leads l")) throw new Error("leitura fictícia indisponível");
+        return (target.query as (...a: unknown[]) => Promise<unknown>).call(target,sql,...args);
+      };
+      const value = Reflect.get(target,key);
+      return typeof value === "function" ? value.bind(target) : value;
+    }});
+    expect((await executa(h,job,quebrado))?.name).toBe("formulario_piloto_pendente");
+    await esperaPendente(id,job,mod);
+  });
+
+  it("uma anotação modelo da c01.8 não esconde o recibo pendente na retomada", async () => {
+    const id = await respostaDeFormulario({resposta:OPACO});
+    const job = await enfileira(id);
+    await pool.query(`update job_queue set payload=payload || jsonb_build_object('gancho_antes_do_turno',
+      jsonb_build_object('situacao','modelo','motivo','status','ate',null)) where id=$1`,[job]);
+    respostaDoGancho = async () => json(RECUPERADO);
+    const mod = modelo();
+    expect(await executa(montaHandler(mod.doGenerate,true),job)).toBeNull();
+    expect(pedidosAoGancho).toHaveLength(1);
+    expect(mod.estado.prompts[0]).toContain(RESUMO);
+    expect((await linha(id)).metadata.gancho_processado).toBe(true);
+  });
+
+  it("falha permanente tem caso e passagem na última tentativa, sem IA e sem repetir aviso", async () => {
+    const id = await respostaDeFormulario({resposta:OPACO});
+    const job = await enfileira(id,2);
+    respostaDoGancho = async () => json({},403);
+    const mod = modelo();
+    const h = montaHandler(mod.doGenerate,true);
+    expect((await executa(h,job))?.name).toBe("formulario_piloto_pendente");
+    expect(await casosAbertos()).toBe(0);
+    expect((await reexecuta(h,job))?.name).toBe("formulario_piloto_pendente");
+    expect(mod.estado.etapas).toBe(0);
+    expect(await casosAbertos()).toBe(1);
+    expect(await passouAoHumano()).toBe(true);
+    const { rows: avisos } = await pool.query("select id from agent_inbox_items where organization_id=$1 and kind='handoff' and ref_id=$2",[ORG,CONV]);
+    expect(avisos).toHaveLength(1);
+    expect(postsNaGraph).toHaveLength(1);
+    expect((await linha(id)).metadata.gancho_processado).not.toBe(true);
+    expect(await reexecuta(h,job)).toBeNull();
+    expect(await casosAbertos()).toBe(1);
+    expect(postsNaGraph).toHaveLength(1);
+  });
+
+  it("v3 continua com fallback para o modelo na mesma falha HTTP500", async () => {
+    const id = await respostaDeFormulario({resposta:{...OPACO,formulario:"qualificacao-v3",empresa:"petrobras"}});
+    respostaDoGancho = async () => json({},500);
+    const mod = modelo();
+    const job = await enfileira(id);
+    expect(await executa(montaHandler(mod.doGenerate,true),job)).toBeNull();
+    expect(mod.estado.etapas).toBeGreaterThan(0);
+    expect(await anotacaoDoJob(job)).toMatchObject({situacao:"modelo"});
+  });
+});
