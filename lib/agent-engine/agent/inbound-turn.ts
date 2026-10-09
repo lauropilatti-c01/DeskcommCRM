@@ -6142,9 +6142,15 @@ async function executarTurnoDoAgente(
     // conversa a uma pessoa por uma questão de estilo (1ª revisão da -c01.8). Ela passa
     // pela cadeia inteira de novo: uma trava de CONTEÚDO ainda veta, e aí vale o caminho
     // dela. Preview fica de fora (não tem lead).
+    // Só se NENHUMA mensagem saiu no turno, conferido agora, depois do laço: o SDK roda em
+    // paralelo as chamadas de uma mesma etapa, e a curta pode ter saído enquanto a longa
+    // era vetada (2ª revisão da -c01.8). Sem soltar, também não há passagem: o corte
+    // abaixo só age sem resposta ao lead.
     if (
       !preview &&
       envioVetadoPorEstilo !== null &&
+      !leadTemResposta &&
+      corposEnviados.length === 0 &&
       runError === null &&
       !outcomes.some((o) => o.kind === 'failed') &&
       !passadoAoHumano &&

@@ -129,6 +129,21 @@ export function frasesDoTexto(t: string): Array<[number, number]> {
   return frases.filter(([a, b]) => t.slice(a, b).trim().length > 0);
 }
 
+// O limite de palavra que também não corta número: "r$ 5" não acaba em "r$ 5,50" nem em
+// "r$ 5.999" (2ª revisão da -c01.8).
+const LETRA_OU_NUMERO = /[a-z0-9]/;
+const SEPARADOR_DE_NUMERO = /[.,]/;
+function limiteAntes(t: string, i: number): boolean {
+  if (i === 0) return true;
+  if (LETRA_OU_NUMERO.test(t[i - 1]!)) return false;
+  return !(SEPARADOR_DE_NUMERO.test(t[i - 1]!) && /\d/.test(t[i - 2] ?? '') && /\d/.test(t[i] ?? ''));
+}
+function limiteDepois(t: string, fim: number): boolean {
+  if (fim >= t.length) return true;
+  if (LETRA_OU_NUMERO.test(t[fim]!)) return false;
+  return !(SEPARADOR_DE_NUMERO.test(t[fim]!) && /\d/.test(t[fim - 1] ?? '') && /\d/.test(t[fim + 1] ?? ''));
+}
+
 /**
  * Os pedaços de `t` (já em `textoParaConferir`) que vieram da base: a frase igual a uma
  * frase de um texto afirmável, ou o texto afirmável inteiro (entre limites de palavra).
@@ -152,12 +167,10 @@ export function trechosAprovados(t: string, afirmaveis: Iterable<string>): Array
   for (const [ini, fim] of frasesDoTexto(t)) {
     if (frasesDaBase.has(fraseParaComparar(t.slice(ini, fim)))) aprovados.push([ini, fim]);
   }
-  const letraOuNumero = /[a-z0-9]/;
   for (const inteiro of inteiros) {
     for (let i = t.indexOf(inteiro); i !== -1; i = t.indexOf(inteiro, i + 1)) {
       const fim = i + inteiro.length;
-      if (i > 0 && letraOuNumero.test(t[i - 1]!)) continue;
-      if (fim < t.length && letraOuNumero.test(t[fim]!)) continue;
+      if (!limiteAntes(t, i) || !limiteDepois(t, fim)) continue;
       aprovados.push([i, fim]);
     }
   }

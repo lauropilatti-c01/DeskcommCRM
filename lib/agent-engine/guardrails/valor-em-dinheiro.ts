@@ -129,6 +129,32 @@ function semLinks(texto: string): string {
   return t;
 }
 
+/**
+ * (C01, -c01.8, 2ª revisão) As parcelas que o detector de promessas lê ("parcelado em
+ * 12x", "em 12x", "12x sem juros", "12x no cartão", "12x iguais"), com a posição: o
+ * detector junta as parcelas pelo valor, e o "12x" aprovado de uma frase da base
+ * escondia outro "12x" fora dela. As mesmas formas de `promise/engine.ts`, sobre o texto
+ * sem acento.
+ */
+const PARCELAS_DO_DETECTOR: readonly RegExp[] = [
+  /\b(?:parcel\w*|dividid\w*\s+em|em(?:\s+at[ée])?)\s+(\d{1,3})\s*(?:x\b|vezes\b)/g,
+  /(\d{1,3})\s*(?:x\b|vezes\b)\s+(?:sem\s+juros|de\s*r\$|no\s+(?:cart[ãa]o|boleto)|iguais)/g,
+];
+
+/** Onde acaba o número que termina em `fim`: o valor inteiro, com centavos e milhar ("r$ 5" de "r$ 5,50"). */
+function fimDoValor(t: string, fim: number): number {
+  let f = fim;
+  while (f < t.length && (/\d/.test(t[f]!) || (/[.,]/.test(t[f]!) && /\d/.test(t[f + 1] ?? '')))) f++;
+  return f;
+}
+
+/** Onde começa o número que começa em `ini`. */
+function iniDoValor(t: string, ini: number): number {
+  let i = ini;
+  while (i > 0 && (/\d/.test(t[i - 1]!) || (/[.,]/.test(t[i - 1]!) && /\d/.test(t[i - 2] ?? '')))) i--;
+  return i;
+}
+
 /** A chave de um valor do detector de promessas, para descontar o que veio da base. */
 const chaveDaPromessa = (p: ReturnType<typeof extractPromises>[number]): string =>
   `${p.kind}:${p.value}:${p.moeda ?? ''}`;
@@ -142,7 +168,14 @@ export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = 
   const original = semLinks(body);
   const t = semAcento(original);
   const aprovados = afirmaveis.length > 0 ? trechosAprovados(t, afirmaveis) : [];
-  const daBase = (ini: number, fim: number): boolean => aprovados.some(([a, b]) => ini >= a && fim <= b);
+  // (2ª revisão) O VALOR INTEIRO tem de caber no trecho aprovado: "r$ 5" aprovado não cobre
+  // o "r$ 5" de "r$ 5,50" nem o de "r$ 5.999" (a forma da M1 lê só o primeiro dígito).
+  const daBase = (ini: number, fim: number): boolean => {
+    if (aprovados.length === 0) return false;
+    const a0 = iniDoValor(t, ini);
+    const b0 = /\d/.test(t[fim - 1] ?? '') ? fimDoValor(t, fim) : fim;
+    return aprovados.some(([a, b]) => a0 >= a && b0 <= b);
+  };
   const trechos: string[] = [];
   for (const re of FORMAS_DA_M1) {
     re.lastIndex = 0;
@@ -163,9 +196,10 @@ export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = 
   // O que o detector de promessas lê e a lista acima não cobre (euro, "N% off",
   // "desconto de N%", "parcelado em 12x"). Real (R$, reais, real) fica com a lista acima,
   // que lê as mesmas formas e conhece a isenção do salário.
-  // (-c01.8) O detector não dá a posição: ele lê o texto inteiro, e cada valor que ele
-  // acha dentro de um trecho aprovado desconta UMA ocorrência igual (o mesmo valor fora
-  // do trecho continua contando).
+  // (-c01.8) O detector não dá a posição: ele lê o texto inteiro, e cada preço ou desconto
+  // que ele acha dentro de um trecho aprovado desconta UMA ocorrência igual (o mesmo valor
+  // fora do trecho continua contando: o detector não junta preço nem desconto). As
+  // parcelas, que ele junta pelo valor, vêm de `PARCELAS_DO_DETECTOR`, por posição.
   if (trechos.length === 0) {
     const daBaseNoDetector = new Map<string, number>();
     for (const [a, b] of aprovados) {
@@ -174,6 +208,7 @@ export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = 
       }
     }
     for (const q of extractPromises(aprovados.length > 0 ? t : original)) {
+      if (q.kind === 'installments' && aprovados.length > 0) continue;
       const restam = daBaseNoDetector.get(chaveDaPromessa(q)) ?? 0;
       if (restam > 0) {
         daBaseNoDetector.set(chaveDaPromessa(q), restam - 1);
@@ -182,6 +217,17 @@ export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = 
       if (q.kind === 'discount') trechos.push(`${q.value}%`);
       else if (q.kind === 'installments') trechos.push(`${q.value}x`);
       else if (q.moeda === 'EUR') trechos.push('€');
+    }
+    if (aprovados.length > 0) {
+      const parcelas = new Set<string>();
+      for (const re of PARCELAS_DO_DETECTOR) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(t)) !== null) {
+          if (!daBase(m.index, m.index + m[0].length)) parcelas.add(`${Number(m[1])}x`);
+        }
+      }
+      trechos.push(...parcelas);
     }
   }
   return trechos;

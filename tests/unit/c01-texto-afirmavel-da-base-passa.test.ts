@@ -185,6 +185,36 @@ describe("(C01, -c01.8) a trava 'valor em dinheiro' com o texto afirmável da ba
     expect((await avaliar(`Boa notícia: ${B}!`, consulta([cupom(B)]))).pass).toBe(true);
   });
 
+  it("o valor é comparado inteiro, com centavos e milhar: 'R$ 5' aprovado não libera 'R$ 5,50' nem 'R$ 5.999' (2ª revisão)", async () => {
+    const BASE = "O cupom abate R$ 5.";
+    const r = consulta([cupom(BASE)]);
+    expect((await avaliar(BASE, r)).pass).toBe(true);
+    expect((await avaliar("Boa notícia: o cupom abate R$ 5!", r)).pass).toBe(true);
+    for (const frase of [
+      "O cupom abate R$ 5,50.",
+      "O cupom abate R$ 5.999.",
+      "O cupom abate R$ 5.999,90 no cartão.",
+      "O cupom abate R$ 50.",
+    ]) {
+      expect((await avaliar(frase, r)).pass, frase).toBe(false);
+    }
+  });
+
+  it("parcela fora da base com o mesmo valor da aprovada é barrada: o detector junta por valor (2ª revisão)", async () => {
+    const BASE = "O cupom de 5% vale no cartão, em 12x.";
+    const r = consulta([cupom(BASE)]);
+    expect((await avaliar(BASE, r)).pass).toBe(true);
+    for (const frase of [
+      `${BASE} O curso é parcelado em 12x.`,
+      `${BASE} O curso sai em 12x sem juros.`,
+      `${BASE} O curso é parcelado em 18x.`,
+    ]) {
+      expect((await avaliar(frase, r)).pass, frase).toBe(false);
+    }
+    // Sem texto afirmável, como antes: o detector do autor lê as parcelas.
+    expect((await avaliar("O curso é parcelado em 12x.")).pass).toBe(false);
+  });
+
   it("salário exato do fato passa na frase inteira; arredondado ou pela metade, não", async () => {
     const r = consulta([fato(SALARIO)]);
     expect((await avaliar(SALARIO)).pass).toBe(false);

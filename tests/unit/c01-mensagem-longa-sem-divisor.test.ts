@@ -132,6 +132,9 @@ describe("(C01, -c01.8) a ligação no turno, pelo código", () => {
     expect(bloco).toMatch(/for \(const codigo of Object\.keys\(TRAVAS_DE_ESTILO\)\) vetosDeEstilo\.set\(codigo, MAX_VETOS_DE_ESTILO\);/);
     expect(bloco).toMatch(/runLog\.info\('trava de estilo sem etapa para reescrever: desarmada no turno, a mensagem sai sem ela'/);
     expect(bloco).toMatch(/await rawTools\.send_message\?\.execute\?\.\(entrada, \{/);
+    // (2ª revisão) Só se nenhuma mensagem saiu no turno, conferido depois do laço (as chamadas
+    // de uma etapa rodam em paralelo).
+    expect(bloco).toMatch(/envioVetadoPorEstilo !== null &&\s*!leadTemResposta &&\s*corposEnviados\.length === 0 &&/);
     // O envio pendente nasce no 1º veto de estilo e morre em qualquer tentativa nova.
     expect(TURNO).toMatch(/if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*envioVetadoPorEstilo = \{/);
     expect(TURNO).toMatch(/execute: async \(\{ body, produto_codigo \}\) => \{\s*\/\/ \(C01, -c01\.8\)[^\n]*\n\s*envioVetadoPorEstilo = null;/);

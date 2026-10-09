@@ -41,7 +41,8 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *     (assunto fora da lista), barrados (1ª revisão independente);
  *   - sem o divisor de bolhas, a `texto_longo` veta acima de 700 caracteres uma vez e
  *     deixa sair na 2ª (estilo: sem caso, sem passagem); sem etapa para reescrever
- *     (`max_steps` 1, ou as consultas gastando as etapas), sai inteira depois do laço.
+ *     (`max_steps` 1, ou as consultas gastando as etapas), sai inteira depois do laço,
+ *     só se nenhuma mensagem saiu no turno (duas chamadas paralelas: só a curta sai).
  *
  * Domínios, links e valores são fictícios, na forma dos reais (regra do C01.md).
  */
@@ -134,8 +135,11 @@ const USO = {
   outputTokens: { total: 1, text: 1, reasoning: 0 },
 };
 
-/** Uma etapa do modelo falso: consultar a base RAG, consultar a base externa, ou mandar este texto. */
-type Etapa = { busca: string } | { base: string } | { envia: string };
+/**
+ * Uma etapa do modelo falso: consultar a base RAG, consultar a base externa, mandar este
+ * texto, ou (-c01.8) mandar vários textos na MESMA etapa (o SDK roda as chamadas em paralelo).
+ */
+type Etapa = { busca: string } | { base: string } | { envia: string } | { juntos: string[] };
 
 /**
  * Modelo falso: segue o roteiro e depois encerra. Guarda o texto de cada prompt das
@@ -159,6 +163,19 @@ function modelo(roteiro: Etapa[]) {
     const etapa = roteiro[estado.etapas];
     estado.etapas += 1;
     if (etapa === undefined) return texto("pronto");
+    if ("juntos" in etapa) {
+      return {
+        content: etapa.juntos.map((body, k) => ({
+          type: "tool-call" as const,
+          toolCallId: `c${estado.etapas}-${k}`,
+          toolName: "send_message",
+          input: JSON.stringify({ body }),
+        })),
+        finishReason: { unified: "tool-calls" as const, raw: undefined },
+        usage: USO,
+        warnings: [],
+      };
+    }
     return {
       content: [
         "busca" in etapa
@@ -248,9 +265,9 @@ function montaHandler(doGenerate: unknown) {
   });
 }
 
-async function rodaTurno(handler: ReturnType<typeof montaHandler>): Promise<Error | null> {
-  await pool.query("update job_queue set status = 'done' where status = 'pending'");
-  const { job } = await m.queue.enqueueJob(pool, ORG, {
+async function rodaTurno(handler: ReturnType<typeof montaHandler>, db: pg.Pool = pool): Promise<Error | null> {
+  await db.query("update job_queue set status = 'done' where status = 'pending'");
+  const { job } = await m.queue.enqueueJob(db, ORG, {
     kind: "inbound_turn",
     leadId: CONTACT,
     payload: {
@@ -262,14 +279,14 @@ async function rodaTurno(handler: ReturnType<typeof montaHandler>): Promise<Erro
     },
     maxAttempts: 1,
   });
-  const [claimed] = await m.queue.claimJobs(pool, { workerId: "lv", maxConcurrency: 1 });
+  const [claimed] = await m.queue.claimJobs(db, { workerId: "lv", maxConcurrency: 1 });
   expect(claimed?.id).toBe(job.id);
   try {
-    await handler(claimed!, pool, { workerId: "lv" });
-    await m.queue.completeJob(pool, claimed!.id, "lv");
+    await handler(claimed!, db, { workerId: "lv" });
+    await m.queue.completeJob(db, claimed!.id, "lv");
     return null;
   } catch (err) {
-    await m.queue.failJob(pool, claimed!.id, "lv", err);
+    await m.queue.failJob(db, claimed!.id, "lv", err);
     return err as Error;
   }
 }
@@ -787,6 +804,40 @@ describe("(C01, -c01.8) 'até 700 caracteres' com o divisor de bolhas desligado 
       expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
       expect(mod.estado.etapas).toBe(3);
       await saiInteiraSemPassagem(longo);
+    } finally {
+      await maxSteps(null);
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("duas chamadas na mesma etapa (paralelas), a curta sai e a longa é vetada: só a curta sai, sem caso nem passagem (2ª revisão)", async () => {
+    await ligaTextoLongo(true);
+    await maxSteps(1);
+    try {
+      const curta = "Oi! Já te mando o resumo do curso.";
+      const longa = comTamanho(701, "As metas mostram o que estudar e quais questões resolver em cada dia. ");
+      const mod = modelo([{ juntos: [curta, longa] }]);
+      // Duas chamadas paralelas seguram uma conexão cada na serialização do número: o pool
+      // do turno tem o tamanho padrão do `pg` na produção (10), não o de 2 deste arquivo.
+      const comoNaProducao = new pg.Pool({
+        connectionString: `postgresql://postgres:postgres@127.0.0.1:${PORT}/postgres`,
+        max: 10,
+      });
+      try {
+        expect(await rodaTurno(montaHandler(mod.doGenerate), comoNaProducao)).toBeNull();
+      } finally {
+        await comoNaProducao.end();
+      }
+      expect(mod.estado.etapas).toBe(1);
+      expect(enviados.map((e) => e.body)).toEqual([curta]);
+      expect(linhasDoLog.join("")).not.toContain("trava de estilo sem etapa para reescrever");
+      const { rows: casos } = await pool.query("select 1 from agent_cases where organization_id = $1", [ORG]);
+      expect(casos).toEqual([]);
+      const { rows: contato } = await pool.query<{ force_human: boolean }>(
+        "select force_human from contacts where organization_id = $1 and id = $2",
+        [ORG, CONTACT],
+      );
+      expect(contato[0]!.force_human).toBe(false);
     } finally {
       await maxSteps(null);
       await ligaTextoLongo(false);
