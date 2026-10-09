@@ -84,6 +84,10 @@ import {
 } from '../guardrails/link-e-valor-de-ferramenta';
 import { valoresNoResultado } from '../guardrails/valor-de-ferramenta';
 import { textosAfirmaveisNoResultado } from '../guardrails/texto-afirmavel';
+import {
+  classificarPromessaComTextoAfirmavel,
+  textosAfirmaveisDaPromessaNoResultado,
+} from '../guardrails/promessa-e-texto-afirmavel';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
@@ -3658,6 +3662,12 @@ async function executarTurnoDoAgente(
   // trecho exato deles passa pela trava `valor_em_dinheiro`. Só a base externa, e só a
   // consulta sem erro: nem a base RAG, nem o histórico, nem as notas.
   const textosAfirmaveis = new Set<string>();
+  // (C01, CRM-089 D4) Os textos afirmáveis da base externa deste turno para a trava
+  // semântica de promessa: o trecho exato deles não é vetado
+  // (`promessa-e-texto-afirmavel.ts`). O mesmo mecanismo do de cima (só a base externa,
+  // só a consulta sem erro), com a camada de promessa ligada e com QUALQUER assunto: a
+  // lista de assuntos é da trava de dinheiro, que continua conferindo o valor.
+  const textosAfirmaveisDaPromessa = new Set<string>();
   // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
   // frase de espera NADA mais sai dele — nem send_message, nem send_template, nem a
   // pergunta do roteiro. Toda ferramenta de envio recusa com o mesmo erro, e o laço
@@ -4023,20 +4033,31 @@ async function executarTurnoDoAgente(
   // Gate 5 da cadeia (F4-02/F4-08): closure do classificador semântico com tenant/lead/job da
   // ROW do job fechados dentro (regra dura nº 1) — resolvido pelo seam agnóstico. undefined =
   // camada off (gate no-op). CUSTO: uma chamada de modelo POR ENVIO quando ligada.
+  // (C01, CRM-089 D4) O trecho exato de um texto afirmável da base deste turno não é
+  // vetado: com ele na mensagem, a classificação passa por
+  // `classificarPromessaComTextoAfirmavel` (até duas chamadas: a mensagem inteira e,
+  // se a promessa apontada estava no trecho da base, só o resto; nenhuma, se a mensagem
+  // é só o texto da base). Sem texto afirmável, a mesma chamada de antes.
   const semanticClassifier = camadaLigada(
     camadas.promessa_semantica,
     deps.knobs.promiseSemantic?.enabled === true,
   )
     ? (candidate: string) =>
-        classifyPromise(
-          pool,
-          deps.llmCfg,
-          { tenantId, leadId: leadId || null, jobId: job?.id },
-          {
-            candidate,
-            ...argsAux(deps.knobs.promiseSemantic?.model),
-          },
-          { ...(deps.registry !== undefined ? { registry: deps.registry } : {}), log: runLog },
+        classificarPromessaComTextoAfirmavel(
+          candidate,
+          [...textosAfirmaveisDaPromessa],
+          (texto: string) =>
+            classifyPromise(
+              pool,
+              deps.llmCfg,
+              { tenantId, leadId: leadId || null, jobId: job?.id },
+              {
+                candidate: texto,
+                ...argsAux(deps.knobs.promiseSemantic?.model),
+              },
+              { ...(deps.registry !== undefined ? { registry: deps.registry } : {}), log: runLog },
+            ),
+          runLog,
         )
     : undefined;
   let outOfTablePromiseAttempted = false;
@@ -5734,6 +5755,15 @@ async function executarTurnoDoAgente(
                       resultado,
                       travasDaOrg.travas.colunasDoTextoAfirmavel,
                       textosAfirmaveis,
+                    );
+                  }
+                  // (C01, CRM-089 D4) E os da trava de promessa, de qualquer assunto, só com a
+                  // camada semântica de promessa ligada.
+                  if (semanticClassifier !== undefined && !resultadoComErro(resultado)) {
+                    textosAfirmaveisDaPromessaNoResultado(
+                      resultado,
+                      travasDaOrg.travas.colunasDoTextoAfirmavel,
+                      textosAfirmaveisDaPromessa,
                     );
                   }
                   return resultado;
