@@ -34,6 +34,16 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * A base externa é a ferramenta de verdade do turno (`crm_query_external_data`,
  * embrulhada pelo turno); só a montagem dela pelo MCP é trocada por uma falsa.
  *
+ * (C01, -c01.8, CRM-085) E o que esta versão muda nas duas travas de texto:
+ *   - o texto afirmável da base (salário, cupom) passa pela `valor_em_dinheiro` com a
+ *     consulta no turno; com a marca falsa, sem consulta ou com o preço junto, barrado;
+ *     o preço com o mesmo número do salário e a linha de preço marcada como afirmável
+ *     (assunto fora da lista), barrados (1ª revisão independente);
+ *   - sem o divisor de bolhas, a `texto_longo` veta acima de 700 caracteres uma vez e
+ *     deixa sair na 2ª (estilo: sem caso, sem passagem); sem etapa para reescrever
+ *     (`max_steps` 1, ou as consultas gastando as etapas), sai inteira depois do laço,
+ *     só se nenhuma mensagem saiu no turno (duas chamadas paralelas: só a curta sai).
+ *
  * Domínios, links e valores são fictícios, na forma dos reais (regra do C01.md).
  */
 
@@ -125,8 +135,11 @@ const USO = {
   outputTokens: { total: 1, text: 1, reasoning: 0 },
 };
 
-/** Uma etapa do modelo falso: consultar a base RAG, consultar a base externa, ou mandar este texto. */
-type Etapa = { busca: string } | { base: string } | { envia: string };
+/**
+ * Uma etapa do modelo falso: consultar a base RAG, consultar a base externa, mandar este
+ * texto, ou (-c01.8) mandar vários textos na MESMA etapa (o SDK roda as chamadas em paralelo).
+ */
+type Etapa = { busca: string } | { base: string } | { envia: string } | { juntos: string[] };
 
 /**
  * Modelo falso: segue o roteiro e depois encerra. Guarda o texto de cada prompt das
@@ -150,6 +163,19 @@ function modelo(roteiro: Etapa[]) {
     const etapa = roteiro[estado.etapas];
     estado.etapas += 1;
     if (etapa === undefined) return texto("pronto");
+    if ("juntos" in etapa) {
+      return {
+        content: etapa.juntos.map((body, k) => ({
+          type: "tool-call" as const,
+          toolCallId: `c${estado.etapas}-${k}`,
+          toolName: "send_message",
+          input: JSON.stringify({ body }),
+        })),
+        finishReason: { unified: "tool-calls" as const, raw: undefined },
+        usage: USO,
+        warnings: [],
+      };
+    }
     return {
       content: [
         "busca" in etapa
@@ -239,9 +265,9 @@ function montaHandler(doGenerate: unknown) {
   });
 }
 
-async function rodaTurno(handler: ReturnType<typeof montaHandler>): Promise<Error | null> {
-  await pool.query("update job_queue set status = 'done' where status = 'pending'");
-  const { job } = await m.queue.enqueueJob(pool, ORG, {
+async function rodaTurno(handler: ReturnType<typeof montaHandler>, db: pg.Pool = pool): Promise<Error | null> {
+  await db.query("update job_queue set status = 'done' where status = 'pending'");
+  const { job } = await m.queue.enqueueJob(db, ORG, {
     kind: "inbound_turn",
     leadId: CONTACT,
     payload: {
@@ -253,14 +279,14 @@ async function rodaTurno(handler: ReturnType<typeof montaHandler>): Promise<Erro
     },
     maxAttempts: 1,
   });
-  const [claimed] = await m.queue.claimJobs(pool, { workerId: "lv", maxConcurrency: 1 });
+  const [claimed] = await m.queue.claimJobs(db, { workerId: "lv", maxConcurrency: 1 });
   expect(claimed?.id).toBe(job.id);
   try {
-    await handler(claimed!, pool, { workerId: "lv" });
-    await m.queue.completeJob(pool, claimed!.id, "lv");
+    await handler(claimed!, db, { workerId: "lv" });
+    await m.queue.completeJob(db, claimed!.id, "lv");
     return null;
   } catch (err) {
-    await m.queue.failJob(pool, claimed!.id, "lv", err);
+    await m.queue.failJob(db, claimed!.id, "lv", err);
     return err as Error;
   }
 }
@@ -585,5 +611,257 @@ describe("(C01, revisão B1) o erro da base externa não libera o que o modelo i
       ["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"],
       ["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"],
     ]);
+  });
+});
+
+/** O resultado da consulta à base externa com estas linhas, na forma do MCP (`content` e `structuredContent`). */
+function linhasDaBase(linhas: Array<Record<string, unknown>>) {
+  const r = { tabela: "fatos_do_agente", linhas, linhas_devolvidas: linhas.length };
+  return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
+}
+
+describe("(C01, -c01.8) o texto afirmável da base passa pela `valor_em_dinheiro`; o preço do curso não (CRM-085), no turno inteiro", () => {
+  const SALARIO =
+    "Na Empresa Exemplo, o salário base de nível técnico é de R$ 7.412,35 no regime administrativo.";
+  const CUPOM = "Pra pagamento no cartão ou à vista, consigo um cupom de 5%: é só digitar o código no campo de cupom.";
+
+  async function ligaValorEmDinheiro(): Promise<void> {
+    await pool.query(
+      `insert into org_guardrail_layers (organization_id, layer, enabled) values ($1, $2, true)
+       on conflict (organization_id, layer) do update set enabled = true`,
+      [ORG, INTERRUPTOR_DO_VALOR_EM_DINHEIRO],
+    );
+  }
+
+  it("consulta os fatos e manda o salário e o cupom afirmáveis com o texto da base: sai", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([
+      { chave: "salario", assunto: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+      { chave: "cupom", assunto: "desconto", texto_para_o_lead: CUPOM, pode_afirmar: true },
+    ]);
+    const corpo = `${SALARIO}\n\n${CUPOM}`;
+    const mod = modelo([{ base: "fatos" }, { envia: corpo }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    expect(await vetosGravados()).toEqual([]);
+  });
+
+  it("o mesmo cupom de linha com a marca de afirmar falsa é barrado", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([{ chave: "cupom", assunto: "desconto", texto_para_o_lead: CUPOM, pode_afirmar: false }]);
+    const mod = modelo([{ base: "fatos" }, { envia: CUPOM }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  it("sem consulta neste turno (o cupom só numa mensagem já enviada), barrado", async () => {
+    await ligaValorEmDinheiro();
+    await pool.query(
+      `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+         type, direction, status, body, sent_via, sent_at)
+       values ($1,$2,$3,$4,$5,'text','outbound','delivered',$6,'ai',$7)`,
+      [randomUUID(), ORG, CONV, SESSION, CONTACT, CUPOM, GANCHO_EM],
+    );
+    const mod = modelo([{ envia: CUPOM }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  it("o preço do curso que veio junto, numa linha de oferta, continua barrado", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([
+      { chave: "salario", assunto: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+      { produto: "Plano anual", preco_total: 1997, pode_afirmar: true, condicao: "Aberta até 31/10." },
+    ]);
+    const mod = modelo([{ base: "fatos e ofertas" }, { envia: `${SALARIO} O plano anual sai por R$ 1.997,00.` }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  // (1ª revisão da -c01.8) Os furos reproduzidos pela revisão independente.
+  it("o preço com o mesmo número do salário, ao lado da frase do salário, é barrado", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([
+      { chave: "salario", assunto: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+    ]);
+    const mod = modelo([{ base: "fatos" }, { envia: `${SALARIO} O preço do curso é de R$ 7.412,35.` }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  it("linha de preço marcada como afirmável, com assunto fora da lista, não libera", async () => {
+    await ligaValorEmDinheiro();
+    const PRECO = "O curso custa R$ 997 no cartão.";
+    respostaDaBase = linhasDaBase([{ chave: "preco", assunto: "preco", texto_para_o_lead: PRECO, pode_afirmar: true }]);
+    const mod = modelo([{ base: "fatos" }, { envia: PRECO }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+});
+
+describe("(C01, -c01.8) 'até 700 caracteres' com o divisor de bolhas desligado (CRM-085), no turno inteiro", () => {
+  const FRASE = "O curso é online e você estuda no seu horário, com metas para cada dia. ";
+  // Um texto por caso: o mesmo corpo em casos seguidos cairia na trava de repetição em massa.
+  const comTamanho = (n: number, frase = FRASE) => frase.repeat(Math.ceil(n / frase.length)).slice(0, n - 1) + "!";
+
+  async function ligaTextoLongo(ligada: boolean): Promise<void> {
+    await pool.query(
+      ligada
+        ? `update organizations set settings = jsonb_set(settings, '{travas_de_envio,texto_longo}', '{"ligada": true}')
+            where id = $1`
+        : `update organizations set settings = settings #- '{travas_de_envio,texto_longo}' where id = $1`,
+      [ORG],
+    );
+  }
+
+  it("701 caracteres: o 1º veto ensina; a 2ª tentativa sai inteira, sem caso nem passagem", async () => {
+    await ligaTextoLongo(true);
+    try {
+      const longo = comTamanho(701);
+      expect([...longo]).toHaveLength(701);
+      const mod = modelo([{ envia: longo }, { envia: longo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+
+      expect(mod.estado.prompts[1]).toContain("Reescreva em até 700 caracteres, numa mensagem só");
+      expect(enviados.map((e) => e.body)).toEqual([longo]);
+      const vetos = await vetosGravados();
+      expect(vetos.length).toBeGreaterThan(0);
+      expect(vetos.every(([trava]) => trava === "texto_longo")).toBe(true);
+      expect(linhasDoLog.join("")).toContain("trava de estilo no limite");
+      const { rows: casos } = await pool.query("select 1 from agent_cases where organization_id = $1", [ORG]);
+      expect(casos).toEqual([]);
+      const { rows: contato } = await pool.query<{ force_human: boolean }>(
+        "select force_human from contacts where organization_id = $1 and id = $2",
+        [ORG, CONTACT],
+      );
+      expect(contato[0]!.force_human).toBe(false);
+    } finally {
+      await ligaTextoLongo(false);
+    }
+  });
+
+  /** Publica uma versão igual à do teste com `max_steps = n` (a publicada é imutável); `null` volta à original. */
+  async function maxSteps(n: number | null): Promise<void> {
+    if (n === null) {
+      await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO, AGENTE]);
+      return;
+    }
+    const versao = `a7a7a7a7-0000-4000-8000-${String(100 + n).padStart(12, "0")}`;
+    await pool.query(
+      `insert into ai_agent_versions (id, organization_id, agent_id, version_number, system_prompt,
+                                      provider, model, channel_session_id, status, published_at, max_steps,
+                                      knowledge_source_ids, tool_ids)
+       values ($1,$2,$3,$4,'Você é um atendente de teste.','anthropic','claude-sonnet-4-6',$5,'published',now(),$6,
+               array[$7::uuid], array['crm_query_external_data'])
+       on conflict (id) do nothing`,
+      [versao, ORG, AGENTE, 100 + n, SESSION, n, FONTE],
+    );
+    await pool.query("update ai_agents set published_version_id = $1 where id = $2", [versao, AGENTE]);
+  }
+  /** O veto de estilo sem etapa para reescrever: a mensagem sai inteira, sem caso, sem frase de espera, sem passagem. */
+  async function saiInteiraSemPassagem(corpo: string): Promise<void> {
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    const vetos = await vetosGravados();
+    expect(vetos.length).toBeGreaterThan(0);
+    expect(vetos.every(([trava]) => trava === "texto_longo")).toBe(true);
+    expect(linhasDoLog.join("")).toContain("trava de estilo sem etapa para reescrever");
+    const { rows: casos } = await pool.query("select 1 from agent_cases where organization_id = $1", [ORG]);
+    expect(casos).toEqual([]);
+    const { rows: contato } = await pool.query<{ force_human: boolean }>(
+      "select force_human from contacts where organization_id = $1 and id = $2",
+      [ORG, CONTACT],
+    );
+    expect(contato[0]!.force_human).toBe(false);
+  }
+
+  it("max_steps = 1: o veto cai na única etapa; a mensagem sai inteira, sem caso nem passagem", async () => {
+    await ligaTextoLongo(true);
+    await maxSteps(1);
+    try {
+      const longo = comTamanho(701, "O cronograma diz o que estudar em cada meta, e você segue no seu ritmo. ");
+      const mod = modelo([{ envia: longo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+      expect(mod.estado.etapas).toBe(1);
+      await saiInteiraSemPassagem(longo);
+    } finally {
+      await maxSteps(null);
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("as consultas gastam as etapas e o veto cai na última: a mensagem sai inteira, sem caso nem passagem", async () => {
+    await ligaTextoLongo(true);
+    await maxSteps(3);
+    respostaDaBase = linhasDaBase([]);
+    try {
+      const longo = comTamanho(701, "Os simulados são comentados e cronometrados, no estilo da banca da prova. ");
+      const mod = modelo([{ base: "fatos" }, { base: "ofertas" }, { envia: longo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+      expect(mod.estado.etapas).toBe(3);
+      await saiInteiraSemPassagem(longo);
+    } finally {
+      await maxSteps(null);
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("duas chamadas na mesma etapa (paralelas), a curta sai e a longa é vetada: só a curta sai, sem caso nem passagem (2ª revisão)", async () => {
+    await ligaTextoLongo(true);
+    await maxSteps(1);
+    try {
+      const curta = "Oi! Já te mando o resumo do curso.";
+      const longa = comTamanho(701, "As metas mostram o que estudar e quais questões resolver em cada dia. ");
+      const mod = modelo([{ juntos: [curta, longa] }]);
+      // Duas chamadas paralelas seguram uma conexão cada na serialização do número: o pool
+      // do turno tem o tamanho padrão do `pg` na produção (10), não o de 2 deste arquivo.
+      const comoNaProducao = new pg.Pool({
+        connectionString: `postgresql://postgres:postgres@127.0.0.1:${PORT}/postgres`,
+        max: 10,
+      });
+      try {
+        expect(await rodaTurno(montaHandler(mod.doGenerate), comoNaProducao)).toBeNull();
+      } finally {
+        await comoNaProducao.end();
+      }
+      expect(mod.estado.etapas).toBe(1);
+      expect(enviados.map((e) => e.body)).toEqual([curta]);
+      expect(linhasDoLog.join("")).not.toContain("trava de estilo sem etapa para reescrever");
+      const { rows: casos } = await pool.query("select 1 from agent_cases where organization_id = $1", [ORG]);
+      expect(casos).toEqual([]);
+      const { rows: contato } = await pool.query<{ force_human: boolean }>(
+        "select force_human from contacts where organization_id = $1 and id = $2",
+        [ORG, CONTACT],
+      );
+      expect(contato[0]!.force_human).toBe(false);
+    } finally {
+      await maxSteps(null);
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("700 caracteres saem de primeira", async () => {
+    await ligaTextoLongo(true);
+    try {
+      const corpo = comTamanho(700, "Cada meta mostra o que estudar, qual aula assistir e quais questões resolver hoje. ");
+      const mod = modelo([{ envia: corpo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+      expect(enviados.map((e) => e.body)).toEqual([corpo]);
+      expect(await vetosGravados()).toEqual([]);
+    } finally {
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("com a trava desligada, nada muda: 701 caracteres saem de primeira", async () => {
+    const corpo = comTamanho(701, "As aulas ficam gravadas e você assiste quando puder, no celular ou no computador. ");
+    const mod = modelo([{ envia: corpo }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    expect(await vetosGravados()).toEqual([]);
   });
 });

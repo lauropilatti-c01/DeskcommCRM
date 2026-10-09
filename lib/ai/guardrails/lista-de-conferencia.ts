@@ -220,7 +220,8 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     rotulo: "Valor em dinheiro só na página de matrícula",
     oQueProtege:
       "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que " +
-      "traz os valores certos, em vez de escrever um número que pode estar errado.",
+      "traz os valores certos, em vez de escrever um número que pode estar errado. O número que a " +
+      "sua base marca para dizer (um salário, um cupom aprovado) sai, se for copiado como veio.",
     escolha: null,
     porQueNaoSeDesliga:
       "Vem desligada: é escolha de cada negócio dizer ou não o valor na conversa. Se o assistente " +
@@ -246,12 +247,13 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     nome: "texto_longo",
     rotulo: "Resposta que cabe nas mensagens desta vez",
     oQueProtege:
-      "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, " +
-      "ela volta para ser reescrita mais curta, em vez de sair com a última mensagem enorme.",
+      "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, ou " +
+      "passa do tamanho combinado quando ele manda uma mensagem só, ela volta para ser reescrita " +
+      "mais curta, em vez de sair enorme.",
     escolha: null,
     porQueNaoSeDesliga:
       "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, " +
-      "ela sai dividida como sempre: nunca deixa o cliente sem resposta.",
+      "ela sai inteira, como sairia sem esta conferência: nunca deixa o cliente sem resposta.",
     camada: null,
     opcionalNaConfiguracao: true,
   },

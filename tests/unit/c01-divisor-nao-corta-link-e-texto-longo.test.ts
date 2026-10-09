@@ -290,11 +290,12 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
     expect(CADEIA).toMatch(/textoLongoGate,\s*disclosureGate,/);
   });
 
-  it("o turno lê a configuração uma vez, antes das ferramentas; arma só com o divisor ligado", () => {
+  it("o turno lê a configuração uma vez, antes das ferramentas; com o divisor ligado, conta bolhas", () => {
     expect(TURNO.match(/await lerTravasDeEnvioDaOrg\(pool, tenantId\)/g)).toHaveLength(1);
     expect(TURNO.indexOf("await lerTravasDeEnvioDaOrg(")).toBeLessThan(TURNO.indexOf("send_message: tool({"));
+    // (-c01.8) Sem o divisor, arma também, com o limite da mensagem (`c01-mensagem-longa-sem-divisor`).
     expect(TURNO).toMatch(
-      /travasDaOrg\.travas\.textoLongo &&\s*\(agentConfig\?\.splitMessages \?\? false\) &&\s*!estiloDesarmado\('texto_longo'\)/,
+      /travasDaOrg\.travas\.textoLongo && !estiloDesarmado\('texto_longo'\)[\s\S]{0,120}\(agentConfig\?\.splitMessages \?\? false\)\s*\?\s*\{ maxChars: agentConfig\?\.splitMaxChars \?\? 600 \}/,
     );
     expect(TURNO).toMatch(/restantes: maxSendsPerTurn - seq,/);
   });
@@ -312,7 +313,8 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
     expect(i).toBeLessThan(sendMessage.indexOf("chain.code === 'internal_vocabulary_leak'"));
     const bloco = sendMessage.slice(i, sendMessage.indexOf("chain.code === 'internal_vocabulary_leak'"));
     expect(bloco).toMatch(
-      /const vetos = \(vetosDeEstilo\.get\(chain\.code\) \?\? 0\) \+ 1;\s*vetosDeEstilo\.set\(chain\.code, vetos\);\s*if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*return \{ ok: false, error: \{ code: chain\.code, message: chain\.message \} \};/,
+      // (-c01.8) Antes do `return`, o envio vetado fica guardado para sair sem etapa de reescrita.
+      /const vetos = \(vetosDeEstilo\.get\(chain\.code\) \?\? 0\) \+ 1;\s*vetosDeEstilo\.set\(chain\.code, vetos\);\s*if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*envioVetadoPorEstilo = \{\s*trava: chain\.code,\s*entrada: [^\n]*\n\s*\};\s*return \{ ok: false, error: \{ code: chain\.code, message: chain\.message \} \};/,
     );
     expect(bloco).toMatch(
       /chain = await cadeiaDeEnvio\(\(\) =>\s*runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*\.\.\.\(openedCaseThisTurn \? \{ hasOpenCase: true, openedCaseThisTurn: true \} : \{\}\),\s*\}\),\s*\);/,

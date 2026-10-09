@@ -11308,8 +11308,8 @@ export const DICIONARIO: Traducoes = {
   "Valor em dinheiro só na página de matrícula": {
     es: "Valores en dinero solo en la página de matrícula",
   },
-  "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que traz os valores certos, em vez de escrever um número que pode estar errado.": {
-    es: "Bloquea el mensaje con precio, cuota, intereses o descuento: el asistente envía la página, que tiene los valores correctos, en lugar de escribir un número que puede estar equivocado.",
+  "Barra a mensagem com preço, parcela, juros ou desconto: o assistente manda a página, que traz os valores certos, em vez de escrever um número que pode estar errado. O número que a sua base marca para dizer (um salário, um cupom aprovado) sai, se for copiado como veio.": {
+    es: "Bloquea el mensaje con precio, cuota, intereses o descuento: el asistente envía la página, que tiene los valores correctos, en lugar de escribir un número que puede estar equivocado. El número que tu base marca para decir (un salario, un cupón aprobado) sale, si se copia tal como vino.",
   },
   "Vem desligada: é escolha de cada negócio dizer ou não o valor na conversa. Se o assistente insistir três vezes, a conversa passa para uma pessoa da equipe, e o valor não sai.": {
     es: "Viene desactivada: cada negocio elige si dice o no el valor en la conversación. Si el asistente insiste tres veces, la conversación pasa a una persona del equipo y el valor no sale.",
@@ -11329,11 +11329,11 @@ export const DICIONARIO: Traducoes = {
   "Resposta que cabe nas mensagens desta vez": {
     es: "Respuesta que cabe en los mensajes de esta vez",
   },
-  "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, ela volta para ser reescrita mais curta, em vez de sair com a última mensagem enorme.": {
-    es: "Cuando la respuesta se convertiría en más mensajes de los que el asistente puede enviar de una vez, vuelve para reescribirse más corta, en lugar de salir con el último mensaje enorme.",
+  "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, ou passa do tamanho combinado quando ele manda uma mensagem só, ela volta para ser reescrita mais curta, em vez de sair enorme.": {
+    es: "Cuando la respuesta se convertiría en más mensajes de los que el asistente puede enviar de una vez, o supera el tamaño acordado cuando envía un solo mensaje, vuelve para reescribirse más corta, en lugar de salir enorme.",
   },
-  "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, ela sai dividida como sempre: nunca deixa o cliente sem resposta.": {
-    es: "Es un ajuste de estilo, y cada negocio decide si lo quiere. Si la respuesta vuelve dos veces, sale dividida como siempre: nunca deja al cliente sin respuesta.",
+  "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, ela sai inteira, como sairia sem esta conferência: nunca deixa o cliente sem resposta.": {
+    es: "Es un ajuste de estilo, y cada negocio decide si lo quiere. Si la respuesta vuelve dos veces, sale entera, como saldría sin esta revisión: nunca deja al cliente sin respuesta.",
   },
   "+1 consulta ao modelo por mensagem enviada": { es: "+1 consulta al modelo por mensaje enviado" },
   "+1 consulta ao modelo por mensagem recebida": { es: "+1 consulta al modelo por mensaje recibido" },

@@ -14,8 +14,8 @@
  *   "no Pix", "à vista", "entrada de", "em até 18x", "uns 3 mil", "juros".
  *
  * Não pega: data, "2 fases", "60 metas", "67 dias", "12 meses", "6/12", "14x14" (escala),
- * vaga, "100% online", "30% das vagas", "3 mil questões" — o "%" só conta com desconto
- * ou "off"; o "mil" não conta antes de questões, inscritos, vagas e afins. O salário e
+ * vaga, "100% online", "30% das vagas", "3 mil questões" — o "%" só conta com desconto,
+ * "off", cupom ou a forma de pagamento logo depois (-c01.8); o "mil" não conta antes de questões, inscritos, vagas e afins. O salário e
  * os benefícios do cargo (fato da base que a régua isenta) também passam: o valor logo
  * depois de "salário", "remuneração", "benefício"… na mesma frase não conta — só ele
  * (rodada 2): a isenção acaba no primeiro número depois da palavra e em qualquer palavra
@@ -23,12 +23,27 @@
  * expressão do cargo ("salário inicial é de R$ …", "piso salarial de …"), nunca numa
  * frase com palavra de pagamento ou do curso ("Pix", "à vista", "boleto", "plano"…).
  *
+ * (C01, -c01.8, CRM-085 da C01) O texto que a base manda dizer passa: o valor que cai
+ * inteiro dentro de uma frase igual à de um texto afirmável que uma consulta à base
+ * externa devolveu NESTE turno (o salário com o valor exato, o cupom de desconto
+ * aprovado, "mais de 2 mil" da apresentação), ou dentro desse texto inteiro, não conta —
+ * ver `texto-afirmavel.ts`. Cada valor é procurado no texto ORIGINAL, com o contexto
+ * inteiro: nada é apagado antes da procura (apagar o trecho aprovado tirava o "cupom" de
+ * "cupom de 5% ou 10%", e o 10% saía; 1ª revisão da -c01.8). Oferta, link, linha com a
+ * marca falsa ou com assunto fora da lista, histórico e notas não liberam nada: o preço
+ * do curso continua barrado. (3ª revisão) O valor conta pela expressão monetária
+ * inteira, na forma única de `texto-afirmavel.ts`: "R$ 5" aprovado libera "R$5,00" e
+ * "5 reais", e não "R$ 5 e 50 centavos", "R$ 5 000" nem "R$ 5 mil". (4ª revisão, -c01.9)
+ * Sem formatação nem emoji ("*R$ 5*" passa; "R$ *997*" não), com "BRL" e o sinal: o
+ * "-" deixa o valor em dúvida ("R$ -997", "-R$ 5"), e "5k reais" conta como dinheiro.
+ *
  * Trava de CONTEÚDO: contador e fail-safe da promessa semântica
  * (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE` em `inbound-turn.ts`).
  */
 import type { Gate } from './before-send';
 import { linksNoTexto } from './link-permitido';
 import { extractPromises } from './promise/engine';
+import { SINAL, textoParaConferir, trechosAprovados } from './texto-afirmavel';
 
 /** As formas da M1 que `extractPromises` não lê, sobre o texto em minúsculas e sem acento. */
 const FORMAS_DA_M1: readonly RegExp[] = [
@@ -48,6 +63,21 @@ const FORMAS_DA_M1: readonly RegExp[] = [
   /\b\d[\d.,]*\s?(?:no|pelo|via) pix\b/g,
   /\bentrada de\s?\d/g,
   /\b\d+\s?mil\b(?!\s?(?:questoes|exercicios|alunos|alunas|aprovados|aprovadas|inscritos|inscritas|candidatos|candidatas|concorrentes|estudantes|usuarios|pessoas|horas|metas|aulas|videoaulas|paginas|vagas|km))/g,
+  // (-c01.8, 3ª revisão) Centavos também são dinheiro ("e mais 50 centavos").
+  /\b\d[\d.,]*\s?centavos?\b/g,
+];
+
+/**
+ * (-c01.9, 4ª revisão) Com texto afirmável, também as formas que a forma única deixa
+ * cruas e que a lista acima não lê: o sinal depois da moeda ("R$ -997", "R$ −5"), "BRL"
+ * antes ou depois do número ("BRL 5,5", "5,5 R$") e o "k", "mi", "bi" ou "milhões" antes
+ * de "reais" ("5k reais"). Sem texto afirmável, a lista acima é a mesma de antes.
+ */
+const FORMAS_COM_TEXTO_AFIRMAVEL: readonly RegExp[] = [
+  new RegExp(String.raw`(?:r\$|\bbrl) ?${SINAL} ?\d`, 'g'),
+  /\bbrl ?\d/g,
+  /\d ?(?:r\$|brl\b)/g,
+  /\b\d[\d.,]* ?(?:k|mi|bi|milh\w*|bilh\w*)(?: de)? ?(?:reais|real)\b/g,
 ];
 
 /**
@@ -80,6 +110,17 @@ const FATO_DO_CARGO = new RegExp(
 const PAGAMENTO_OU_CURSO =
   /\b(?:pix|a vista|parcel\w*|boletos?|cartao|cartoes|entrada|descontos?|cursos?|matriculas?|planos?|custa|custam|custo|investimentos?|valor (?:do|da|dos|das)|mensalidades?|precos?|promocao|ofertas?|inscricao|pag(?:a|ar|am|amos|ando|ou|o|amento|amentos))\b/;
 
+/**
+ * (C01, -c01.8) A porcentagem de desconto que o detector de promessas não lê ("cupom de
+ * 5%", "10% no cartão", "5% à vista"): ela só conta numa frase com palavra de desconto ou
+ * logo antes da forma de pagamento. Antes passava, e o cupom que a base ainda não libera
+ * (linha com a marca de afirmar falsa) saía do mesmo jeito que o liberado. "100% online",
+ * "30% das vagas" e "1% dos inscritos" continuam fora.
+ */
+const PORCENTAGEM = /\b\d[\d.,]*\s?(?:%|por cento\b)/g;
+const PALAVRA_DE_DESCONTO = /\b(?:cupo(?:m|ns)|descontos?|abatimentos?|promocao|promocional)\b/;
+const PAGAMENTO_LOGO_DEPOIS = /^ ?(?:(?:no|na|pelo|pela|via|em|a) )?(?:cartao|cartoes|pix|boletos?|vista)\b/;
+
 /** A frase do texto (sem acento) em que cai a posição `i`: o fim de frase é `.`, `!` ou `?` seguido de espaço. */
 function fraseEm(t: string, i: number): string {
   const fim = /[.!?](?= |$)/g;
@@ -107,27 +148,108 @@ function semLinks(texto: string): string {
   return t;
 }
 
-/** Os trechos com valor em dinheiro do curso (vazio = nenhum). */
-export function trechosDeDinheiro(body: string): string[] {
+/**
+ * (C01, -c01.8, 2ª revisão) As parcelas que o detector de promessas lê ("parcelado em
+ * 12x", "em 12x", "12x sem juros", "12x no cartão", "12x iguais"), com a posição: o
+ * detector junta as parcelas pelo valor, e o "12x" aprovado de uma frase da base
+ * escondia outro "12x" fora dela. As mesmas formas de `promise/engine.ts`, sobre o texto
+ * sem acento.
+ */
+const PARCELAS_DO_DETECTOR: readonly RegExp[] = [
+  /\b(?:parcel\w*|dividid\w*\s+em|em(?:\s+at[ée])?)\s+(\d{1,3})\s*(?:x\b|vezes\b)/g,
+  /(\d{1,3})\s*(?:x\b|vezes\b)\s+(?:sem\s+juros|de\s*r\$|no\s+(?:cart[ãa]o|boleto)|iguais)/g,
+];
+
+/** Onde acaba o número que termina em `fim`: o valor inteiro, com centavos e milhar ("r$ 5" de "r$ 5,50"). */
+function fimDoValor(t: string, fim: number): number {
+  let f = fim;
+  while (f < t.length && (/\d/.test(t[f]!) || (/[.,]/.test(t[f]!) && /\d/.test(t[f + 1] ?? '')))) f++;
+  return f;
+}
+
+/** Onde começa o número que começa em `ini`. */
+function iniDoValor(t: string, ini: number): number {
+  let i = ini;
+  while (i > 0 && (/\d/.test(t[i - 1]!) || (/[.,]/.test(t[i - 1]!) && /\d/.test(t[i - 2] ?? '')))) i--;
+  return i;
+}
+
+/** A chave de um valor do detector de promessas, para descontar o que veio da base. */
+const chaveDaPromessa = (p: ReturnType<typeof extractPromises>[number]): string =>
+  `${p.kind}:${p.value}:${p.moeda ?? ''}`;
+
+/**
+ * Os trechos com valor em dinheiro do curso (vazio = nenhum). (-c01.8) `afirmaveis`: os
+ * textos afirmáveis da base neste turno; o valor que cai inteiro num trecho aprovado
+ * deles (`trechosAprovados`) não conta. A procura é sempre no texto inteiro.
+ */
+export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = []): string[] {
   const original = semLinks(body);
-  const t = semAcento(original);
+  // (3ª revisão) Com texto afirmável, o texto é lido como o da base: valores em reais na
+  // forma única ("R$5,00" e "5 reais" = "r$ 5,00"; "R$ 5 e 50 centavos" = "r$ 5,50").
+  // Sem ele, nada muda.
+  const t = afirmaveis.length > 0 ? textoParaConferir(body) : semAcento(original);
+  const aprovados = afirmaveis.length > 0 ? trechosAprovados(t, afirmaveis) : [];
+  // (2ª revisão) O VALOR INTEIRO tem de caber no trecho aprovado: "r$ 5" aprovado não cobre
+  // o "r$ 5" de "r$ 5,50" nem o de "r$ 5.999" (a forma da M1 lê só o primeiro dígito).
+  const daBase = (ini: number, fim: number): boolean => {
+    if (aprovados.length === 0) return false;
+    const a0 = iniDoValor(t, ini);
+    const b0 = /\d/.test(t[fim - 1] ?? '') ? fimDoValor(t, fim) : fim;
+    return aprovados.some(([a, b]) => a0 >= a && b0 <= b);
+  };
   const trechos: string[] = [];
-  for (const re of FORMAS_DA_M1) {
+  for (const re of afirmaveis.length > 0 ? [...FORMAS_DA_M1, ...FORMAS_COM_TEXTO_AFIRMAVEL] : FORMAS_DA_M1) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(t)) !== null) {
+      if (daBase(m.index, m.index + m[0].length)) continue;
       if (FATO_DO_CARGO.test(t.slice(0, m.index)) && !PAGAMENTO_OU_CURSO.test(fraseEm(t, m.index))) continue;
       trechos.push(m[0]);
     }
   }
+  PORCENTAGEM.lastIndex = 0;
+  let p: RegExpExecArray | null;
+  while ((p = PORCENTAGEM.exec(t)) !== null) {
+    if (daBase(p.index, p.index + p[0].length)) continue;
+    const depois = t.slice(p.index + p[0].length);
+    if (PALAVRA_DE_DESCONTO.test(fraseEm(t, p.index)) || PAGAMENTO_LOGO_DEPOIS.test(depois)) trechos.push(p[0]);
+  }
   // O que o detector de promessas lê e a lista acima não cobre (euro, "N% off",
   // "desconto de N%", "parcelado em 12x"). Real (R$, reais, real) fica com a lista acima,
   // que lê as mesmas formas e conhece a isenção do salário.
+  // (-c01.8) O detector não dá a posição: ele lê o texto inteiro, e cada preço ou desconto
+  // que ele acha dentro de um trecho aprovado desconta UMA ocorrência igual (o mesmo valor
+  // fora do trecho continua contando: o detector não junta preço nem desconto). As
+  // parcelas, que ele junta pelo valor, vêm de `PARCELAS_DO_DETECTOR`, por posição.
   if (trechos.length === 0) {
-    for (const p of extractPromises(original)) {
-      if (p.kind === 'discount') trechos.push(`${p.value}%`);
-      else if (p.kind === 'installments') trechos.push(`${p.value}x`);
-      else if (p.moeda === 'EUR') trechos.push('€');
+    const daBaseNoDetector = new Map<string, number>();
+    for (const [a, b] of aprovados) {
+      for (const q of extractPromises(t.slice(a, b))) {
+        daBaseNoDetector.set(chaveDaPromessa(q), (daBaseNoDetector.get(chaveDaPromessa(q)) ?? 0) + 1);
+      }
+    }
+    for (const q of extractPromises(aprovados.length > 0 ? t : original)) {
+      if (q.kind === 'installments' && aprovados.length > 0) continue;
+      const restam = daBaseNoDetector.get(chaveDaPromessa(q)) ?? 0;
+      if (restam > 0) {
+        daBaseNoDetector.set(chaveDaPromessa(q), restam - 1);
+        continue;
+      }
+      if (q.kind === 'discount') trechos.push(`${q.value}%`);
+      else if (q.kind === 'installments') trechos.push(`${q.value}x`);
+      else if (q.moeda === 'EUR') trechos.push('€');
+    }
+    if (aprovados.length > 0) {
+      const parcelas = new Set<string>();
+      for (const re of PARCELAS_DO_DETECTOR) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(t)) !== null) {
+          if (!daBase(m.index, m.index + m[0].length)) parcelas.add(`${Number(m[1])}x`);
+        }
+      }
+      trechos.push(...parcelas);
     }
   }
   return trechos;
@@ -136,8 +258,9 @@ export function trechosDeDinheiro(body: string): string[] {
 export const valorEmDinheiroGate: Gate = {
   name: 'valor_em_dinheiro',
   evaluate: (ctx) => {
-    if (ctx.travasDeEnvio?.valorEmDinheiro !== true) return { pass: true };
-    const trechos = trechosDeDinheiro(ctx.body);
+    const trava = ctx.travasDeEnvio?.valorEmDinheiro;
+    if (trava !== true && (typeof trava !== 'object' || trava === null)) return { pass: true };
+    const trechos = trechosDeDinheiro(ctx.body, trava === true ? [] : trava.textosAfirmaveis);
     if (trechos.length === 0) return { pass: true };
     return {
       pass: false,
@@ -156,6 +279,8 @@ export function renderVetoDeDinheiro(trechos: readonly string[]): string {
       .map((t) => `"${t.trim()}"`)
       .join(', ')}). Nesta conversa, valor, parcela, juros e desconto ficam na página de ` +
     'matrícula: mande o link exato da página que a base devolver e diga que lá estão as formas de ' +
-    'pagamento, sem escrever nenhum número de dinheiro.'
+    'pagamento, sem escrever nenhum número de dinheiro. Só sai o número que a base devolveu numa ' +
+    'consulta deste turno, num texto que ela marca como afirmável, copiado na frase inteira, como veio ' +
+    '(consulte de novo, se preciso).'
   );
 }
