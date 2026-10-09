@@ -34,6 +34,12 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * A base externa é a ferramenta de verdade do turno (`crm_query_external_data`,
  * embrulhada pelo turno); só a montagem dela pelo MCP é trocada por uma falsa.
  *
+ * (C01, -c01.8, CRM-085) E o que esta versão muda nas duas travas de texto:
+ *   - o texto afirmável da base (salário, cupom) passa pela `valor_em_dinheiro` com a
+ *     consulta no turno; com a marca falsa, sem consulta ou com o preço junto, barrado;
+ *   - sem o divisor de bolhas, a `texto_longo` veta acima de 700 caracteres uma vez e
+ *     deixa sair na 2ª (estilo: sem caso, sem passagem).
+ *
  * Domínios, links e valores são fictícios, na forma dos reais (regra do C01.md).
  */
 
@@ -585,5 +591,136 @@ describe("(C01, revisão B1) o erro da base externa não libera o que o modelo i
       ["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"],
       ["link_e_valor_de_ferramenta", "link_ou_valor_sem_consulta"],
     ]);
+  });
+});
+
+/** O resultado da consulta à base externa com estas linhas, na forma do MCP (`content` e `structuredContent`). */
+function linhasDaBase(linhas: Array<Record<string, unknown>>) {
+  const r = { tabela: "fatos_do_agente", linhas, linhas_devolvidas: linhas.length };
+  return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
+}
+
+describe("(C01, -c01.8) o texto afirmável da base passa pela `valor_em_dinheiro`; o preço do curso não (CRM-085), no turno inteiro", () => {
+  const SALARIO =
+    "Na Empresa Exemplo, o salário base de nível técnico é de R$ 7.412,35 no regime administrativo.";
+  const CUPOM = "Pra pagamento no cartão ou à vista, consigo um cupom de 5%: é só digitar o código no campo de cupom.";
+
+  async function ligaValorEmDinheiro(): Promise<void> {
+    await pool.query(
+      `insert into org_guardrail_layers (organization_id, layer, enabled) values ($1, $2, true)
+       on conflict (organization_id, layer) do update set enabled = true`,
+      [ORG, INTERRUPTOR_DO_VALOR_EM_DINHEIRO],
+    );
+  }
+
+  it("consulta os fatos e manda o salário e o cupom afirmáveis com o texto da base: sai", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([
+      { chave: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+      { chave: "cupom", texto_para_o_lead: CUPOM, pode_afirmar: true },
+    ]);
+    const corpo = `${SALARIO}\n\n${CUPOM}`;
+    const mod = modelo([{ base: "fatos" }, { envia: corpo }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    expect(await vetosGravados()).toEqual([]);
+  });
+
+  it("o mesmo cupom de linha com a marca de afirmar falsa é barrado", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([{ chave: "cupom", texto_para_o_lead: CUPOM, pode_afirmar: false }]);
+    const mod = modelo([{ base: "fatos" }, { envia: CUPOM }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  it("sem consulta neste turno (o cupom só numa mensagem já enviada), barrado", async () => {
+    await ligaValorEmDinheiro();
+    await pool.query(
+      `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+         type, direction, status, body, sent_via, sent_at)
+       values ($1,$2,$3,$4,$5,'text','outbound','delivered',$6,'ai',$7)`,
+      [randomUUID(), ORG, CONV, SESSION, CONTACT, CUPOM, GANCHO_EM],
+    );
+    const mod = modelo([{ envia: CUPOM }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+
+  it("o preço do curso que veio junto, numa linha de oferta, continua barrado", async () => {
+    await ligaValorEmDinheiro();
+    respostaDaBase = linhasDaBase([
+      { chave: "salario", texto_para_o_lead: SALARIO, pode_afirmar: true },
+      { produto: "Plano anual", preco_total: 1997, pode_afirmar: true, condicao: "Aberta até 31/10." },
+    ]);
+    const mod = modelo([{ base: "fatos e ofertas" }, { envia: `${SALARIO} O plano anual sai por R$ 1.997,00.` }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados).toEqual([]);
+    expect(await vetosGravados()).toEqual([["valor_em_dinheiro", "valor_em_dinheiro"]]);
+  });
+});
+
+describe("(C01, -c01.8) 'até 700 caracteres' com o divisor de bolhas desligado (CRM-085), no turno inteiro", () => {
+  const FRASE = "O curso é online e você estuda no seu horário, com metas para cada dia. ";
+  // Um texto por caso: o mesmo corpo em casos seguidos cairia na trava de repetição em massa.
+  const comTamanho = (n: number, frase = FRASE) => frase.repeat(Math.ceil(n / frase.length)).slice(0, n - 1) + "!";
+
+  async function ligaTextoLongo(ligada: boolean): Promise<void> {
+    await pool.query(
+      ligada
+        ? `update organizations set settings = jsonb_set(settings, '{travas_de_envio,texto_longo}', '{"ligada": true}')
+            where id = $1`
+        : `update organizations set settings = settings #- '{travas_de_envio,texto_longo}' where id = $1`,
+      [ORG],
+    );
+  }
+
+  it("701 caracteres: o 1º veto ensina; a 2ª tentativa sai inteira, sem caso nem passagem", async () => {
+    await ligaTextoLongo(true);
+    try {
+      const longo = comTamanho(701);
+      expect([...longo]).toHaveLength(701);
+      const mod = modelo([{ envia: longo }, { envia: longo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+
+      expect(mod.estado.prompts[1]).toContain("Reescreva em até 700 caracteres, numa mensagem só");
+      expect(enviados.map((e) => e.body)).toEqual([longo]);
+      const vetos = await vetosGravados();
+      expect(vetos.length).toBeGreaterThan(0);
+      expect(vetos.every(([trava]) => trava === "texto_longo")).toBe(true);
+      expect(linhasDoLog.join("")).toContain("trava de estilo no limite");
+      const { rows: casos } = await pool.query("select 1 from agent_cases where organization_id = $1", [ORG]);
+      expect(casos).toEqual([]);
+      const { rows: contato } = await pool.query<{ force_human: boolean }>(
+        "select force_human from contacts where organization_id = $1 and id = $2",
+        [ORG, CONTACT],
+      );
+      expect(contato[0]!.force_human).toBe(false);
+    } finally {
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("700 caracteres saem de primeira", async () => {
+    await ligaTextoLongo(true);
+    try {
+      const corpo = comTamanho(700, "Cada meta mostra o que estudar, qual aula assistir e quais questões resolver hoje. ");
+      const mod = modelo([{ envia: corpo }]);
+      expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+      expect(enviados.map((e) => e.body)).toEqual([corpo]);
+      expect(await vetosGravados()).toEqual([]);
+    } finally {
+      await ligaTextoLongo(false);
+    }
+  });
+
+  it("com a trava desligada, nada muda: 701 caracteres saem de primeira", async () => {
+    const corpo = comTamanho(701, "As aulas ficam gravadas e você assiste quando puder, no celular ou no computador. ");
+    const mod = modelo([{ envia: corpo }]);
+    expect(await rodaTurno(montaHandler(mod.doGenerate))).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([corpo]);
+    expect(await vetosGravados()).toEqual([]);
   });
 });

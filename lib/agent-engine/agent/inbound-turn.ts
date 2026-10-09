@@ -83,6 +83,7 @@ import {
   type LinkEValorArmado,
 } from '../guardrails/link-e-valor-de-ferramenta';
 import { valoresNoResultado } from '../guardrails/valor-de-ferramenta';
+import { textosAfirmaveisNoResultado } from '../guardrails/texto-afirmavel';
 import type { ProviderRegistry } from '../edge/llm/providers';
 import { HANDOFF_REASON_ORCAMENTO } from '../edge/llm/orcamento';
 import { abreAvisoDoEspelhoRecusado, mirrorLeadStageToCrm } from '../edge/crm/move-lead-stage';
@@ -3651,6 +3652,11 @@ async function executarTurnoDoAgente(
     for (const url of urlsNoResultado(resultado)) urlsDaConsulta.add(url);
     valoresNoResultado(resultado, valoresDaConsulta);
   };
+  // (C01, -c01.8) Os textos afirmáveis que a base EXTERNA devolveu neste turno (a linha com
+  // o texto para o cliente e a marca de afirmar verdadeira — `texto-afirmavel.ts`): o
+  // trecho exato deles passa pela trava `valor_em_dinheiro`. Só a base externa, e só a
+  // consulta sem erro: nem a base RAG, nem o histórico, nem as notas.
+  const textosAfirmaveis = new Set<string>();
   // (C01) O turno passou a uma pessoa (fail-safe de vocabulário interno): depois da
   // frase de espera NADA mais sai dele — nem send_message, nem send_template, nem a
   // pergunta do roteiro. Toda ferramenta de envio recusa com o mesmo erro, e o laço
@@ -3842,17 +3848,19 @@ async function executarTurnoDoAgente(
           },
         }
       : {}),
-    ...(travasDaOrg.travas.valorEmDinheiro ? { valorEmDinheiro: true as const } : {}),
+    ...(travasDaOrg.travas.valorEmDinheiro ? { valorEmDinheiro: { textosAfirmaveis: [...textosAfirmaveis] } } : {}),
     ...(travasDaOrg.travas.umaPergunta && !estiloDesarmado('uma_pergunta')
       ? { umaPergunta: true as const }
       : {}),
-    ...(travasDaOrg.travas.textoLongo &&
-    (agentConfig?.splitMessages ?? false) &&
-    !estiloDesarmado('texto_longo')
+    // (C01, -c01.8) Com o divisor desligado, a trava confere o tamanho da mensagem inteira
+    // (`texto_longo.max_caracteres`, padrão 700): uma mensagem por resposta.
+    ...(travasDaOrg.travas.textoLongo && !estiloDesarmado('texto_longo')
       ? {
           textoLongo: {
-            maxChars: agentConfig?.splitMaxChars ?? 600,
             restantes: maxSendsPerTurn - seq,
+            ...((agentConfig?.splitMessages ?? false)
+              ? { maxChars: agentConfig?.splitMaxChars ?? 600 }
+              : { maxChars: travasDaOrg.travas.textoLongoMaxCaracteres, semDivisor: true as const }),
           },
         }
       : {}),
@@ -5708,6 +5716,14 @@ async function executarTurnoDoAgente(
                   // (C01, -c01.7) O erro da consulta não é fonte: repete o que o modelo pediu
                   // (a coluna "salario_6700"). A base externa o devolve sem `isError`.
                   if (!resultadoComErro(resultado)) registrarConsulta(resultado);
+                  // (C01, -c01.8) E os textos afirmáveis, só com a trava de valor ligada.
+                  if (travasDaOrg.travas.valorEmDinheiro && !resultadoComErro(resultado)) {
+                    textosAfirmaveisNoResultado(
+                      resultado,
+                      travasDaOrg.travas.colunasDoTextoAfirmavel,
+                      textosAfirmaveis,
+                    );
+                  }
                   return resultado;
                 }) as typeof mcpTool.execute,
               };

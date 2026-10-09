@@ -82,7 +82,7 @@ const NAO_AVALIAVEIS_SEM_TURNO: ReadonlyArray<{ gate: string; porque: string }> 
   },
   {
     gate: "valor_em_dinheiro",
-    porque: "depende da configuração da organização, que o teste não lê",
+    porque: "depende da configuração da organização, que o teste não lê, e do que a base devolveu neste turno",
   },
   {
     gate: "uma_pergunta",

@@ -290,11 +290,12 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
     expect(CADEIA).toMatch(/textoLongoGate,\s*disclosureGate,/);
   });
 
-  it("o turno lê a configuração uma vez, antes das ferramentas; arma só com o divisor ligado", () => {
+  it("o turno lê a configuração uma vez, antes das ferramentas; com o divisor ligado, conta bolhas", () => {
     expect(TURNO.match(/await lerTravasDeEnvioDaOrg\(pool, tenantId\)/g)).toHaveLength(1);
     expect(TURNO.indexOf("await lerTravasDeEnvioDaOrg(")).toBeLessThan(TURNO.indexOf("send_message: tool({"));
+    // (-c01.8) Sem o divisor, arma também, com o limite da mensagem (`c01-mensagem-longa-sem-divisor`).
     expect(TURNO).toMatch(
-      /travasDaOrg\.travas\.textoLongo &&\s*\(agentConfig\?\.splitMessages \?\? false\) &&\s*!estiloDesarmado\('texto_longo'\)/,
+      /travasDaOrg\.travas\.textoLongo && !estiloDesarmado\('texto_longo'\)[\s\S]{0,120}\(agentConfig\?\.splitMessages \?\? false\)\s*\?\s*\{ maxChars: agentConfig\?\.splitMaxChars \?\? 600 \}/,
     );
     expect(TURNO).toMatch(/restantes: maxSendsPerTurn - seq,/);
   });

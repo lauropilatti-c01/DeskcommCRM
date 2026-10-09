@@ -33,6 +33,20 @@
  * ninguém a ligava sem SQL). A linha de `org_guardrail_layers`, se existe, manda — inclusive
  * para desligar e inclusive com o JSON inválido; sem linha, vale o `ligada` do JSON, como
  * antes. As chaves e a lista ficam em `interruptores-de-trava.ts`.
+ *
+ * (C01, -c01.8, CRM-085 da C01) Duas chaves novas, opcionais:
+ *
+ *   { "travas_de_envio": {
+ *       "texto_longo":       { "ligada": true, "max_caracteres": 700 },
+ *       "valor_em_dinheiro": { "ligada": true,
+ *                              "texto_afirmavel": { "coluna_texto": "texto_para_o_lead",
+ *                                                   "coluna_pode_afirmar": "pode_afirmar" } } } }
+ *
+ * - `texto_longo.max_caracteres`: o limite da mensagem quando o divisor de bolhas está
+ *   desligado (uma mensagem por resposta); padrão `MAX_CARACTERES_SEM_DIVISOR`. Com o
+ *   divisor ligado, a trava continua contando bolhas.
+ * - `valor_em_dinheiro.texto_afirmavel`: as colunas da linha afirmável da base externa
+ *   (ver `texto-afirmavel.ts`); padrão `COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL`.
  */
 import { z } from 'zod';
 
@@ -40,15 +54,27 @@ import type { Queryable } from '../queue/queue';
 import { chaveDoInterruptor } from './interruptores-de-trava';
 import { INTERRUPTOR_DA_TRAVA, type LinkEValorArmado } from './link-e-valor-de-ferramenta';
 import { normalizarDominio, normalizarLink, type LinkPermitidoArmado } from './link-permitido';
+import { COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL, type ColunasDoTextoAfirmavel } from './texto-afirmavel';
+
+/** (C01, -c01.8) O limite da mensagem sem o divisor de bolhas (CRM-085: até 700 caracteres). */
+export const MAX_CARACTERES_SEM_DIVISOR = 700;
 
 const travaSimples = z.object({ ligada: z.boolean() }).passthrough();
 
 const travasDeEnvioSchema = z
   .object({
-    texto_longo: travaSimples.optional(),
+    // (C01, -c01.8) `max_caracteres`: o limite da mensagem com o divisor desligado.
+    texto_longo: travaSimples.extend({ max_caracteres: z.number().int().positive().optional() }).optional(),
     // `dominios`: os domínios cujo link sai sempre (o domínio e os subdomínios dele).
     link_permitido: travaSimples.extend({ dominios: z.array(z.string()).optional() }).optional(),
-    valor_em_dinheiro: travaSimples.optional(),
+    // (C01, -c01.8) `texto_afirmavel`: as colunas da linha afirmável da base externa.
+    valor_em_dinheiro: travaSimples
+      .extend({
+        texto_afirmavel: z
+          .object({ coluna_texto: z.string().min(1), coluna_pode_afirmar: z.string().min(1) })
+          .optional(),
+      })
+      .optional(),
     uma_pergunta: travaSimples.optional(),
     // (C01, -c01.7) Só as URLs fixas: o interruptor fica em `org_guardrail_layers`.
     link_e_valor_de_ferramenta: z.object({ urls: z.array(z.string()).optional() }).passthrough().optional(),
@@ -58,10 +84,14 @@ const travasDeEnvioSchema = z
 /** O que a organização ligou. */
 export interface TravasDeEnvioDaOrg {
   textoLongo: boolean;
+  /** (C01, -c01.8) O limite da mensagem quando o divisor de bolhas está desligado. */
+  textoLongoMaxCaracteres: number;
   linkPermitido: boolean;
   /** Os domínios liberados da trava de link, já normalizados (`exemplo.com.br`). */
   dominiosLiberados: readonly string[];
   valorEmDinheiro: boolean;
+  /** (C01, -c01.8) As colunas da linha afirmável da base externa. */
+  colunasDoTextoAfirmavel: ColunasDoTextoAfirmavel;
   umaPergunta: boolean;
   /** (C01, -c01.7) Link e valor de ferramenta: o interruptor da tela. */
   linkEValorDeFerramenta: boolean;
@@ -71,9 +101,11 @@ export interface TravasDeEnvioDaOrg {
 
 export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
   textoLongo: false,
+  textoLongoMaxCaracteres: MAX_CARACTERES_SEM_DIVISOR,
   linkPermitido: false,
   dominiosLiberados: [],
   valorEmDinheiro: false,
+  colunasDoTextoAfirmavel: COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL,
   umaPergunta: false,
   linkEValorDeFerramenta: false,
   urlsFixas: [],
@@ -86,13 +118,19 @@ export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
 export interface TravasArmadas {
   /**
    * Texto longo: o teto de caracteres por bolha do divisor (`split_max_chars`) e
-   * quantas mensagens físicas ainda cabem no turno. Só se arma com o divisor ligado.
+   * quantas mensagens físicas ainda cabem no turno. (C01, -c01.8) Com o divisor
+   * desligado (`semDivisor`), `maxChars` é o limite da mensagem inteira
+   * (`texto_longo.max_caracteres`).
    */
-  textoLongo?: { maxChars: number; restantes: number };
+  textoLongo?: { maxChars: number; restantes: number; semDivisor?: true };
   /** Link permitido: os links e os domínios liberados neste momento do turno. */
   linkPermitido?: LinkPermitidoArmado;
-  /** Valor em dinheiro: só liga ou desliga; não depende do turno. */
-  valorEmDinheiro?: true;
+  /**
+   * Valor em dinheiro. `true` = sem texto afirmável; (C01, -c01.8) com
+   * `textosAfirmaveis`, os textos afirmáveis que a base externa devolveu neste turno
+   * (o trecho exato deles passa).
+   */
+  valorEmDinheiro?: true | { textosAfirmaveis: readonly string[] };
   /** Uma pergunta por mensagem: só liga ou desliga (some no turno ao chegar no limite de vetos). */
   umaPergunta?: true;
   /** (C01, -c01.7) Link e valor de ferramenta: os links e os valores liberados neste momento do turno. */
@@ -129,11 +167,18 @@ export function interpretarTravasDeEnvio(
   return {
     travas: {
       textoLongo: lido.data.texto_longo?.ligada ?? false,
+      textoLongoMaxCaracteres: lido.data.texto_longo?.max_caracteres ?? MAX_CARACTERES_SEM_DIVISOR,
       linkPermitido: lido.data.link_permitido?.ligada ?? false,
       dominiosLiberados: (lido.data.link_permitido?.dominios ?? [])
         .map(normalizarDominio)
         .filter((d) => d.length > 0),
       valorEmDinheiro: valorEmDinheiroDaTela ?? lido.data.valor_em_dinheiro?.ligada ?? false,
+      colunasDoTextoAfirmavel: lido.data.valor_em_dinheiro?.texto_afirmavel
+        ? {
+            texto: lido.data.valor_em_dinheiro.texto_afirmavel.coluna_texto,
+            podeAfirmar: lido.data.valor_em_dinheiro.texto_afirmavel.coluna_pode_afirmar,
+          }
+        : COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL,
       umaPergunta: lido.data.uma_pergunta?.ligada ?? false,
       linkEValorDeFerramenta,
       urlsFixas: (lido.data.link_e_valor_de_ferramenta?.urls ?? [])

@@ -13,15 +13,33 @@
  * Armada só pelo `send_message`, com a trava ligada em `organizations.settings` e o
  * divisor ligado (`travas-de-envio.ts`). Sem mensagem restante no turno não julga:
  * o teto de envios já recusa por outro caminho.
+ *
+ * (C01, -c01.8, CRM-085 da C01: "1 bolha por resposta, até 700 caracteres") Com o divisor
+ * DESLIGADO a trava também age (`semDivisor`): a mensagem que passa do limite
+ * (`texto_longo.max_caracteres`, padrão 700) volta para ser reescrita numa mensagem só.
+ * Conta caractere como o cliente vê (um emoji é um), com o link inteiro. A régua é a
+ * mesma: estilo, no limite de vetos a mensagem sai inteira — nunca cortada, e o link
+ * nunca sai partido.
  */
 import { splitIntoBubbles } from '../agent/split-message';
-import type { Gate } from './before-send';
+import type { Gate, GateVerdict } from './before-send';
 
 export const textoLongoGate: Gate = {
   name: 'texto_longo',
-  evaluate: (ctx) => {
+  evaluate: (ctx): GateVerdict => {
     const trava = ctx.travasDeEnvio?.textoLongo;
     if (trava === undefined || trava.restantes < 1) return { pass: true };
+    if (trava.semDivisor === true) {
+      const caracteres = [...ctx.body.trim()].length;
+      if (caracteres <= trava.maxChars) return { pass: true };
+      return {
+        pass: false,
+        code: 'texto_longo',
+        reason: renderVetoDeMensagemLonga(caracteres, trava.maxChars),
+        // Só números: nunca o corpo (sem PII no trace).
+        detail: { caracteres, max_chars: trava.maxChars },
+      };
+    }
     const bolhas = splitIntoBubbles(ctx.body, trava.maxChars).length;
     if (bolhas <= trava.restantes) return { pass: true };
     return {
@@ -41,6 +59,15 @@ export function renderVetoDeTextoLongo(bolhas: number, restantes: number, maxCha
     `A mensagem NÃO foi enviada: ela viraria ${bolhas} mensagens no WhatsApp e neste turno só cabem ` +
     `${cabem} de até ${maxChars} caracteres. Reescreva mais curta, em no máximo ` +
     `${restantes === 1 ? 'um parágrafo curto' : `${restantes} parágrafos curtos`}, ` +
+    'só com o essencial e sem mudar nenhum link.'
+  );
+}
+
+/** (C01, -c01.8) O erro de ensino sem o divisor: quanto passou e o que fazer. */
+export function renderVetoDeMensagemLonga(caracteres: number, maxChars: number): string {
+  return (
+    `A mensagem NÃO foi enviada: ela tem ${caracteres} caracteres, e cada resposta sai numa mensagem só ` +
+    `de até ${maxChars} caracteres. Reescreva em até ${maxChars} caracteres, numa mensagem só, ` +
     'só com o essencial e sem mudar nenhum link.'
   );
 }

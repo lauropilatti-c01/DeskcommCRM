@@ -190,8 +190,9 @@ describe("(C01) a configuração e a ligação no turno e na cadeia", () => {
 
   it("é trava de conteúdo, e o turno a arma só com ela ligada", () => {
     expect(TURNO).toMatch(/valor_em_dinheiro: 'valor em dinheiro na conversa',/);
+    // (-c01.8) Armada com os textos afirmáveis da base neste turno (`c01-texto-afirmavel-da-base-passa`).
     expect(TURNO).toMatch(
-      /\.\.\.\(travasDaOrg\.travas\.valorEmDinheiro \? \{ valorEmDinheiro: true as const \} : \{\}\),/,
+      /\.\.\.\(travasDaOrg\.travas\.valorEmDinheiro \? \{ valorEmDinheiro: \{ textosAfirmaveis: \[\.\.\.textosAfirmaveis\] \} \} : \{\}\),/,
     );
   });
 });

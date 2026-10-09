@@ -14,8 +14,8 @@
  *   "no Pix", "à vista", "entrada de", "em até 18x", "uns 3 mil", "juros".
  *
  * Não pega: data, "2 fases", "60 metas", "67 dias", "12 meses", "6/12", "14x14" (escala),
- * vaga, "100% online", "30% das vagas", "3 mil questões" — o "%" só conta com desconto
- * ou "off"; o "mil" não conta antes de questões, inscritos, vagas e afins. O salário e
+ * vaga, "100% online", "30% das vagas", "3 mil questões" — o "%" só conta com desconto,
+ * "off", cupom ou a forma de pagamento logo depois (-c01.8); o "mil" não conta antes de questões, inscritos, vagas e afins. O salário e
  * os benefícios do cargo (fato da base que a régua isenta) também passam: o valor logo
  * depois de "salário", "remuneração", "benefício"… na mesma frase não conta — só ele
  * (rodada 2): a isenção acaba no primeiro número depois da palavra e em qualquer palavra
@@ -23,12 +23,19 @@
  * expressão do cargo ("salário inicial é de R$ …", "piso salarial de …"), nunca numa
  * frase com palavra de pagamento ou do curso ("Pix", "à vista", "boleto", "plano"…).
  *
+ * (C01, -c01.8, CRM-085 da C01) O texto que a base manda dizer passa: o trecho exato de um
+ * texto afirmável que uma consulta à base externa devolveu NESTE turno (o salário com o
+ * valor exato, o cupom de desconto aprovado, "mais de 2 mil" da apresentação) é apagado
+ * antes da procura — ver `texto-afirmavel.ts`. Oferta, link, linha com a marca falsa,
+ * histórico e notas não liberam nada: o preço do curso continua barrado.
+ *
  * Trava de CONTEÚDO: contador e fail-safe da promessa semântica
  * (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE` em `inbound-turn.ts`).
  */
 import type { Gate } from './before-send';
 import { linksNoTexto } from './link-permitido';
 import { extractPromises } from './promise/engine';
+import { semOsTrechosDaBase } from './texto-afirmavel';
 
 /** As formas da M1 que `extractPromises` não lê, sobre o texto em minúsculas e sem acento. */
 const FORMAS_DA_M1: readonly RegExp[] = [
@@ -80,6 +87,17 @@ const FATO_DO_CARGO = new RegExp(
 const PAGAMENTO_OU_CURSO =
   /\b(?:pix|a vista|parcel\w*|boletos?|cartao|cartoes|entrada|descontos?|cursos?|matriculas?|planos?|custa|custam|custo|investimentos?|valor (?:do|da|dos|das)|mensalidades?|precos?|promocao|ofertas?|inscricao|pag(?:a|ar|am|amos|ando|ou|o|amento|amentos))\b/;
 
+/**
+ * (C01, -c01.8) A porcentagem de desconto que o detector de promessas não lê ("cupom de
+ * 5%", "10% no cartão", "5% à vista"): ela só conta numa frase com palavra de desconto ou
+ * logo antes da forma de pagamento. Antes passava, e o cupom que a base ainda não libera
+ * (linha com a marca de afirmar falsa) saía do mesmo jeito que o liberado. "100% online",
+ * "30% das vagas" e "1% dos inscritos" continuam fora.
+ */
+const PORCENTAGEM = /\b\d[\d.,]*\s?(?:%|por cento\b)/g;
+const PALAVRA_DE_DESCONTO = /\b(?:cupo(?:m|ns)|descontos?|abatimentos?|promocao|promocional)\b/;
+const PAGAMENTO_LOGO_DEPOIS = /^ ?(?:(?:no|na|pelo|pela|via|em|a) )?(?:cartao|cartoes|pix|boletos?|vista)\b/;
+
 /** A frase do texto (sem acento) em que cai a posição `i`: o fim de frase é `.`, `!` ou `?` seguido de espaço. */
 function fraseEm(t: string, i: number): string {
   const fim = /[.!?](?= |$)/g;
@@ -107,10 +125,14 @@ function semLinks(texto: string): string {
   return t;
 }
 
-/** Os trechos com valor em dinheiro do curso (vazio = nenhum). */
-export function trechosDeDinheiro(body: string): string[] {
+/**
+ * Os trechos com valor em dinheiro do curso (vazio = nenhum). (-c01.8) `afirmaveis`: os
+ * textos afirmáveis da base neste turno; o trecho exato deles não conta.
+ */
+export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = []): string[] {
   const original = semLinks(body);
-  const t = semAcento(original);
+  const daBase = semOsTrechosDaBase(semAcento(original), afirmaveis);
+  const t = daBase.texto;
   const trechos: string[] = [];
   for (const re of FORMAS_DA_M1) {
     re.lastIndex = 0;
@@ -120,11 +142,19 @@ export function trechosDeDinheiro(body: string): string[] {
       trechos.push(m[0]);
     }
   }
+  PORCENTAGEM.lastIndex = 0;
+  let p: RegExpExecArray | null;
+  while ((p = PORCENTAGEM.exec(t)) !== null) {
+    const depois = t.slice(p.index + p[0].length);
+    if (PALAVRA_DE_DESCONTO.test(fraseEm(t, p.index)) || PAGAMENTO_LOGO_DEPOIS.test(depois)) trechos.push(p[0]);
+  }
   // O que o detector de promessas lê e a lista acima não cobre (euro, "N% off",
   // "desconto de N%", "parcelado em 12x"). Real (R$, reais, real) fica com a lista acima,
   // que lê as mesmas formas e conhece a isenção do salário.
+  // (-c01.8) Com trecho da base apagado, o detector lê o texto apagado (ele não depende de
+  // acento nem de maiúscula); sem, o original, como antes.
   if (trechos.length === 0) {
-    for (const p of extractPromises(original)) {
+    for (const p of extractPromises(daBase.apagou ? t : original)) {
       if (p.kind === 'discount') trechos.push(`${p.value}%`);
       else if (p.kind === 'installments') trechos.push(`${p.value}x`);
       else if (p.moeda === 'EUR') trechos.push('€');
@@ -136,8 +166,9 @@ export function trechosDeDinheiro(body: string): string[] {
 export const valorEmDinheiroGate: Gate = {
   name: 'valor_em_dinheiro',
   evaluate: (ctx) => {
-    if (ctx.travasDeEnvio?.valorEmDinheiro !== true) return { pass: true };
-    const trechos = trechosDeDinheiro(ctx.body);
+    const trava = ctx.travasDeEnvio?.valorEmDinheiro;
+    if (trava !== true && (typeof trava !== 'object' || trava === null)) return { pass: true };
+    const trechos = trechosDeDinheiro(ctx.body, trava === true ? [] : trava.textosAfirmaveis);
     if (trechos.length === 0) return { pass: true };
     return {
       pass: false,
@@ -156,6 +187,8 @@ export function renderVetoDeDinheiro(trechos: readonly string[]): string {
       .map((t) => `"${t.trim()}"`)
       .join(', ')}). Nesta conversa, valor, parcela, juros e desconto ficam na página de ` +
     'matrícula: mande o link exato da página que a base devolver e diga que lá estão as formas de ' +
-    'pagamento, sem escrever nenhum número de dinheiro.'
+    'pagamento, sem escrever nenhum número de dinheiro. Só sai o número que a base devolveu numa ' +
+    'consulta deste turno, num texto que ela marca como afirmável, copiado com as mesmas palavras em ' +
+    'volta (consulte de novo, se preciso).'
   );
 }
