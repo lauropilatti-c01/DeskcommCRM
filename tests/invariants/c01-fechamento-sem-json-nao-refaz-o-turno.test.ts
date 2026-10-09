@@ -25,8 +25,9 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * O que se prova, do jeito que o cliente sentiria:
  *   - fechamento vazio duas vezes depois da resposta: UMA mensagem ao lead, job
  *     concluído na 1ª tentativa, checkpoint mínimo gravado (o do turno anterior, com a
- *     promessa sintética e a próxima ação da equipe) e, sem Operador (papel desligado,
- *     como aqui), o aviso na Central. Sem a correção: duas mensagens;
+ *     promessa sintética e a próxima ação de retomar pela última resposta) e o aviso na
+ *     Central, com o Operador desligado E ligado (ligado, qualquer ferramenta dele conta
+ *     como dono e dispensaria o aviso dele). Sem a correção: duas mensagens;
  *   - fechamento vazio e depois JSON: uma mensagem, o checkpoint do modelo;
  *   - turno que não falou com o lead: o job volta à fila como antes.
  */
@@ -53,6 +54,8 @@ const CONV = "a3a3a3a3-0000-4000-8000-000000000004";
 const MSG = "a3a3a3a3-0000-4000-8000-000000000005";
 const AGENTE = "a3a3a3a3-0000-4000-8000-000000000006";
 const VERSAO = "a3a3a3a3-0000-4000-8000-000000000007";
+/** A mesma configuração com o papel Operador ligado (versão publicada não se altera). */
+const VERSAO_COM_OPERADOR = "a3a3a3a3-0000-4000-8000-000000000008";
 /** O instante do turno (dentro da janela horária do anti-ban) e o da mensagem do cliente, 5 min antes. */
 const AGORA = new Date("2026-07-30T15:00:00Z");
 const MENSAGEM_DO_CLIENTE_EM = "2026-07-30T14:55:00Z";
@@ -237,10 +240,20 @@ async function rodaPelaFila(
   return { jobId: job.id, erros, status: rows[0]!.status, attempts: rows[0]!.attempts };
 }
 
+/** O aviso que o checkpoint mínimo abre na Central. */
+const AVISO_DO_MINIMO = {
+  title: "O registro de um atendimento falhou depois da resposta ao cliente",
+  body:
+    "A resposta ao cliente saiu, mas o registro do turno falhou. Confira na conversa se ela " +
+    "prometeu retorno, horário ou verificação e se já existe retorno agendado antes de agir.",
+  severity: "warn",
+  status: "open",
+};
+
 /** Os avisos de promessa abertos na Central para a conversa. */
 async function avisosDaConversa() {
-  const { rows } = await pool.query<{ title: string; severity: string; status: string }>(
-    `select title, severity, status from agent_inbox_items
+  const { rows } = await pool.query<{ title: string; body: string; severity: string; status: string }>(
+    `select title, body, severity, status from agent_inbox_items
       where organization_id = $1 and kind = 'promise_unfulfilled'
         and ref_kind = 'conversation' and ref_id = $2`,
     [ORG, CONV],
@@ -315,6 +328,14 @@ beforeAll(async () => {
      on conflict (id) do nothing`,
     [VERSAO, ORG, AGENTE, SESSION],
   );
+  await pool.query(
+    `insert into ai_agent_versions (id, organization_id, agent_id, version_number, system_prompt,
+                                    provider, model, channel_session_id, status, published_at, max_steps,
+                                    operator_enabled)
+     values ($1,$2,$3,2,'Você é um atendente de teste.','anthropic','claude-sonnet-4-6',$4,'published',now(),8,true)
+     on conflict (id) do nothing`,
+    [VERSAO_COM_OPERADOR, ORG, AGENTE, SESSION],
+  );
   await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO, AGENTE]);
   await pool.query(
     `with v as (
@@ -371,13 +392,33 @@ describe("(C01) fechamento sem JSON depois da resposta ao lead: o turno não é 
     ]);
     // O agente daqui tem o Operador desligado: ninguém apuraria a promessa, e o aviso
     // vai direto à Central, na conversa.
-    expect(await avisosDaConversa()).toEqual([
-      {
-        title: "O registro de um atendimento falhou depois da resposta ao cliente",
-        severity: "warn",
-        status: "open",
-      },
-    ]);
+    const avisos = await avisosDaConversa();
+    expect(avisos).toEqual([AVISO_DO_MINIMO]);
+    // O aviso não afirma o que ninguém verificou (o retorno pode ter sido agendado).
+    expect(avisos[0]!.body).not.toContain("nada foi agendado");
+    expect(avisos[0]!.body).not.toContain("cumpra você mesmo");
+  });
+
+  it("vazio duas vezes com o Operador ligado: ele é enfileirado e o aviso abre do mesmo jeito", async () => {
+    await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO_COM_OPERADOR, AGENTE]);
+    try {
+      const mod = modelo("responde", ["", ""]);
+      const r = await rodaPelaFila(montaHandler(mod.doGenerate), 3, 3);
+
+      expect(enviados).toEqual([resposta(0)]);
+      expect(r.status).toBe("done");
+      expect(r.attempts).toBe(1);
+      const operador = await pool.query(
+        "select 1 from job_queue where organization_id = $1 and kind = 'operator_turn' and source_event_id = $2",
+        [ORG, r.jobId],
+      );
+      expect(operador.rowCount).toBe(1);
+      // Antes do ajuste, com o Operador enfileirado o turno não avisava: a apuração dele
+      // decidia, e qualquer ferramenta chamada (até uma consulta) contava como dono.
+      expect(await avisosDaConversa()).toEqual([AVISO_DO_MINIMO]);
+    } finally {
+      await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO, AGENTE]);
+    }
   });
 
   it("vazio e depois JSON: uma mensagem só, o checkpoint do modelo", async () => {

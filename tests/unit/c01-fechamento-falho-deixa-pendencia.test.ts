@@ -10,15 +10,20 @@
  * genérico, sem a promessa, e o job terminava verde sem agendamento nem aviso.
  *
  * O conserto, pelo caminho que o Operador já percorre: o mínimo leva uma promessa
- * sintética ("conferir na conversa se ela prometeu…") e uma próxima ação com a equipe
- * como responsável. Aqui, o mínimo é lido como o Operador o leria do banco, e a
- * apuração é chamada de verdade (com as buscas de retorno e de caso falsas). O turno
- * inteiro contra Postgres, com o aviso na Central quando não há Operador, está em
- * `tests/invariants/c01-fechamento-sem-json-nao-refaz-o-turno`.
+ * sintética ("conferir na conversa se ela prometeu…") e uma próxima ação que manda
+ * retomar pela última resposta. Aqui, o mínimo é lido como o Operador o leria do banco,
+ * e a apuração é chamada de verdade (com as buscas de retorno e de caso falsas).
+ *
+ * Segunda revisão (08/10/2026): a próxima ação vai ao prompt do próximo Conversador
+ * (`ritual.ts`), e a primeira versão dizia "Equipe: … o fechamento daquele turno
+ * falhou" — texto interno que ele podia repetir ao lead. Aqui se confere o que ele lê.
+ * O aviso na Central, que abre sempre no mínimo (com o Operador ligado ou não), está no
+ * turno inteiro contra Postgres: `tests/invariants/c01-fechamento-sem-json-nao-refaz-o-turno`.
  */
 import { describe, expect, it, vi } from "vitest";
 
 import { checkpointContentSchema, conteudoDoFechamento } from "@/lib/agent-engine/agent/abertura/checkpoint";
+import { ritualBlocks } from "@/lib/agent-engine/agent/abertura/ritual";
 import { promessasEmAberto, renderDeclaracaoParaHumano } from "@/lib/agent-engine/agent/declaracao";
 import {
   apurarComRetorno,
@@ -76,11 +81,35 @@ describe("(C01) fechamento vazio duas vezes depois da resposta: a pendência nã
     expect(content.rolling_summary).toBe("o lead quer saber quando abre a próxima turma");
   });
 
-  it("a próxima ação não é nula, nem a do anterior: é a conferência, com a equipe como responsável", async () => {
+  it("a próxima ação não é nula, nem a do anterior: retomar pela última resposta, sem nada interno", async () => {
     const content = await fechamentoQueFalhou();
     expect(content.next_action).not.toBeNull();
     expect(content.next_action).not.toBe(ANTERIOR.next_action);
-    expect(content.next_action).toMatch(/Equipe: conferir na conversa/);
+    expect(content.next_action).toMatch(/última resposta enviada/);
+    // Vai ao prompt do Conversador: nada que ele possa repetir ao lead.
+    expect(content.next_action).not.toMatch(/equipe/i);
+    expect(content.next_action).not.toMatch(/falh/i);
+    expect(content.next_action).not.toContain("(C01)");
+  });
+
+  it("o que o próximo Conversador lê do mínimo: a próxima ação, e nunca a promessa sintética", async () => {
+    const content = await fechamentoQueFalhou();
+    // O checkpoint como o banco o devolve (`latestCheckpoint`, `select *`).
+    const previous = { ...content, declaracao: content.declaracao ?? null };
+    const prompt = ritualBlocks(
+      previous as never,
+      null,
+      { contact: { name: "Cliente", email: "cliente@exemplo.com" } } as never,
+      "sem notas",
+      false,
+    ).join("\n");
+    // Controle positivo: o instrumento enxerga o bloco do checkpoint.
+    expect(prompt).toContain("Checkpoint anterior");
+    expect(prompt).toContain(content.next_action!);
+    expect(prompt).not.toContain(content.declaracao!.promessas[0]!.o_que);
+    expect(prompt).not.toMatch(/equipe/i);
+    expect(prompt).not.toMatch(/falh/i);
+    expect(prompt).not.toContain("(C01)");
   });
 
   it("o Operador lê a promessa, roda com ela no briefing e a apuração de responsável acontece", async () => {

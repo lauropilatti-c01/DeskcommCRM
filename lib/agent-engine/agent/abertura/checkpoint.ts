@@ -222,11 +222,10 @@ export function parseCheckpointText(text: string): CheckpointContent {
  * 10h") se perdeu com o fechamento. Por isso a declaração não fica ausente — com
  * ela nula, `promessasEmAberto` dá zero e a apuração de responsável do Operador
  * nem roda — e leva UMA promessa sintética (`PROMESSA_DO_FECHAMENTO_FALHO`), que
- * faz o Operador apurar e, sem dono, abrir a promessa sem responsável na Central.
- * A `next_action` do anterior não volta (já foi cumprida por este, e repeti-la no
- * topo do próximo prompt é o defeito do #510): no lugar dela, a conferência, com a
- * equipe como responsável (`PROXIMA_ACAO_DO_FECHAMENTO_FALHO`). Sem Operador, o
- * aviso vai direto à Central (`inbound-turn.ts`).
+ * faz o Operador apurar. A `next_action` do anterior não volta (já foi cumprida
+ * por este, e repeti-la no topo do próximo prompt é o defeito do #510): no lugar
+ * dela, retomar pela última resposta (`PROXIMA_ACAO_DO_FECHAMENTO_FALHO`). O aviso
+ * na Central abre sempre que o mínimo é gravado (`inbound-turn.ts`).
  *
  * Sem resposta ao lead, nada muda: o erro sobe na primeira chamada e a fila refaz o
  * turno, que ainda não falou. Só a falha do PARSE entra aqui; a chamada que lança
@@ -264,11 +263,14 @@ export const PROMESSA_DO_FECHAMENTO_FALHO =
   '(C01) o fechamento do turno falhou depois da resposta ao lead: conferir na conversa se ela prometeu retorno, horário ou verificação';
 
 /**
- * (C01) A próxima ação do checkpoint mínimo, com o responsável na frente. É lida
- * pelo próximo turno (bloco "Checkpoint anterior") e por quem abre o caso.
+ * (C01) A próxima ação do checkpoint mínimo. Vai ao prompt do próximo Conversador
+ * (blocos "Checkpoint anterior" e "Estado do funil", `ritual.ts`) e à retomada da
+ * escalação, que a copia: por isso fala só da conversa, sem nada interno (nem
+ * equipe, nem falha, nem marca nossa) que ele possa repetir ao lead. Quem cuida da
+ * falha é o aviso na Central.
  */
 export const PROXIMA_ACAO_DO_FECHAMENTO_FALHO =
-  '(C01) Equipe: conferir na conversa se a última resposta ao lead prometeu retorno, horário ou verificação e garantir que alguém cumpra (o fechamento daquele turno falhou)';
+  'Retomar pela última resposta enviada e cumprir o que ela combinou com a pessoa (retorno, horário ou verificação).';
 
 /** (C01) O checkpoint mínimo herdado do anterior: cada campo só se validar. */
 function checkpointMinimo(anterior: unknown): CheckpointContent {

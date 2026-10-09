@@ -6313,6 +6313,42 @@ async function executarTurnoDoAgente(
     const checkpointAnterior = await latestCheckpoint(pool, tenantId, leadId);
     await insertCheckpoint(pool, { tenantId, leadId, jobId: liveJob().id, content });
 
+    // (C01) Checkpoint mínimo: a resposta ao lead saiu e o registro do turno não. O
+    // aviso abre SEMPRE, com o Operador ligado ou não: desligado, ninguém apura a
+    // promessa sintética (`PROMESSA_DO_FECHAMENTO_FALHO`); ligado, qualquer
+    // ferramenta que ele chame, até uma consulta, conta como dono na apuração e
+    // dispensaria o aviso. O texto não afirma o que ninguém verificou: o Conversador
+    // pode ter agendado o retorno antes de responder. Gravado antes do Operador, é o
+    // aviso aberto da conversa: o do catch do enfileiramento e o do Operador, mesmo
+    // kind e mesma ref, não duplicam (`kind_e_ref`).
+    if (fechamento.minimo) {
+      try {
+        await insertInboxItem(
+          pool,
+          tenantId,
+          {
+            kind: 'promise_unfulfilled',
+            severity: 'warn',
+            title: 'O registro de um atendimento falhou depois da resposta ao cliente',
+            body:
+              'A resposta ao cliente saiu, mas o registro do turno falhou. Confira na conversa ' +
+              'se ela prometeu retorno, horário ou verificação e se já existe retorno agendado ' +
+              'antes de agir.',
+            refKind: 'conversation',
+            refId: input.conversationId,
+          },
+          'kind_e_ref',
+        );
+      } catch (erroDoAviso) {
+        runLog.error('aviso do fechamento sem checkpoint não foi gravado', {
+          error: (erroDoAviso instanceof Error
+            ? erroDoAviso.message
+            : String(erroDoAviso)
+          ).slice(0, 120),
+        });
+      }
+    }
+
     // ── O TURNO DO OPERADOR (spec 16 §3.2) ─────────────────────────────────────
     //
     // Enfileirado AQUI, pelo RUNTIME, logo depois de o checkpoint existir — nunca
@@ -6391,41 +6427,6 @@ async function executarTurnoDoAgente(
             });
           }
         }
-      }
-    }
-
-    // (C01) Checkpoint mínimo sem Operador: ninguém apura a promessa sintética
-    // (`PROMESSA_DO_FECHAMENTO_FALHO`), e o que a resposta prometeu ao lead
-    // morreria sem dono. O aviso vai direto à Central, como no catch acima. Só no
-    // mínimo: promessa declarada com o papel desligado segue sem aviso, como antes.
-    // (Com o Operador enfileirado, quem apura é ele; se o enfileiramento falhou, o
-    // catch acima já avisou pela promessa sintética.)
-    if (fechamento.minimo && !disparo.enfileira) {
-      try {
-        await insertInboxItem(
-          pool,
-          tenantId,
-          {
-            kind: 'promise_unfulfilled',
-            severity: 'warn',
-            title: 'O registro de um atendimento falhou depois da resposta ao cliente',
-            body:
-              'O assistente respondeu a esta pessoa, mas o fechamento do turno, que registra ' +
-              'o que foi combinado, falhou duas vezes. Se ele prometeu retorno, horário ou ' +
-              'verificação nessa resposta, nada foi agendado. Abra a conversa, confira e ' +
-              'cumpra você mesmo.',
-            refKind: 'conversation',
-            refId: input.conversationId,
-          },
-          'kind_e_ref',
-        );
-      } catch (erroDoAviso) {
-        runLog.error('aviso do fechamento sem checkpoint não foi gravado', {
-          error: (erroDoAviso instanceof Error
-            ? erroDoAviso.message
-            : String(erroDoAviso)
-          ).slice(0, 120),
-        });
       }
     }
 
