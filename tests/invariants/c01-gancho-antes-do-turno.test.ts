@@ -1572,6 +1572,29 @@ describe("c01 — recibo opaco do piloto recupera no mesmo job, sem IA às cegas
     expect(postsNaGraph).toHaveLength(1);
   });
 
+  it("primeira montagem sem card recupera identificação do recibo antes de responder", async () => {
+    const id = await respostaDeFormulario({resposta:OPACO});
+    const job = await enfileira(id);
+    respostaDoGancho = async () => json(RECUPERADO);
+    const mod = modelo();
+    const h = montaHandler(mod.doGenerate,true);
+    const quebrado = new Proxy(pool, {get(target,key) {
+      if (key === "query") return async (sql: string,...args: unknown[]) => {
+        if (sql.includes("from crm_leads l")) throw new Error("primeira leitura fictícia indisponível");
+        return (target.query as (...a: unknown[]) => Promise<unknown>).call(target,sql,...args);
+      };
+      const value = Reflect.get(target,key);
+      return typeof value === "function" ? value.bind(target) : value;
+    }});
+    expect((await executa(h,job,quebrado))?.name).toBe("formulario_piloto_pendente");
+    await esperaPendente(id,job,mod);
+    expect(pedidosAoGancho).toHaveLength(0);
+    expect(await reexecuta(h,job)).toBeNull();
+    expect(mod.estado.prompts[0]).toContain(RESUMO);
+    expect((await linha(id)).metadata.gancho_processado).toBe(true);
+    expect(postsNaGraph).toHaveLength(1);
+  });
+
   it("falha ao persistir resumo mantém recibo pendente e recupera no mesmo job", async () => {
     const id = await respostaDeFormulario({resposta:OPACO});
     const job = await enfileira(id);

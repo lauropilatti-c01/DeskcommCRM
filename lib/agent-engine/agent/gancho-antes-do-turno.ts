@@ -792,6 +792,14 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
       });
     } catch (err) {
       if (eDeFronteira(err)) throw err;
+      // A leitura do card pode falhar antes de a montagem chegar ao formulário.
+      // Só nesse erro, tenta reconhecer o recibo diretamente; se a leitura dele
+      // também falhar, o erro sobe à fila/escolta em vez de presumir respostas.
+      if (pilotoPendente === null && !reconsulta && job.kind === 'inbound_turn') {
+        const f = await formularioDoTurno(pool, alvo);
+        if (eReciboOpacoDoPiloto(f))
+          pilotoPendente = { mensagem_id: f!.pedido.mensagem_id, sent_at: f!.sentAt };
+      }
       if (pilotoPendente !== null) await aguardarPiloto('pedido_nao_montado', pilotoPendente, anotada?.ate ?? null);
       log.warn('gancho antes do turno: pedido não montado — o turno segue para o modelo', {
         erro: err instanceof Error ? err.name : 'desconhecido',
