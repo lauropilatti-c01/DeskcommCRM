@@ -1572,6 +1572,37 @@ describe("c01 — recibo opaco do piloto recupera no mesmo job, sem IA às cegas
     expect(postsNaGraph).toHaveLength(1);
   });
 
+  it("falha ao persistir resumo mantém recibo pendente e recupera no mesmo job", async () => {
+    const id = await respostaDeFormulario({resposta:OPACO});
+    const job = await enfileira(id);
+    respostaDoGancho = async () => json(RECUPERADO);
+    const mod = modelo();
+    const h = montaHandler(mod.doGenerate,true);
+    const quebrado = new Proxy(pool, {get(target,key) {
+      if (key === "query") return async (sql: string,...args: unknown[]) => {
+        if (sql.includes("set metadata = coalesce(metadata") && sql.includes("body = coalesce($4, body)"))
+          throw new Error("gravação fictícia do resumo indisponível");
+        return (target.query as (...a: unknown[]) => Promise<unknown>).call(target,sql,...args);
+      };
+      const value = Reflect.get(target,key);
+      return typeof value === "function" ? value.bind(target) : value;
+    }});
+    expect((await executa(h,job,quebrado))?.name).toBe("formulario_piloto_pendente");
+    expect(mod.estado.etapas).toBe(0);
+    expect(postsNaGraph).toHaveLength(0);
+    expect((await linha(id)).metadata.gancho_processado).not.toBe(true);
+    expect(await anotacaoDoJob(job)).toMatchObject({situacao:"piloto_pendente",motivo:"resumo_nao_persistido"});
+    expect(await reexecuta(h,job)).toBeNull();
+    expect(pedidosAoGancho).toHaveLength(2);
+    expect(mod.estado.prompts[0]).toContain(RESUMO);
+    expect((await linha(id)).body).toBe(RESUMO);
+    expect((await linha(id)).metadata.gancho_processado).toBe(true);
+    expect(postsNaGraph).toHaveLength(1);
+    expect(await reexecuta(montaHandler(modelo().doGenerate,true),job)).toBeNull();
+    expect(postsNaGraph).toHaveLength(1);
+    expect(await mensagensDeSaida()).toHaveLength(1);
+  });
+
   it("v3 continua com fallback para o modelo na mesma falha HTTP500", async () => {
     const id = await respostaDeFormulario({resposta:{...OPACO,formulario:"qualificacao-v3",empresa:"petrobras"}});
     respostaDoGancho = async () => json({},500);

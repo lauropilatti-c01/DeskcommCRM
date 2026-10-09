@@ -868,6 +868,8 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
           return { fim: false, resumo: { mensagemId: f.mensagem_id, sentAt: f.sent_at, texto: resumo }, ...campos };
       } catch (err) {
         if (eDeFronteira(err)) throw err;
+        if (pilotoPendente !== null)
+          await aguardarPiloto('resumo_nao_persistido', pilotoPendente, ateDaDecisao);
         // Sem a marca, o próximo pedido leva o formulário de novo; o modelo lê as
         // respostas montadas do formulário.
         log.warn('gancho antes do turno: formulário não marcado como processado — o modelo lê as respostas dele', {
