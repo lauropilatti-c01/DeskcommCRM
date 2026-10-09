@@ -58,6 +58,12 @@
  * aviso no log; o cliente já recebeu resposta e o modelo não sabe o que saiu.
  * Os logs levam o motivo em código, nunca corpo, URL ou dado pessoal.
  *
+ * Exceção restrita: `qualificacao-motor-v1` devolve recibo opaco, não respostas.
+ * Falha do gancho ou `seguir` sem resumo deixa `piloto_pendente` no payload e
+ * lança erro: o mesmo job reconsulta, sem modelo às cegas. Na última tentativa,
+ * a escolta da preparação abre caso e passa à equipe. Não vale para o legado,
+ * follow-up nem reconsulta agendada; não guarda token/recibo na anotação.
+ *
  * ## A resposta do formulário não se perde
  *
  * Só a decisão aplicada marca o formulário como processado. Gancho fora do ar,
@@ -510,12 +516,20 @@ type DecisaoAnotada =
       formulario: { mensagem_id: string; sent_at: string | null } | null;
       /** `max(created_at)` das entradas no momento da decisão, como texto do Postgres. */
       ate: string | null;
+      /** A fonte foi um recibo opaco do piloto, conferido no pedido montado. */
+      recibo_opaco?: true;
     }
   | {
       situacao: 'modelo';
       motivo: string;
       /** Como em `decidido`: mensagem nova do cliente depois disto invalida a anotação. */
       ate?: string | null;
+    }
+  | {
+      situacao: 'piloto_pendente';
+      motivo: string;
+      formulario: { mensagem_id: string; sent_at: string | null };
+      ate: string | null;
     };
 
 function decisaoAnotada(payload: Record<string, unknown> | null | undefined): DecisaoAnotada | null {
@@ -523,6 +537,13 @@ function decisaoAnotada(payload: Record<string, unknown> | null | undefined): De
   if (d === null) return null;
   if (d.situacao === 'modelo')
     return { situacao: 'modelo', motivo: String(d.motivo ?? ''), ate: typeof d.ate === 'string' ? d.ate : null };
+  if (d.situacao === 'piloto_pendente') {
+    const f = objeto(d.formulario);
+    if (typeof f?.mensagem_id !== 'string') return null;
+    return { situacao: 'piloto_pendente', motivo: String(d.motivo ?? ''),
+      formulario: { mensagem_id: f.mensagem_id, sent_at: typeof f.sent_at === 'string' ? f.sent_at : null },
+      ate: typeof d.ate === 'string' ? d.ate : null };
+  }
   if (d.situacao !== 'decidido') return null;
   const lido = respostaDoGanchoSchema.safeParse(d.resposta);
   if (!lido.success) return null;
@@ -535,7 +556,18 @@ function decisaoAnotada(payload: Record<string, unknown> | null | undefined): De
         ? { mensagem_id: f.mensagem_id, sent_at: typeof f.sent_at === 'string' ? f.sent_at : null }
         : null,
     ate: typeof d.ate === 'string' ? d.ate : null,
+    ...(d.recibo_opaco === true ? { recibo_opaco: true as const } : {}),
   };
+}
+
+/** Só o marcador do contrato do piloto; recibo inválido também precisa de recuperação. */
+function eReciboOpacoDoPiloto(formulario: FormularioDoTurno | null): boolean {
+  if (formulario === null) return false;
+  let resposta = objeto(formulario.pedido.resposta);
+  if (resposta === null && formulario.pedido.bruto !== null) {
+    try { resposta = objeto(JSON.parse(formulario.pedido.bruto)); } catch { return false; }
+  }
+  return resposta?.formulario === 'qualificacao-motor-v1';
 }
 
 async function anotarNoJob(db: Queryable, job: Pick<JobRow, 'id' | 'organization_id'>, d: DecisaoAnotada): Promise<void> {
@@ -703,6 +735,19 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
   let canalInterativo: boolean | null = null;
   let card: CardDoContato | null | undefined;
   const anotada = decisaoAnotada(job.payload);
+  let pilotoPendente = anotada?.situacao === 'piloto_pendente' ? anotada.formulario : null;
+  const aguardarPiloto = async (
+    motivo: string,
+    formulario: NonNullable<typeof pilotoPendente>,
+    ate: string | null,
+  ): Promise<never> => {
+    await guardServiceEffect();
+    await anotarComCuidado(ctx, { situacao: 'piloto_pendente', motivo, formulario, ate });
+    log.warn('gancho antes do turno: recibo do piloto pendente — sem modelo, job tenta recuperar', { motivo });
+    const erro = new Error(`Formulário do piloto aguarda recuperação do atendimento (${motivo}).`);
+    erro.name = 'formulario_piloto_pendente';
+    throw erro;
+  };
   if (anotada !== null) {
     let chegou = false;
     try {
@@ -716,9 +761,16 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
         anotada: anotada.situacao,
       });
     } else if (anotada.situacao === 'modelo') {
-      log.info('gancho antes do turno: re-execução segue para o modelo, como a anterior', { motivo: anotada.motivo });
-      return { fim: false };
-    } else {
+      // Retoma também a anotação de fallback gravada pela c01.8: o recibo
+      // ainda não processado não pode desaparecer atrás da decisão 'modelo'.
+      const f = !reconsulta && job.kind === 'inbound_turn' ? await formularioDoTurno(pool, alvo) : null;
+      if (eReciboOpacoDoPiloto(f)) {
+        pilotoPendente = { mensagem_id: f!.pedido.mensagem_id, sent_at: f!.sentAt };
+      } else {
+        log.info('gancho antes do turno: re-execução segue para o modelo, como a anterior', { motivo: anotada.motivo });
+        return { fim: false };
+      }
+    } else if (anotada.situacao === 'decidido') {
       decisao = anotada;
     }
   }
@@ -740,19 +792,41 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
       });
     } catch (err) {
       if (eDeFronteira(err)) throw err;
+      // A leitura do card pode falhar antes de a montagem chegar ao formulário.
+      // Só nesse erro, tenta reconhecer o recibo diretamente; se a leitura dele
+      // também falhar, o erro sobe à fila/escolta em vez de presumir respostas.
+      if (pilotoPendente === null && !reconsulta && job.kind === 'inbound_turn') {
+        const f = await formularioDoTurno(pool, alvo);
+        if (eReciboOpacoDoPiloto(f))
+          pilotoPendente = { mensagem_id: f!.pedido.mensagem_id, sent_at: f!.sentAt };
+      }
+      if (pilotoPendente !== null) await aguardarPiloto('pedido_nao_montado', pilotoPendente, anotada?.ate ?? null);
       log.warn('gancho antes do turno: pedido não montado — o turno segue para o modelo', {
         erro: err instanceof Error ? err.name : 'desconhecido',
       });
       return { fim: false };
     }
+    const f = montado.formulario;
+    if (!reconsulta && job.kind === 'inbound_turn' && eReciboOpacoDoPiloto(f)) {
+      pilotoPendente = { mensagem_id: f!.pedido.mensagem_id, sent_at: f!.sentAt };
+    } else if (pilotoPendente !== null) {
+      // Uma resposta NOVA de outro formulário substitui a pendência antiga.
+      // Ausência na janela não é confirmação de entrega nem autoriza o modelo.
+      if (f !== null && f.pedido.mensagem_id !== pilotoPendente.mensagem_id) pilotoPendente = null;
+      else await aguardarPiloto('recibo_nao_reapresentado', pilotoPendente, ate);
+    }
     const chamada = await chamarGancho(ctx.config, montado.pedido, ctx.agoraUnix);
     if (!chamada.ok) {
+      if (pilotoPendente !== null) await aguardarPiloto(chamada.motivo, pilotoPendente, ate);
       log.warn('gancho antes do turno falhou — o turno segue para o modelo, sem gravar nada', {
         motivo: chamada.motivo,
         ...(chamada.status !== undefined ? { status: chamada.status } : {}),
       });
       await anotarComCuidado(ctx, { situacao: 'modelo', motivo: chamada.motivo, ate });
       return { fim: false };
+    }
+    if (pilotoPendente !== null && chamada.resposta.acao === 'seguir' && !chamada.resposta.resumo) {
+      await aguardarPiloto('sem_resumo', pilotoPendente, ate);
     }
     decisao = {
       situacao: 'decidido',
@@ -761,6 +835,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
         ? { mensagem_id: montado.formulario.pedido.mensagem_id, sent_at: montado.formulario.sentAt }
         : null,
       ate,
+      ...(pilotoPendente !== null ? { recibo_opaco: true as const } : {}),
     };
     canalInterativo = montado.canalEnviaInterativo;
     card = montado.card;
@@ -769,7 +844,9 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
   }
 
   const { resposta, ate: ateDaDecisao } = decisao;
+  if (decisao.recibo_opaco === true && decisao.formulario !== null) pilotoPendente = decisao.formulario;
   const paraOModelo = async (motivo: string): Promise<DesfechoDoGancho> => {
+    if (pilotoPendente !== null) return aguardarPiloto(motivo, pilotoPendente, ateDaDecisao);
     await anotarComCuidado(ctx, { situacao: 'modelo', motivo: motivo.slice(0, 60), ate: ateDaDecisao });
     return { fim: false };
   };
@@ -799,6 +876,8 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
           return { fim: false, resumo: { mensagemId: f.mensagem_id, sentAt: f.sent_at, texto: resumo }, ...campos };
       } catch (err) {
         if (eDeFronteira(err)) throw err;
+        if (pilotoPendente !== null)
+          await aguardarPiloto('resumo_nao_persistido', pilotoPendente, ateDaDecisao);
         // Sem a marca, o próximo pedido leva o formulário de novo; o modelo lê as
         // respostas montadas do formulário.
         log.warn('gancho antes do turno: formulário não marcado como processado — o modelo lê as respostas dele', {
