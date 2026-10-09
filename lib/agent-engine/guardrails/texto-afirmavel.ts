@@ -21,6 +21,12 @@
  * comparação ignora maiúsculas, acentos, espaços (inclusive o não separável) e a
  * pontuação do fim da frase; nada mais. Duas palavras em volta do número não bastavam:
  * o salário liberava "O preço do curso é de R$ 7.412,35." (1ª revisão da -c01.8).
+ *
+ * (3ª revisão da -c01.8) O valor em reais conta pela expressão inteira, na forma única
+ * (`valoresNaFormaUnica`): "R$ 5", "R$5,00" e "5 reais" são o mesmo valor; "R$ 5 e 50
+ * centavos", "R$ 5 000" e "R$ 5 mil", não. E o texto da base que acaba num número só
+ * vale onde a frase da mensagem também acaba ali: "R$ 5" aprovado deixava passar "R$ 5 e
+ * 50 centavos" e "R$ 5 000" (o resto do valor vinha depois do espaço).
  */
 import { linksNoTexto } from './link-permitido';
 
@@ -98,15 +104,49 @@ export function textosAfirmaveisNoResultado(
   return achados;
 }
 
-/** O texto como as travas de valor o leem: sem links, sem acento, minúsculo, espaço simples. */
+/**
+ * (3ª revisão) O valor em reais, inteiro, sobre o texto sem acento e com espaço simples:
+ * "r$" ou "reais" em volta; milhar com ponto ou espaço (o fino e o não separável já viram
+ * espaço no NFKD); centavos com vírgula e dois dígitos; "mil"; e os centavos ditos à
+ * parte ("r$ 5 e 50 centavos", "5 reais e 50"). Não começa nem acaba no meio de outro
+ * número nem antes de "mil", "milhões", "bi"… — a forma que fica em dúvida ("r$ 5,5",
+ * "r$ 5,000", "r$ 5 00") não é reescrita, e o texto cru nunca é igual à forma única.
+ */
+const NUMERO_EM_REAIS = String.raw`(\d{1,3}(?:[. ]\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)`;
+const VALOR_EM_REAIS = new RegExp(
+  String.raw`(?<![\w.,]|\d )` +
+    String.raw`(?:r\$ ?${NUMERO_EM_REAIS}( mil\b)?(?: e (\d{1,2}) centavos?\b)?(?: (?:de )?(?:reais|real)\b)?` +
+    String.raw`|${NUMERO_EM_REAIS}( mil\b)? (?:de )?(?:reais|real)\b(?: e (\d{1,2})(?: centavos?\b)?)?)` +
+    String.raw`(?!\w|[.,]\d| \d| ?(?:mil|milh\w*|bilh\w*|mi|bi|k)\b)`,
+  'g',
+);
+
+/** Os centavos de um valor lido por `VALOR_EM_REAIS`. */
+function centavosDoValor(numero: string, mil: boolean, centavos: string | undefined): number {
+  const [reais = '', fracao = ''] = numero.split(',');
+  const valor = (Number(reais.replace(/[. ]/g, '')) * 100 + Number(fracao || '0')) * (mil ? 1000 : 1);
+  return valor + Number(centavos ?? '0');
+}
+
+/** (3ª revisão) Cada valor em reais do texto na forma única "r$ N,CC" ("r$ 5 mil" → "r$ 5000,00"). */
+export function valoresNaFormaUnica(t: string): string {
+  return t.replace(VALOR_EM_REAIS, (_, n1, mil1, c1, n2, mil2, c2) => {
+    const c = centavosDoValor(n1 ?? n2, (mil1 ?? mil2) !== undefined, c1 ?? c2);
+    return `r$ ${Math.floor(c / 100)},${String(c % 100).padStart(2, '0')}`;
+  });
+}
+
+/** O texto como as travas de valor o leem: sem links, sem acento, minúsculo, espaço simples, valores na forma única. */
 export function textoParaConferir(texto: string): string {
   let t = texto;
   for (const link of linksNoTexto(texto)) t = t.split(link).join(' ');
-  return t
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/\s+/g, ' ');
+  return valoresNaFormaUnica(
+    t
+      .normalize('NFKD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase()
+      .replace(/\s+/g, ' '),
+  );
 }
 
 /** A frase para comparar: sem os espaços das pontas e sem a pontuação do fim. */
@@ -130,9 +170,12 @@ export function frasesDoTexto(t: string): Array<[number, number]> {
 }
 
 // O limite de palavra que também não corta número: "r$ 5" não acaba em "r$ 5,50" nem em
-// "r$ 5.999" (2ª revisão da -c01.8).
+// "r$ 5.999" (2ª revisão da -c01.8). (3ª revisão) O espaço também separa milhar ("5 000"),
+// e o texto da base que acaba num número só para na pontuação ou no fim: depois do espaço
+// pode vir o resto do valor ("r$ 5 e 50 centavos", "r$ 5 e meio", "r$ 5 milhoes").
 const LETRA_OU_NUMERO = /[a-z0-9]/;
-const SEPARADOR_DE_NUMERO = /[.,]/;
+const SEPARADOR_DE_NUMERO = /[., ]/;
+const PONTUACAO_DEPOIS_DO_NUMERO = /[.!?;:,)]/;
 function limiteAntes(t: string, i: number): boolean {
   if (i === 0) return true;
   if (LETRA_OU_NUMERO.test(t[i - 1]!)) return false;
@@ -141,6 +184,7 @@ function limiteAntes(t: string, i: number): boolean {
 function limiteDepois(t: string, fim: number): boolean {
   if (fim >= t.length) return true;
   if (LETRA_OU_NUMERO.test(t[fim]!)) return false;
+  if (/\d/.test(t[fim - 1] ?? '') && !PONTUACAO_DEPOIS_DO_NUMERO.test(t[fim]!)) return false;
   return !(SEPARADOR_DE_NUMERO.test(t[fim]!) && /\d/.test(t[fim - 1] ?? '') && /\d/.test(t[fim + 1] ?? ''));
 }
 

@@ -55,6 +55,9 @@ const TEM_DE_VETAR = [
   // (Rodada 2, achado 3 da 1ª revisão da -c01.3) "real" no singular, como `extractPromises` lê.
   "A matrícula custa 1 real.",
   "Fica 1 real por dia de estudo.",
+  // (-c01.8, 3ª revisão) Centavos também são dinheiro.
+  "O cupom abate 50 centavos.",
+  "Sai por 99 centavos por dia.",
 ];
 
 const NAO_PODE_VETAR = [

@@ -31,7 +31,9 @@
  * inteiro: nada é apagado antes da procura (apagar o trecho aprovado tirava o "cupom" de
  * "cupom de 5% ou 10%", e o 10% saía; 1ª revisão da -c01.8). Oferta, link, linha com a
  * marca falsa ou com assunto fora da lista, histórico e notas não liberam nada: o preço
- * do curso continua barrado.
+ * do curso continua barrado. (3ª revisão) O valor conta pela expressão monetária
+ * inteira, na forma única de `texto-afirmavel.ts`: "R$ 5" aprovado libera "R$5,00" e
+ * "5 reais", e não "R$ 5 e 50 centavos", "R$ 5 000" nem "R$ 5 mil".
  *
  * Trava de CONTEÚDO: contador e fail-safe da promessa semântica
  * (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE` em `inbound-turn.ts`).
@@ -39,7 +41,7 @@
 import type { Gate } from './before-send';
 import { linksNoTexto } from './link-permitido';
 import { extractPromises } from './promise/engine';
-import { trechosAprovados } from './texto-afirmavel';
+import { textoParaConferir, trechosAprovados } from './texto-afirmavel';
 
 /** As formas da M1 que `extractPromises` não lê, sobre o texto em minúsculas e sem acento. */
 const FORMAS_DA_M1: readonly RegExp[] = [
@@ -59,6 +61,8 @@ const FORMAS_DA_M1: readonly RegExp[] = [
   /\b\d[\d.,]*\s?(?:no|pelo|via) pix\b/g,
   /\bentrada de\s?\d/g,
   /\b\d+\s?mil\b(?!\s?(?:questoes|exercicios|alunos|alunas|aprovados|aprovadas|inscritos|inscritas|candidatos|candidatas|concorrentes|estudantes|usuarios|pessoas|horas|metas|aulas|videoaulas|paginas|vagas|km))/g,
+  // (-c01.8, 3ª revisão) Centavos também são dinheiro ("e mais 50 centavos").
+  /\b\d[\d.,]*\s?centavos?\b/g,
 ];
 
 /**
@@ -166,7 +170,10 @@ const chaveDaPromessa = (p: ReturnType<typeof extractPromises>[number]): string 
  */
 export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = []): string[] {
   const original = semLinks(body);
-  const t = semAcento(original);
+  // (3ª revisão) Com texto afirmável, o texto é lido como o da base: valores em reais na
+  // forma única ("R$5,00" e "5 reais" = "r$ 5,00"; "R$ 5 e 50 centavos" = "r$ 5,50").
+  // Sem ele, nada muda.
+  const t = afirmaveis.length > 0 ? textoParaConferir(body) : semAcento(original);
   const aprovados = afirmaveis.length > 0 ? trechosAprovados(t, afirmaveis) : [];
   // (2ª revisão) O VALOR INTEIRO tem de caber no trecho aprovado: "r$ 5" aprovado não cobre
   // o "r$ 5" de "r$ 5,50" nem o de "r$ 5.999" (a forma da M1 lê só o primeiro dígito).

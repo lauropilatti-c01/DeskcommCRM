@@ -200,6 +200,83 @@ describe("(C01, -c01.8) a trava 'valor em dinheiro' com o texto afirmável da ba
     }
   });
 
+  it("o valor é a expressão monetária inteira: 'R$ 5' aprovado não libera 'R$ 5 e 50 centavos', 'R$ 5 000' nem 'R$ 5 mil' (3ª revisão)", async () => {
+    const r = consulta([cupom("O cupom abate R$ 5.")]);
+    // O mesmo valor, escrito de outro jeito, passa.
+    for (const frase of [
+      "O cupom abate R$ 5,00.",
+      "O cupom abate R$5,00.",
+      "O cupom abate R$5.",
+      "O cupom abate 5 reais.",
+      "Boa notícia: o cupom abate R$5,00!",
+    ]) {
+      expect((await avaliar(frase, r)).pass, frase).toBe(true);
+    }
+    // Valor diferente com o mesmo começo: barrado, na frase igual ou dentro de uma maior.
+    for (const frase of [
+      "O cupom abate R$ 5 e 50 centavos.",
+      "Boa notícia: o cupom abate R$ 5 e 50 centavos!",
+      "O cupom abate R$ 5 000.",
+      "Boa notícia: o cupom abate R$ 5 000!",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 mil.",
+      "O cupom abate R$ 5 milhões.",
+      "O cupom abate R$ 5 e meio.",
+      "O cupom abate R$ 5 e 500 centavos.",
+      "O cupom abate R$ 5, e mais 50 centavos.",
+      "O cupom abate 5 reais e 50.",
+      "O cupom abate 5 reais e 50 centavos.",
+      "O cupom abate R$ 5,00 000.",
+      // As da 2ª revisão continuam barradas.
+      "O cupom abate R$ 5,50.",
+      "O cupom abate R$ 5.999.",
+      "O cupom abate R$ 50.",
+    ]) {
+      expect((await avaliar(frase, r)).pass, frase).toBe(false);
+    }
+  });
+
+  it("'5 reais' e 'R$ 5.000' aprovados: o valor igual passa em qualquer escrita; o diferente, não (3ª revisão)", async () => {
+    const reais = consulta([cupom("O cupom abate 5 reais.")]);
+    for (const frase of ["O cupom abate 5 reais.", "O cupom abate R$ 5.", "O cupom abate 5,00 reais."]) {
+      expect((await avaliar(frase, reais)).pass, frase).toBe(true);
+    }
+    for (const frase of [
+      "O cupom abate 5 reais e 50.",
+      "O cupom abate 5 reais e 50 centavos.",
+      "O cupom abate 5 mil reais.",
+      "O cupom abate 1 5 reais.",
+      "O cupom abate 15 reais.",
+    ]) {
+      expect((await avaliar(frase, reais)).pass, frase).toBe(false);
+    }
+    const mil = consulta([cupom("O cupom abate R$ 5.000.")]);
+    for (const frase of [
+      "O cupom abate R$ 5.000.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 000.",
+      "O cupom abate R$ 5 000,00.",
+      "O cupom abate R$ 5 mil.",
+      "O cupom abate 5 mil reais.",
+      "O cupom abate R$ 5.000,00.",
+    ]) {
+      expect((await avaliar(frase, mil)).pass, frase).toBe(true);
+    }
+    for (const frase of [
+      "O cupom abate R$ 5.000,50.",
+      "O cupom abate R$ 5 000,50.",
+      "O cupom abate R$ 5.000 e 50 centavos.",
+      "O cupom abate R$ 5 mil e 500.",
+      "O cupom abate R$ 5.000.000.",
+      "O cupom abate R$ 5 000 000.",
+      "O cupom abate R$ 5,000.",
+    ]) {
+      expect((await avaliar(frase, mil)).pass, frase).toBe(false);
+    }
+  });
+
   it("parcela fora da base com o mesmo valor da aprovada é barrada: o detector junta por valor (2ª revisão)", async () => {
     const BASE = "O cupom de 5% vale no cartão, em 12x.";
     const r = consulta([cupom(BASE)]);
