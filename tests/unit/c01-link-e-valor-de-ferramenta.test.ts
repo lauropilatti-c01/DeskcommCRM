@@ -33,6 +33,7 @@ interface Trava {
 }
 interface Valores {
   valoresEmDinheiro: (texto: string) => number[];
+  lerValoresEmDinheiro: (texto: string) => { valores: number[]; emDuvida: number };
   valoresNoResultado: (valor: unknown) => Set<number>;
 }
 const trava = async (): Promise<Trava> => (await import(/* @vite-ignore */ CAMINHO_DA_TRAVA)) as Trava;
@@ -99,6 +100,35 @@ describe("(C01) os valores em dinheiro da mensagem", () => {
     // A forma em dúvida não vira valor (e a trava a barra).
     expect(valoresEmDinheiro("R$ 5 e meio")).toEqual([]);
     expect(valoresEmDinheiro("R$ 5 milhões")).toEqual([]);
+  });
+
+  it("(-c01.9, 4ª revisão) formatação, emoji, sinal e 'BRL': lidos; o menos e a continuação ficam em dúvida", async () => {
+    const { lerValoresEmDinheiro } = await valores();
+    // 1. A formatação do WhatsApp e o emoji não contam.
+    expect(lerValoresEmDinheiro("*R$ 5*")).toEqual({ valores: [500], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("R$ *997*")).toEqual({ valores: [99700], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("R$*997*")).toEqual({ valores: [99700], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("R$ 💰997")).toEqual({ valores: [99700], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("R$ 5,*50*")).toEqual({ valores: [550], emDuvida: 0 });
+    // 2. O "+" é lido; o "-" (e o "−") deixa o valor em dúvida.
+    expect(lerValoresEmDinheiro("R$ +997")).toEqual({ valores: [99700], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("R$ +5,50")).toEqual({ valores: [550], emDuvida: 0 });
+    for (const frase of ["R$ -997", "R$ −5", "R$ - 5", "-R$ 5", "−R$ 5", "-5 reais", "R$ 5-10"]) {
+      expect(lerValoresEmDinheiro(frase).valores, frase).toEqual([]);
+      expect(lerValoresEmDinheiro(frase).emDuvida, frase).toBeGreaterThan(0);
+    }
+    // 3. A moeda depois do número ou em sigla.
+    expect(lerValoresEmDinheiro("997 BRL")).toEqual({ valores: [99700], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("BRL 997")).toEqual({ valores: [99700], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("997 R$")).toEqual({ valores: [99700], emDuvida: 0 });
+    expect(lerValoresEmDinheiro("BRL 5,5").emDuvida).toBeGreaterThan(0);
+    // 5. "+ N", "mais N" e centavos por extenso logo depois do valor: em dúvida.
+    for (const frase of ["R$ 5,00 + 50", "R$ 5,00+50", "R$ 5 mais 50", "R$ 5 e cinquenta centavos", "5 reais e cinquenta centavos", "R$ 5 e vinte e cinco centavos"]) {
+      expect(lerValoresEmDinheiro(frase).valores, frase).toEqual([]);
+      expect(lerValoresEmDinheiro(frase).emDuvida, frase).toBeGreaterThan(0);
+    }
+    // O que não continua o valor fica como estava.
+    expect(lerValoresEmDinheiro("R$ 5 e você ganha um bônus")).toEqual({ valores: [500], emDuvida: 0 });
   });
 
   it("número sem R$ nem 'reais' não é dinheiro: 12x, metas, dias, vagas, o número dentro do link", async () => {
@@ -324,6 +354,46 @@ describe("(C01) a trava 'link e valor de ferramenta'", () => {
     expect((await avaliar("Como falei, o cupom abate R$ 5.", liberado)).pass).toBe(false);
     const ambigua = await armado({ jaEnviados: ["O cupom abate R$ 5 e meio."] });
     expect((await avaliar("O cupom abate R$ 5.", ambigua)).pass).toBe(false);
+  });
+
+  it("formatação, emoji, sinal, 'BRL' e continuação: o valor diferente e a forma em dúvida são barrados (-c01.9, 4ª revisão)", async () => {
+    const cinco = await armado({ resultado: { desconto: 5 } });
+    for (const frase of ["O cupom abate *R$ 5*.", "O cupom abate **R$ 5**.", "🔥 O cupom abate R$ 5.", "O cupom abate R$ +5.", "O cupom abate 5 R$.", "O cupom abate 5,00 BRL."]) {
+      expect((await avaliar(frase, cinco)).pass, frase).toBe(true);
+    }
+    for (const frase of [
+      "O cupom abate R$ *997*.",
+      "O cupom abate R$*997*.",
+      "O cupom abate R$ **997**.",
+      "O cupom abate R$ 💰997.",
+      "O cupom abate R$ +997.",
+      "O cupom abate R$ +5,50.",
+      "O cupom abate 997 BRL.",
+      "O cupom abate BRL 997.",
+      "O cupom abate 997 R$.",
+    ]) {
+      const v = await avaliar(frase, cinco);
+      expect(v.pass, frase).toBe(false);
+      expect(v.code).toBe("link_ou_valor_sem_consulta");
+    }
+    // Em dúvida: barrada mesmo com cada pedaço devolvido pela ferramenta.
+    const pedacos = await armado({ resultado: { a: 5, b: 50, c: 5.5, d: 55, e: 997, f: 10 } });
+    for (const frase of [
+      "O cupom abate R$ -997.",
+      "O cupom abate R$ -5.",
+      "O cupom abate R$ −5.",
+      "O cupom abate -R$ 5.",
+      "O cupom abate −R$ 5.",
+      "O cupom abate -5 reais.",
+      "O cupom abate R$ 5-10.",
+      "O cupom abate BRL 5,5.",
+      "O cupom abate R$ 5,00 + 50.",
+      "O cupom abate R$ 5,00 mais 50.",
+      "O cupom abate R$ 5 e cinquenta centavos.",
+      "O cupom abate 5 reais e cinquenta centavos.",
+    ]) {
+      expect((await avaliar(frase, pedacos)).pass, frase).toBe(false);
+    }
   });
 
   it("valor sem R$ não é dinheiro: '12x' passa mesmo sem nada liberado", async () => {

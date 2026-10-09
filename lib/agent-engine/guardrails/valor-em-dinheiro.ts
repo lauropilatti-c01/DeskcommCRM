@@ -33,7 +33,9 @@
  * marca falsa ou com assunto fora da lista, histórico e notas não liberam nada: o preço
  * do curso continua barrado. (3ª revisão) O valor conta pela expressão monetária
  * inteira, na forma única de `texto-afirmavel.ts`: "R$ 5" aprovado libera "R$5,00" e
- * "5 reais", e não "R$ 5 e 50 centavos", "R$ 5 000" nem "R$ 5 mil".
+ * "5 reais", e não "R$ 5 e 50 centavos", "R$ 5 000" nem "R$ 5 mil". (4ª revisão, -c01.9)
+ * Sem formatação nem emoji ("*R$ 5*" passa; "R$ *997*" não), com "BRL" e o sinal: o
+ * "-" deixa o valor em dúvida ("R$ -997", "-R$ 5"), e "5k reais" conta como dinheiro.
  *
  * Trava de CONTEÚDO: contador e fail-safe da promessa semântica
  * (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE` em `inbound-turn.ts`).
@@ -41,7 +43,7 @@
 import type { Gate } from './before-send';
 import { linksNoTexto } from './link-permitido';
 import { extractPromises } from './promise/engine';
-import { textoParaConferir, trechosAprovados } from './texto-afirmavel';
+import { SINAL, textoParaConferir, trechosAprovados } from './texto-afirmavel';
 
 /** As formas da M1 que `extractPromises` não lê, sobre o texto em minúsculas e sem acento. */
 const FORMAS_DA_M1: readonly RegExp[] = [
@@ -63,6 +65,19 @@ const FORMAS_DA_M1: readonly RegExp[] = [
   /\b\d+\s?mil\b(?!\s?(?:questoes|exercicios|alunos|alunas|aprovados|aprovadas|inscritos|inscritas|candidatos|candidatas|concorrentes|estudantes|usuarios|pessoas|horas|metas|aulas|videoaulas|paginas|vagas|km))/g,
   // (-c01.8, 3ª revisão) Centavos também são dinheiro ("e mais 50 centavos").
   /\b\d[\d.,]*\s?centavos?\b/g,
+];
+
+/**
+ * (-c01.9, 4ª revisão) Com texto afirmável, também as formas que a forma única deixa
+ * cruas e que a lista acima não lê: o sinal depois da moeda ("R$ -997", "R$ −5"), "BRL"
+ * antes ou depois do número ("BRL 5,5", "5,5 R$") e o "k", "mi", "bi" ou "milhões" antes
+ * de "reais" ("5k reais"). Sem texto afirmável, a lista acima é a mesma de antes.
+ */
+const FORMAS_COM_TEXTO_AFIRMAVEL: readonly RegExp[] = [
+  new RegExp(String.raw`(?:r\$|\bbrl) ?${SINAL} ?\d`, 'g'),
+  /\bbrl ?\d/g,
+  /\d ?(?:r\$|brl\b)/g,
+  /\b\d[\d.,]* ?(?:k|mi|bi|milh\w*|bilh\w*)(?: de)? ?(?:reais|real)\b/g,
 ];
 
 /**
@@ -184,7 +199,7 @@ export function trechosDeDinheiro(body: string, afirmaveis: readonly string[] = 
     return aprovados.some(([a, b]) => a0 >= a && b0 <= b);
   };
   const trechos: string[] = [];
-  for (const re of FORMAS_DA_M1) {
+  for (const re of afirmaveis.length > 0 ? [...FORMAS_DA_M1, ...FORMAS_COM_TEXTO_AFIRMAVEL] : FORMAS_DA_M1) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(t)) !== null) {

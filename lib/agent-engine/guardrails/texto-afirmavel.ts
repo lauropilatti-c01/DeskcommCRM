@@ -27,6 +27,11 @@
  * centavos", "R$ 5 000" e "R$ 5 mil", não. E o texto da base que acaba num número só
  * vale onde a frase da mensagem também acaba ali: "R$ 5" aprovado deixava passar "R$ 5 e
  * 50 centavos" e "R$ 5 000" (o resto do valor vinha depois do espaço).
+ *
+ * (4ª revisão, -c01.9) A formatação do WhatsApp e o emoji não contam ("*R$ 5*" é "R$ 5";
+ * "R$ *997*" e "R$ 💰997" são 997); "BRL 997", "997 BRL" e "997 R$" são valores; o "+"
+ * colado é lido ("R$ +997" é 997) e o "-" colado deixa o valor em dúvida ("R$ -997",
+ * "-R$ 5", "-5 reais" nunca são iguais a "R$ 5").
  */
 import { linksNoTexto } from './link-permitido';
 
@@ -111,13 +116,20 @@ export function textosAfirmaveisNoResultado(
  * parte ("r$ 5 e 50 centavos", "5 reais e 50"). Não começa nem acaba no meio de outro
  * número nem antes de "mil", "milhões", "bi"… — a forma que fica em dúvida ("r$ 5,5",
  * "r$ 5,000", "r$ 5 00") não é reescrita, e o texto cru nunca é igual à forma única.
+ *
+ * (4ª revisão) A moeda também é "brl", e vem antes ou depois do número ("brl 997", "997
+ * brl", "997 r$"). O "+" entre a moeda e o número é lido ("r$ +997" = 997); o sinal colado
+ * antes ou depois do valor ("-r$ 5", "-5 reais", "r$ 5-10") e o "-" depois da moeda ("r$
+ * -997") deixam o valor cru: a forma em dúvida.
  */
+export const SINAL = String.raw`[-+\u2010-\u2015\u2212]`;
+const MOEDA = String.raw`(?:r\$|brl)`;
 const NUMERO_EM_REAIS = String.raw`(\d{1,3}(?:[. ]\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)`;
 const VALOR_EM_REAIS = new RegExp(
-  String.raw`(?<![\w.,]|\d )` +
-    String.raw`(?:r\$ ?${NUMERO_EM_REAIS}( mil\b)?(?: e (\d{1,2}) centavos?\b)?(?: (?:de )?(?:reais|real)\b)?` +
-    String.raw`|${NUMERO_EM_REAIS}( mil\b)? (?:de )?(?:reais|real)\b(?: e (\d{1,2})(?: centavos?\b)?)?)` +
-    String.raw`(?!\w|[.,]\d| \d| ?(?:mil|milh\w*|bilh\w*|mi|bi|k)\b)`,
+  String.raw`(?<![\w.,]|\d |${SINAL})` +
+    String.raw`(?:${MOEDA} ?(?:\+ ?)?${NUMERO_EM_REAIS}( mil\b)?(?: e (\d{1,2}) centavos?\b)?(?: (?:de )?(?:reais|real)\b)?` +
+    String.raw`|${NUMERO_EM_REAIS}( mil\b)?(?: (?:de )?(?:reais|real)\b(?: e (\d{1,2})(?: centavos?\b)?)?| ?${MOEDA}))` +
+    String.raw`(?!\w|[.,]\d| \d| ?(?:mil|milh\w*|bilh\w*|mi|bi|k)\b|${SINAL})`,
   'g',
 );
 
@@ -154,13 +166,21 @@ export function valoresNaFormaUnica(t: string): string {
   return saida + t.slice(i);
 }
 
-/** O texto sem links, sem acento, minúsculo e com espaço simples. */
+/**
+ * (4ª revisão) A formatação do WhatsApp (negrito, itálico, tachado, monoespaçado) e o
+ * emoji, que somem do texto: "*R$ 5*" é "r$ 5", "R$ *997*" e "R$ 💰997" são "r$ 997".
+ * Somem sem deixar espaço, para não separar o que estava junto ("R$ 5,*50*" é "r$ 5,50").
+ */
+const FORMATACAO_E_EMOJI = /[*_~`\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\ufe0e\ufe0f\u20e3]/gu;
+
+/** O texto sem links, sem acento, sem formatação e emoji, minúsculo e com espaço simples. */
 export function textoSemAcento(texto: string): string {
   let t = texto;
   for (const link of linksNoTexto(texto)) t = t.split(link).join(' ');
   return t
     .normalize('NFKD')
     .replace(/[̀-ͯ]/g, '')
+    .replace(FORMATACAO_E_EMOJI, '')
     .toLowerCase()
     .replace(/\s+/g, ' ');
 }
@@ -197,9 +217,11 @@ export function frasesDoTexto(t: string): Array<[number, number]> {
 const LETRA_OU_NUMERO = /[a-z0-9]/;
 const SEPARADOR_DE_NUMERO = /[., ]/;
 const PONTUACAO_DEPOIS_DO_NUMERO = /[.!?;:,)]/;
+// (4ª revisão) Nem começa logo depois de um sinal: "-r$ 5,00" não é "r$ 5,00".
+const SINAL_ANTES = new RegExp(SINAL);
 function limiteAntes(t: string, i: number): boolean {
   if (i === 0) return true;
-  if (LETRA_OU_NUMERO.test(t[i - 1]!)) return false;
+  if (LETRA_OU_NUMERO.test(t[i - 1]!) || SINAL_ANTES.test(t[i - 1]!)) return false;
   return !(SEPARADOR_DE_NUMERO.test(t[i - 1]!) && /\d/.test(t[i - 2] ?? '') && /\d/.test(t[i] ?? ''));
 }
 function limiteDepois(t: string, fim: number): boolean {

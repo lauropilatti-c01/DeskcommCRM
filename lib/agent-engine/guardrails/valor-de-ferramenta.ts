@@ -19,7 +19,7 @@
  * existe na base; errar na mensagem vetaria texto que não fala de dinheiro.
  */
 import { linksNoTexto } from './link-permitido';
-import { textoSemAcento, valoresEmReais } from './texto-afirmavel';
+import { SINAL, textoSemAcento, valoresEmReais } from './texto-afirmavel';
 
 // Número em reais, nas formas que aparecem: milhar com ponto ("6.638,64", "1.997"),
 // milhar com vírgula ("1,997.00"), sem milhar ("1997", "166,42", "1997.00"). A ordem
@@ -65,10 +65,21 @@ function semLinks(texto: string): string {
  * — o que ainda parece dinheiro fora das expressões lidas ("R$ 5,5", "R$ 5,000", "R$ 5
  * milhões", "R$ 5 k", "50 centavos") e a expressão seguida de "e" + número ou "meio"
  * ("R$ 5 e meio", "R$ 5 e 500 centavos").
+ *
+ * (4ª revisão, -c01.9) Também em dúvida: o sinal de menos ("R$ -997", "-R$ 5", "R$ −5",
+ * "-5 reais"), a moeda crua antes ou depois do número ("BRL 5,5", "5,5 R$") e a
+ * expressão seguida de "+", "mais", "menos" ou "-" com número ("R$ 5,00 + 50") ou de
+ * centavos por extenso ("R$ 5 e cinquenta centavos").
  */
-const AINDA_E_DINHEIRO =
-  /r\$ ?\d|\b\d[\d.,]*(?: ?(?:mil|milh\w*|bilh\w*|mi|bi|k))?(?: de)? ?(?:reais|real)\b|\b\d[\d.,]* ?centavos?\b/g;
-const CONTINUA_O_VALOR = /^ (?:e|mais) (?:\d|meio\b|meia\b)/;
+const AINDA_E_DINHEIRO = new RegExp(
+  String.raw`(?:r\$|\bbrl) ?(?:${SINAL} ?)?\d` +
+    String.raw`|\b\d[\d.,]*(?: ?(?:mil|milh\w*|bilh\w*|mi|bi|k))?(?: de)? ?(?:(?:reais|real|brl)\b|r\$)` +
+    String.raw`|\b\d[\d.,]* ?centavos?\b`,
+  'g',
+);
+const CONTINUA_O_VALOR = new RegExp(
+  String.raw`^ ?(?:(?:e|mais|menos) |${SINAL} ?)(?:\d|meio\b|meia\b|(?:[a-z]+ ){1,4}centavos?\b)`,
+);
 
 /** Os valores em dinheiro da mensagem, em centavos e na ordem, e quantas formas ficaram em dúvida. */
 export function lerValoresEmDinheiro(texto: string): { valores: number[]; emDuvida: number } {

@@ -277,6 +277,61 @@ describe("(C01, -c01.8) a trava 'valor em dinheiro' com o texto afirmável da ba
     }
   });
 
+  it("formatação, emoji, sinal, 'BRL' e 'k': o valor diferente é barrado; o igual com negrito passa (4ª revisão, -c01.9)", async () => {
+    const r = consulta([cupom("O cupom abate R$ 5.")]);
+    // A formatação do WhatsApp e o emoji não contam; "+" e "BRL" são lidos.
+    for (const frase of [
+      "O cupom abate *R$ 5*.",
+      "O cupom abate **R$ 5**.",
+      "O cupom abate _R$ 5_.",
+      "🔥 O cupom abate R$ 5.",
+      "O cupom abate R$ 5. 🎉",
+      "O cupom abate R$ +5.",
+      "O cupom abate 5 R$.",
+      "O cupom abate 5,00 BRL.",
+      "O cupom abate BRL 5.",
+    ]) {
+      expect((await avaliar(frase, r)).pass, frase).toBe(true);
+    }
+    for (const frase of [
+      // 1. Formatação ou emoji entre a moeda e o número.
+      "O cupom abate R$ *997*.",
+      "O cupom abate R$*997*.",
+      "O cupom abate R$ **997**.",
+      "O cupom abate R$ 💰997.",
+      "O cupom abate *R$ 997*.",
+      "O cupom abate R$ 5,*50*.",
+      "O cupom abate R$ 5 *000*.",
+      // 2. Sinal: o "+" é lido; o "-" (também o "−" e o travessão) deixa o valor em dúvida.
+      "O cupom abate R$ -997.",
+      "O cupom abate R$ +997.",
+      "O cupom abate R$ +5,50.",
+      "O cupom abate R$ -5.",
+      "O cupom abate R$ −5.",
+      "O cupom abate R$ –5.",
+      "O cupom abate R$ - 5.",
+      "O cupom abate -R$ 5.",
+      "O cupom abate -R$ 5,00.",
+      "O cupom abate −R$ 5.",
+      "O cupom abate -5 reais.",
+      "O cupom abate R$ 5-10.",
+      "O cupom abate R$ 5,00 + 50.",
+      // 3. A moeda depois do número ou em sigla.
+      "O cupom abate 997 BRL.",
+      "O cupom abate BRL 997.",
+      "O cupom abate 997 R$.",
+      "O cupom abate BRL 5,5.",
+      "O cupom abate 5,5 R$.",
+      // 4. "k", "mi" e "milhões" antes de "reais".
+      "O cupom abate 5k reais.",
+      "O cupom abate 5 k reais.",
+      "O cupom abate 5 mi de reais.",
+      "O cupom abate 5 milhões de reais.",
+    ]) {
+      expect((await avaliar(frase, r)).pass, frase).toBe(false);
+    }
+  });
+
   it("parcela fora da base com o mesmo valor da aprovada é barrada: o detector junta por valor (2ª revisão)", async () => {
     const BASE = "O cupom de 5% vale no cartão, em 12x.";
     const r = consulta([cupom(BASE)]);
