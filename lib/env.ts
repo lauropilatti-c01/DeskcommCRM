@@ -62,6 +62,9 @@ const diasDeRetencao = (nome: string, padrao: number) =>
     });
 
 const schema = z.object({
+  // Módulo opcional de leitura. Ausência não afeta o app nem o atendimento.
+  C01_JORNADAS_URL: z.string().optional(),
+  C01_JORNADAS_SECRET: z.string().optional(),
   // Node
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 

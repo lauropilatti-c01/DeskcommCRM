@@ -138,9 +138,9 @@ describe("sidebarGroups", () => {
       // é profile do compose, não estado que o aplicativo conheça).
     ]);
     // E continua alcançável: o hub é a porta dela.
-    expect(
-      hubSections("crm", true, null).flatMap((s) => s.items.map((i) => i.href)),
-    ).toContain("/app/comandas");
+    expect(hubSections("crm", true, null).flatMap((s) => s.items.map((i) => i.href))).toContain(
+      "/app/comandas",
+    );
     expect(NAV_GROUPS.find((g) => g.id === "crm")?.hub?.href).toBe("/app/crm");
   });
 
@@ -151,7 +151,7 @@ describe("sidebarGroups", () => {
     expect(ids).toContain("atendimento");
   });
 
-  it("a ordem dentro do grupo de IA é a do uso real: agentes, follow-ups, casos", () => {
+  it("a ordem de IA mantém agentes, follow-ups, casos e a consulta de jornadas", () => {
     // Provedores e Execuções NÃO entram aqui, e a razão é medida: pô-las na
     // sidebar estourou a dobra em 900px (e2e `navegacao.spec.ts`). Elas seguem
     // o padrão das outras nove telas do grupo — alcançáveis pelo hub "Ver tudo
@@ -163,6 +163,7 @@ describe("sidebarGroups", () => {
       "/app/ai/agents",
       "/app/ai/followups",
       "/app/ai/cases",
+      "/app/jornadas",
     ]);
   });
 });
@@ -173,7 +174,11 @@ describe("hubSections", () => {
     // dia contra o que se define uma vez. Lista EXATA: `toContain` deixaria uma
     // tela nova entrar sem que ninguém decidisse de que lado dela ela cai.
     const secoes = hubSections("crm", true, null);
-    expect(secoes.map((s) => s.section)).toEqual(["O dia a dia da venda", "Preparar a venda", "Fechar a venda"]);
+    expect(secoes.map((s) => s.section)).toEqual([
+      "O dia a dia da venda",
+      "Preparar a venda",
+      "Fechar a venda",
+    ]);
     expect(secoes.flatMap((s) => s.items.map((i) => i.href))).toEqual([
       "/app/prospecting",
       "/app/kanban",

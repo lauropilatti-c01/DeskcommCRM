@@ -1,0 +1,916 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "afeb20970e057f6bc6d5d90e11c43641c3bfd1bea0bb8cd3476ac3000a7f5f72",
+  "organization_id": "00000000-0000-4000-8000-000000000001",
+  "environment": "example",
+  "captured_at": "2026-10-13T12:00:00Z",
+  "completeness": "complete",
+  "sources": [
+    {
+      "id": "meta",
+      "label": "Formulários na Meta",
+      "status": "ok",
+      "checked_at": "2026-10-13T12:00:00Z",
+      "version": "exemplo-meta"
+    },
+    {
+      "id": "runtime",
+      "label": "Configuração instalada",
+      "status": "ok",
+      "checked_at": "2026-10-13T12:00:00Z",
+      "version": "exemplo-runtime"
+    },
+    {
+      "id": "canonical",
+      "label": "Cursos e ênfases",
+      "status": "ok",
+      "checked_at": "2026-10-13T12:00:00Z",
+      "version": "exemplo-base"
+    },
+    {
+      "id": "agent",
+      "label": "Marina publicada",
+      "status": "ok",
+      "checked_at": "2026-10-13T12:00:00Z",
+      "version": "exemplo-agente"
+    }
+  ],
+  "flows": [
+    {
+      "id": "flow-exemplo",
+      "name": "Formulário com busca (exemplo)",
+      "status": "PUBLISHED",
+      "activation": "enabled",
+      "audience": "Pessoas fictícias",
+      "entry_screen": "INICIO",
+      "verified": true,
+      "definition_hash": "4dba104f11fc87f2cd3c112642d40cf0fec91ff0347b30e86f37e1af4f82e865",
+      "screens": [
+        {
+          "id": "INICIO",
+          "title": "Seu concurso",
+          "texts": [
+            "${data.erro}",
+            "Responda algumas perguntas para continuarmos seu atendimento."
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "empresa",
+              "label": "Qual concurso você quer?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "petrobras",
+                  "title": "Petrobras"
+                },
+                {
+                  "id": "transpetro",
+                  "title": "Transpetro"
+                },
+                {
+                  "id": "ambas",
+                  "title": "As duas"
+                },
+                {
+                  "id": "nao_sei",
+                  "title": "Ainda não sei"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "INSCRICAO",
+              "label": "Transpetro ou as duas empresas",
+              "verified": true,
+              "condition": "Transpetro ou as duas empresas"
+            },
+            {
+              "target": "FORMACAO",
+              "label": "Petrobras",
+              "verified": true,
+              "condition": "Petrobras"
+            }
+          ]
+        },
+        {
+          "id": "INSCRICAO",
+          "title": "Transpetro 2026",
+          "texts": [
+            "${data.erro}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "inscrito_tp",
+              "label": "Você se inscreveu?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "sim",
+                  "title": "Sim"
+                },
+                {
+                  "id": "nao",
+                  "title": "Não"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "TP_ENFASE",
+              "label": "Já se inscreveu na Transpetro",
+              "verified": true,
+              "condition": "Já se inscreveu na Transpetro"
+            },
+            {
+              "target": "FORMACAO",
+              "label": "Não se inscreveu e escolheu as duas empresas",
+              "verified": true,
+              "condition": "Não se inscreveu e escolheu as duas empresas"
+            },
+            {
+              "target": "ALTERNATIVA_PB",
+              "label": "Não se inscreveu e escolheu apenas Transpetro",
+              "verified": true,
+              "condition": "Não se inscreveu e escolheu apenas Transpetro"
+            }
+          ]
+        },
+        {
+          "id": "ALTERNATIVA_PB",
+          "title": "Outra possibilidade",
+          "texts": [
+            "${data.erro}",
+            "As inscrições da Transpetro já encerraram. Você quer conhecer as possibilidades da Petrobras?"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "interesse_pb",
+              "label": "Quer conhecer a Petrobras?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "sim",
+                  "title": "Sim, quero conhecer"
+                },
+                {
+                  "id": "nao",
+                  "title": "Não tenho interesse agora"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "FORMACAO",
+              "label": "Com qualquer resposta; preservar interesse declarado",
+              "verified": true,
+              "condition": "Com qualquer resposta; preservar interesse declarado"
+            }
+          ]
+        },
+        {
+          "id": "TP_ENFASE",
+          "title": "Sua inscrição",
+          "texts": [
+            "${data.erro}",
+            "Qual ênfase você escolheu na inscrição da Transpetro?",
+            "Informe a que está na sua inscrição."
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "enfase_tp",
+              "label": "Ênfase da inscrição",
+              "type": "Dropdown",
+              "required": true,
+              "dynamic": true,
+              "options": []
+            }
+          ],
+          "next": [
+            {
+              "target": "FORMACAO",
+              "label": "Ênfase declarada ou inscrição a conferir",
+              "verified": true,
+              "condition": "Ênfase declarada ou inscrição a conferir"
+            }
+          ]
+        },
+        {
+          "id": "FORMACAO",
+          "title": "Sua formação",
+          "texts": [
+            "${data.erro}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "escolaridade",
+              "label": "Qual é a sua formação?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "medio",
+                  "title": "Só ensino médio"
+                },
+                {
+                  "id": "tecnico",
+                  "title": "Curso técnico"
+                },
+                {
+                  "id": "tecnologo",
+                  "title": "Tecnólogo"
+                },
+                {
+                  "id": "engenharia",
+                  "title": "Engenharia"
+                },
+                {
+                  "id": "outro_superior",
+                  "title": "Outro curso superior"
+                }
+              ]
+            },
+            {
+              "name": "situacao_formacao",
+              "label": "Situação do curso",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "concluido",
+                  "title": "Já concluí"
+                },
+                {
+                  "id": "cursando",
+                  "title": "Estou cursando"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "PLANO_TECNICO",
+              "label": "Só ensino médio",
+              "verified": true,
+              "condition": "Só ensino médio"
+            },
+            {
+              "target": "BUSCA",
+              "label": "Técnico, engenharia, bacharelado ou tecnólogo",
+              "verified": true,
+              "condition": "Técnico, engenharia, bacharelado ou tecnólogo"
+            }
+          ]
+        },
+        {
+          "id": "PLANO_TECNICO",
+          "title": "Curso técnico",
+          "texts": [
+            "${data.erro}",
+            "Ter só o ensino médio não equivale a ter concluído um curso técnico."
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "plano",
+              "label": "Quer fazer um curso técnico?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "sei",
+                  "title": "Sim, já sei qual curso"
+                },
+                {
+                  "id": "ajuda",
+                  "title": "Quero ajuda para escolher"
+                },
+                {
+                  "id": "nao",
+                  "title": "Não pretendo fazer agora"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "BUSCA",
+              "label": "Sim, já sei qual curso",
+              "verified": true,
+              "condition": "Sim, já sei qual curso"
+            },
+            {
+              "target": "MOMENTO",
+              "label": "Quero ajuda ou não pretendo fazer agora",
+              "verified": true,
+              "condition": "Quero ajuda ou não pretendo fazer agora"
+            }
+          ]
+        },
+        {
+          "id": "BUSCA",
+          "title": "Encontrar formação",
+          "texts": [
+            "${data.erro}",
+            "${data.orientacao}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "termo",
+              "label": "Nome do curso",
+              "type": "TextInput",
+              "required": true,
+              "dynamic": false,
+              "options": []
+            }
+          ],
+          "next": [
+            {
+              "target": "RESULTADOS",
+              "label": "Pesquisa válida e fonte disponível",
+              "verified": true,
+              "condition": "Pesquisa válida e fonte disponível"
+            }
+          ]
+        },
+        {
+          "id": "RESULTADOS",
+          "title": "Escolher formação",
+          "texts": [
+            "${data.erro}",
+            "${data.resumo}",
+            "Na lista, você também pode refinar a busca ou ver mais resultados."
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "formacao_id",
+              "label": "Seu curso",
+              "type": "Dropdown",
+              "required": true,
+              "dynamic": true,
+              "options": []
+            },
+            {
+              "name": "refino",
+              "label": "Nova pesquisa",
+              "type": "TextInput",
+              "required": true,
+              "dynamic": false,
+              "options": []
+            }
+          ],
+          "next": [
+            {
+              "target": "RESULTADO",
+              "label": "Curso selecionado; interesse em Petrobras",
+              "verified": true,
+              "condition": "Curso selecionado; interesse em Petrobras"
+            },
+            {
+              "target": "MOMENTO",
+              "label": "Não achou o curso ou segue somente Transpetro",
+              "verified": true,
+              "condition": "Não achou o curso ou segue somente Transpetro"
+            },
+            {
+              "target": "RESULTADOS",
+              "label": "Mais resultados, anteriores ou refinar busca",
+              "condition": "Paginação e nova busca permanecem na lista",
+              "verified": true
+            }
+          ]
+        },
+        {
+          "id": "RESULTADO",
+          "title": "Ênfases Petrobras",
+          "texts": [
+            "${data.erro}",
+            "${data.formacao}",
+            "${data.detalhe}",
+            "${data.ressalvas}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "enfase_pb",
+              "label": "Ênfase de interesse",
+              "type": "Dropdown",
+              "required": true,
+              "dynamic": true,
+              "options": []
+            }
+          ],
+          "next": [
+            {
+              "target": "MOMENTO",
+              "label": "Ênfase selecionada ou ainda não sabe",
+              "verified": true,
+              "condition": "Ênfase selecionada ou ainda não sabe"
+            },
+            {
+              "target": "OUTRAS_ENFASES",
+              "label": "Outra",
+              "verified": true,
+              "condition": "Outra"
+            }
+          ]
+        },
+        {
+          "id": "OUTRAS_ENFASES",
+          "title": "Outras ênfases",
+          "texts": [
+            "${data.erro}",
+            "${data.detalhe}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "enfase_pb",
+              "label": "Ênfase de interesse",
+              "type": "Dropdown",
+              "required": true,
+              "dynamic": true,
+              "options": []
+            }
+          ],
+          "next": [
+            {
+              "target": "MOMENTO",
+              "label": "Escolheu outra ênfase ou pediu conferência",
+              "verified": true,
+              "condition": "Escolheu outra ênfase ou pediu conferência"
+            }
+          ]
+        },
+        {
+          "id": "MOMENTO",
+          "title": "Seus estudos",
+          "texts": [
+            "${data.erro}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "situacao",
+              "label": "Você já começou a estudar?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "nao_comecou",
+                  "title": "Ainda não comecei"
+                },
+                {
+                  "id": "ja_comecou",
+                  "title": "Já comecei"
+                }
+              ]
+            },
+            {
+              "name": "tempo",
+              "label": "Quanto tempo por dia?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "ate_1h",
+                  "title": "Até 1 hora"
+                },
+                {
+                  "id": "1_2h",
+                  "title": "1 a 2 horas"
+                },
+                {
+                  "id": "2_4h",
+                  "title": "2 a 4 horas"
+                },
+                {
+                  "id": "mais_4h",
+                  "title": "Mais de 4 horas"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "PESA",
+              "label": "Situação e tempo respondidos",
+              "verified": true,
+              "condition": "Situação e tempo respondidos"
+            }
+          ]
+        },
+        {
+          "id": "PESA",
+          "title": "Sua preparação",
+          "texts": [
+            "${data.erro}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "trava",
+              "label": "O que dificulta a preparação?",
+              "type": "CheckboxGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "nao_sei_comecar",
+                  "title": "Não sei por onde começar"
+                },
+                {
+                  "id": "constancia",
+                  "title": "Falta constância"
+                },
+                {
+                  "id": "materias",
+                  "title": "Matérias difíceis"
+                },
+                {
+                  "id": "tempo",
+                  "title": "Pouco tempo para estudar"
+                },
+                {
+                  "id": "tentei",
+                  "title": "Já tentei e não passei"
+                },
+                {
+                  "id": "receio_demora",
+                  "title": "Receio de o concurso demorar"
+                }
+              ]
+            },
+            {
+              "name": "procura",
+              "label": "O que importa mais para você?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "teoria_questoes",
+                  "title": "Conteúdo teórico e questões"
+                },
+                {
+                  "id": "acompanhamento_mentorias",
+                  "title": "Acompanhamento e mentorias"
+                },
+                {
+                  "id": "ambos",
+                  "title": "Ambos"
+                },
+                {
+                  "id": "nao_sei",
+                  "title": "Ainda não sei"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "ALUNO",
+              "label": "Uma ou duas dificuldades e preferência respondidas",
+              "verified": true,
+              "condition": "Uma ou duas dificuldades e preferência respondidas"
+            }
+          ]
+        },
+        {
+          "id": "ALUNO",
+          "title": "Estuda com a Zero1?",
+          "texts": [
+            "${data.erro}"
+          ],
+          "terminal": false,
+          "fields": [
+            {
+              "name": "aluno_zero1",
+              "label": "Já estuda com a Zero1?",
+              "type": "RadioButtonsGroup",
+              "required": true,
+              "dynamic": false,
+              "options": [
+                {
+                  "id": "sim",
+                  "title": "Já estudo com a Zero1"
+                },
+                {
+                  "id": "nao",
+                  "title": "Ainda não"
+                }
+              ]
+            }
+          ],
+          "next": [
+            {
+              "target": "REVISAO",
+              "label": "Informou se já estuda com a Zero1",
+              "verified": true,
+              "condition": "Informou se já estuda com a Zero1"
+            }
+          ]
+        },
+        {
+          "id": "REVISAO",
+          "title": "Confira suas respostas",
+          "texts": [
+            "${data.erro}",
+            "${data.resumo}",
+            "Ao enviar, suas respostas seguem para o atendimento nesta conversa."
+          ],
+          "terminal": true,
+          "fields": [],
+          "next": []
+        }
+      ]
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {
+        "id": "entry",
+        "label": "Mensagem recebida",
+        "kind": "entry"
+      },
+      {
+        "id": "decision",
+        "label": "Regras de encaminhamento",
+        "kind": "decision",
+        "detail": "A ativação depende do perfil e do estado da conversa. Cenários de entrada sem adaptador reconhecido ficam não verificados."
+      },
+      {
+        "id": "agent",
+        "label": "Marina",
+        "kind": "agent"
+      },
+      {
+        "id": "human",
+        "label": "Equipe",
+        "kind": "human"
+      },
+      {
+        "id": "flow-flow-exemplo",
+        "label": "Formulário com busca (exemplo)",
+        "kind": "form",
+        "flow_id": "flow-exemplo",
+        "detail": "Pessoas fictícias"
+      }
+    ],
+    "edges": [
+      {
+        "id": "entry-decision",
+        "source": "entry",
+        "target": "decision",
+        "label": "Conferir entrada",
+        "verified": false
+      },
+      {
+        "id": "decision-flow-exemplo",
+        "source": "decision",
+        "target": "flow-flow-exemplo",
+        "label": "Habilitado",
+        "verified": false
+      },
+      {
+        "id": "end-flow-exemplo",
+        "source": "flow-flow-exemplo",
+        "target": "agent",
+        "label": "Respostas conferidas; aluno vai à equipe",
+        "verified": false
+      }
+    ]
+  },
+  "divergences": [],
+  "scenarios": [
+    {
+      "id": "entrada-oi",
+      "title": "Chegou com Oi",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "oi"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-pagina",
+      "title": "Chegou da página",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "pagina"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-aluno",
+      "title": "Já é aluno",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "aluno"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-humano",
+      "title": "Pediu uma pessoa",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "humano"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-equipe",
+      "title": "Já está com a equipe",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "equipe"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-recusa",
+      "title": "Recusou o formulário",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "recusa"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-aberto",
+      "title": "Já está preenchendo",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "aberto"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-respondido",
+      "title": "Já concluiu",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "respondido"
+          }
+        }
+      ]
+    },
+    {
+      "id": "entrada-reset",
+      "title": "Enviou #zerar",
+      "description": "Seletor real do piloto, com pessoa e histórico fictícios. O porteiro anterior é um limite explícito.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "ENTRADA",
+          "data": {
+            "scenario": "reset"
+          }
+        }
+      ]
+    },
+    {
+      "id": "medio-ajuda",
+      "title": "Só ensino médio: quer ajuda",
+      "description": "Respostas fictícias; percorre as regras existentes até a próxima pergunta.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "INICIO",
+          "data": {
+            "empresa": "petrobras"
+          }
+        },
+        {
+          "screen": "FORMACAO",
+          "data": {
+            "escolaridade": "medio"
+          }
+        },
+        {
+          "screen": "PLANO_TECNICO",
+          "data": {
+            "plano": "ajuda"
+          }
+        }
+      ]
+    },
+    {
+      "id": "medio-nao",
+      "title": "Só ensino médio: não pretende técnico",
+      "description": "Respostas fictícias; percorre as regras existentes até a próxima pergunta.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "INICIO",
+          "data": {
+            "empresa": "petrobras"
+          }
+        },
+        {
+          "screen": "FORMACAO",
+          "data": {
+            "escolaridade": "medio"
+          }
+        },
+        {
+          "screen": "PLANO_TECNICO",
+          "data": {
+            "plano": "nao"
+          }
+        }
+      ]
+    },
+    {
+      "id": "medio-sei",
+      "title": "Só ensino médio: já sabe o curso",
+      "description": "Respostas fictícias; percorre as regras existentes até a próxima pergunta.",
+      "flow_id": "flow-exemplo",
+      "answers": [
+        {
+          "screen": "INICIO",
+          "data": {
+            "empresa": "petrobras"
+          }
+        },
+        {
+          "screen": "FORMACAO",
+          "data": {
+            "escolaridade": "medio"
+          }
+        },
+        {
+          "screen": "PLANO_TECNICO",
+          "data": {
+            "plano": "sei"
+          }
+        }
+      ]
+    }
+  ],
+  "agent": {
+    "name": "Marina (exemplo)",
+    "version": "exemplo",
+    "instructions": "Exemplo fictício para desenvolvimento da interface. Não é a configuração publicada."
+  }
+}
