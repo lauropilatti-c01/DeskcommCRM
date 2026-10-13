@@ -8,11 +8,11 @@ export function EstadoFormulario({ flow }: { flow: Flow }) {
   const t = useT();
   return (
     <div className="flex flex-wrap gap-2 text-xs leading-5">
-      <span className="rounded border border-border bg-surface-elevated px-2 py-0.5">
+      <span className="rounded-md border border-border bg-surface-elevated px-2 py-0.5">
         {t(metaLabels[flow.status])}
       </span>
       <span
-        className={`rounded border px-2 py-0.5 ${flow.activation === "enabled" ? "border-accent bg-accent-soft text-text" : "border-border text-text-muted"}`}
+        className={`rounded-md border px-2 py-0.5 ${flow.activation === "enabled" ? "border-accent bg-accent-soft text-text" : "border-border text-text-muted"}`}
       >
         {t(activationLabels[flow.activation])}
       </span>
@@ -95,7 +95,7 @@ export function Detalhes({
           {snapshot.graph.edges
             .filter((edge) => edge.source === node.id)
             .map((edge) => (
-              <div key={edge.id} className="mt-3 rounded border border-border p-3 text-sm">
+              <div key={edge.id} className="mt-3 rounded-md border border-border p-3 text-sm">
                 <p>{edge.label}</p>
                 <p className="mt-1 text-text-muted">
                   →{" "}
@@ -146,7 +146,7 @@ export function Detalhes({
                 </p>
               )}
               {field.options.length ? (
-                <ul className="divide-y divide-border rounded border border-border">
+                <ul className="divide-y divide-border rounded-md border border-border">
                   {field.options.map((option) => (
                     <li key={option.id} className="p-3 text-sm">
                       <p>{option.title}</p>
@@ -159,7 +159,7 @@ export function Detalhes({
                   ))}
                 </ul>
               ) : (
-                <div className="rounded border border-dashed border-border p-3 text-xs leading-5 text-text-muted">
+                <div className="rounded-md border border-dashed border-border p-3 text-xs leading-5 text-text-muted">
                   {field.dynamic
                     ? t(
                         "Opções consultadas conforme as respostas. Explore um cenário para ver os resultados.",
