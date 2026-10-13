@@ -2026,8 +2026,8 @@ export const DICIONARIO: Traducoes = {
     es: "Escribe las instrucciones del agente (al menos una frase).",
   },
   "As instruções têm": { es: "Las instrucciones tienen" },
-  "caracteres, e o máximo é 20.000. Corte": {
-    es: "caracteres, y el máximo es 20.000. Recorta",
+  "caracteres, e o máximo é 24.000. Corte": {
+    es: "caracteres, y el máximo es 24.000. Recorta",
   },
   "para conseguir salvar.": { es: "para poder guardar." },
   "Escolha o modelo de inteligência artificial.": {

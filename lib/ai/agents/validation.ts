@@ -105,7 +105,7 @@ export type FollowupConfig = z.infer<typeof followupConfigSchema>;
 
 const versionShapeSchema = z
   .object({
-    system_prompt: z.string().trim().min(10).max(20000),
+    system_prompt: z.string().trim().min(10).max(24000),
     provider: z.enum(PROVIDERS),
     model: z.string().trim().min(1).max(120),
     /**
