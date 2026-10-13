@@ -92,13 +92,29 @@ export function posicionar(nodes: MapNode[], edges: MapEdge[]) {
       .forEach((edge) => queue.push({ id: edge.target, rank: entry.rank + 1 }));
   }
   const detachedRank = Math.max(0, ...ranks.values()) + 1;
-  const counts = new Map<number, number>();
-  return nodes.map((node) => {
+  const layers = new Map<number, MapNode[]>();
+  for (const node of nodes) {
     const rank = ranks.get(node.id) ?? detachedRank;
-    const column = counts.get(rank) ?? 0;
-    counts.set(rank, column + 1);
-    return { ...node, position: { x: column * 330, y: rank * 175 } };
-  });
+    const layer = layers.get(rank) ?? [];
+    layer.push(node);
+    layers.set(rank, layer);
+  }
+  const columns = Math.min(3, Math.max(1, ...[...layers.values()].map((layer) => layer.length)));
+  const positions = new Map<string, { x: number; y: number }>();
+  let top = 0;
+  for (const [, layer] of [...layers.entries()].sort(([left], [right]) => left - right)) {
+    for (let index = 0; index < layer.length; index++) {
+      const row = Math.floor(index / columns);
+      const inRow = Math.min(columns, layer.length - row * columns);
+      positions.set(layer[index]!.id, {
+        x: (index % columns) * 320 + ((columns - inRow) * 320) / 2,
+        y: top + row * 210,
+      });
+    }
+    // Uma camada larga reserva todas as linhas antes da próxima decisão.
+    top += Math.ceil(layer.length / columns) * 210;
+  }
+  return nodes.map((node) => ({ ...node, position: positions.get(node.id)! }));
 }
 export function formatarData(value: string, languageTag: string) {
   const date = new Date(value);

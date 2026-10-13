@@ -99,6 +99,43 @@ describe("Jornadas", () => {
     expect(nodes).toHaveLength(5);
     expect(nodes.every((node) => Number.isFinite(node.position.y))).toBe(true);
   });
+  it("distribui seis formulários em duas linhas sem invadir a próxima camada", () => {
+    const forms = Array.from({ length: 6 }, (_, index) => ({
+      id: `form-${index}`,
+      label: `Formulário ${index}`,
+      kind: "form",
+    }));
+    const nodes = [
+      { id: "entrada", label: "Entrada", kind: "entry" },
+      ...forms,
+      { id: "saida", label: "Saída", kind: "exit" },
+    ];
+    const edges = forms.flatMap((form) => [
+      {
+        id: `in-${form.id}`,
+        source: "entrada",
+        target: form.id,
+        label: "Condição",
+        verified: true,
+      },
+      {
+        id: `out-${form.id}`,
+        source: form.id,
+        target: "saida",
+        label: "Conclusão",
+        verified: true,
+      },
+    ]);
+    const placed = posicionar(nodes, edges);
+    const positionedForms = placed.filter((node) => node.kind === "form");
+    expect(new Set(positionedForms.map((node) => node.position.x)).size).toBe(3);
+    expect(new Set(positionedForms.map((node) => node.position.y)).size).toBe(2);
+    expect(placed.find((node) => node.id === "saida")!.position.y).toBeGreaterThan(
+      Math.max(...positionedForms.map((node) => node.position.y)),
+    );
+    expect(placed.map((node) => node.id)).toEqual(nodes.map((node) => node.id));
+    expect(posicionar(nodes, edges)).toEqual(placed);
+  });
 });
 
 describe("Cenários", () => {
