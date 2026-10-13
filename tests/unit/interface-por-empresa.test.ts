@@ -19,6 +19,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import type { ModuloOpcional } from "@/lib/instalacao/modulos";
 import { NAV_CATALOG } from "@/lib/navigation/catalogo";
 import {
   combinarInterfaces,
@@ -42,9 +43,11 @@ const hrefs = (settings: unknown, role: "agent" | "admin" = "admin") =>
 /**
  * Os itens do MENU LATERAL — o mesmo recorte que o instrumento de tela mede:
  * só os grupos que aparecem na dobra, sem o grupo do rodapé.
+ * A instalação padrão tem módulos opcionais desligados; `undefined` no registry
+ * representa inventário sem filtro, e não o estado real da instalação.
  */
-const itensNoMenuLateral = (settings: unknown, role: "agent" | "admin" = "admin") =>
-  sidebarGroups(false, role, settings as InterfaceSettings | undefined)
+const itensNoMenuLateral = (settings: unknown, role: "agent" | "admin" = "admin", modulos: readonly ModuloOpcional[] = []) =>
+  sidebarGroups(false, role, settings as InterfaceSettings | undefined, modulos)
     .filter((grupo) => grupo.group.id !== GRUPO_NO_RODAPE)
     .reduce((total, grupo) => total + grupo.items.length, 0);
 
@@ -197,6 +200,13 @@ describe("medição da folga (pergunta de aceite da issue #1341)", () => {
    */
   it("configuração COMPLETA (ninguém escolheu): 15 itens, folga 0 — igual a hoje", () => {
     expect(itensNoMenuLateral(combinarInterfaces(completa, completa))).toBe(15);
+  });
+
+  it("Jornadas habilitada acrescenta uma porta; desligada preserva as 15 originais", () => {
+    expect(itensNoMenuLateral(INTERFACE_COMPLETA, "admin", [])).toBe(15);
+    expect(itensNoMenuLateral(INTERFACE_COMPLETA, "admin", ["c01_jornadas"])).toBe(16);
+    // A dobra com o módulo opcional é conferida na tela; não declarar folga zero
+    // a partir da contagem. Configurações/rodapé continuam disponíveis.
   });
 
   it("configuração SIMPLIFICADA (empresa escolhe o preset): 6 itens, folga 9", () => {

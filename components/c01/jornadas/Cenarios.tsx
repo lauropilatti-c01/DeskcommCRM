@@ -108,7 +108,7 @@ export default function Cenarios({
           {t("Ou comece pelo formulário")}
           <select
             id="cenario-flow"
-            className="mt-2 h-11 w-full rounded border border-border bg-bg px-3 text-sm"
+            className="mt-2 h-11 w-full rounded-md border border-border bg-bg px-3 text-sm"
             value={flowId}
             onChange={(event) => {
               setFlowId(event.target.value);
@@ -133,7 +133,7 @@ export default function Cenarios({
         </Button>
       </div>
       {error && (
-        <p role="alert" className="rounded border border-error bg-error-bg p-4 text-sm text-text">
+        <p role="alert" className="rounded-md border border-error bg-error-bg p-4 text-sm text-text">
           {error}
         </p>
       )}
@@ -156,13 +156,13 @@ export default function Cenarios({
                 </p>
               )}
             </div>
-            <span className="rounded border border-border px-2 py-1 text-xs">
+            <span className="rounded-md border border-border px-2 py-1 text-xs">
               {result.verified ? t("Percurso conferido") : t("Percurso não conferido")}
             </span>
           </div>
           <ol className="flex flex-wrap gap-2 text-xs" aria-label={t("Percurso do cenário")}>
             {result.steps.map((step, index) => (
-              <li key={`${index}:${step.screen}`} className="rounded bg-surface-elevated px-2 py-1">
+              <li key={`${index}:${step.screen}`} className="rounded-md bg-surface-elevated px-2 py-1">
                 {index + 1}. {step.title}
               </li>
             ))}
@@ -216,7 +216,7 @@ export default function Cenarios({
                           {options.map((option) => (
                             <label
                               key={option.id}
-                              className="flex min-h-11 items-start gap-3 rounded border border-border p-3 text-sm"
+                              className="flex min-h-11 items-start gap-3 rounded-md border border-border p-3 text-sm"
                             >
                               <input
                                 type="checkbox"
@@ -247,7 +247,7 @@ export default function Cenarios({
                         <select
                           aria-label={field.label}
                           required={field.required}
-                          className="h-11 w-full rounded border border-border bg-bg px-3 text-sm"
+                          className="h-11 w-full rounded-md border border-border bg-bg px-3 text-sm"
                           value={typeof values[field.name] === "string" ? values[field.name] : ""}
                           onChange={(event) =>
                             setValues({ ...values, [field.name]: event.target.value })

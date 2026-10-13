@@ -221,7 +221,7 @@ export default function Jornadas({
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-muted">
-            <span className="rounded border border-border bg-surface px-2 py-1 font-medium text-text">
+            <span className="rounded-md border border-border bg-surface px-2 py-1 font-medium text-text">
               {snapshot.environment === "production"
                 ? t("Produção")
                 : snapshot.environment === "laboratory"
@@ -243,7 +243,7 @@ export default function Jornadas({
             </span>
           </div>
           {snapshot.completeness !== "complete" && (
-            <p className="rounded border border-border bg-surface-elevated p-3 text-sm leading-6">
+            <p className="rounded-md border border-border bg-surface-elevated p-3 text-sm leading-6">
               {t(
                 "Parte das informações não pôde ser confirmada. Os estados desconhecidos continuam visíveis; consulte os detalhes em",
               )}{" "}
@@ -271,7 +271,7 @@ export default function Jornadas({
             </TabsList>
             <TabsContent value="mapa" className="mt-4">
               {scenarioSnapshot && (
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded border border-border bg-surface-elevated p-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-surface-elevated p-3">
                   <p className="text-xs leading-5">
                     {t("Etapas destacadas pertencem ao último cenário explorado.")}{" "}
                     {t("Leitura fixada em")}{" "}
@@ -317,7 +317,7 @@ export default function Jornadas({
                         {results.map((item) => (
                           <li key={`${item.flow.id}:${item.screen.id}`}>
                             <button
-                              className="w-full rounded border border-border p-3 text-left text-sm hover:border-accent focus-visible:outline-2 focus-visible:outline-accent"
+                              className="w-full rounded-md border border-border p-3 text-left text-sm hover:border-accent focus-visible:outline-2 focus-visible:outline-accent"
                               aria-label={`${item.screen.title} · ${item.flow.name}`}
                               onClick={() => select(item.flow.id, item.screen.id, true)}
                             >
@@ -335,7 +335,7 @@ export default function Jornadas({
                       <button
                         aria-pressed={!flowId}
                         onClick={() => select(null)}
-                        className={`w-full rounded border p-3 text-left text-sm font-medium ${!flowId ? "border-accent bg-accent-soft" : "border-border"}`}
+                        className={`w-full rounded-md border p-3 text-left text-sm font-medium ${!flowId ? "border-accent bg-accent-soft" : "border-border"}`}
                       >
                         {t("Todo o atendimento")}
                       </button>
@@ -348,7 +348,7 @@ export default function Jornadas({
                             <button
                               aria-pressed={flowId === item.id}
                               onClick={() => select(item.id)}
-                              className={`w-full rounded border p-3 text-left ${flowId === item.id ? "border-accent bg-accent-soft" : "border-border hover:border-accent"}`}
+                              className={`w-full rounded-md border p-3 text-left ${flowId === item.id ? "border-accent bg-accent-soft" : "border-border hover:border-accent"}`}
                             >
                               <span className="block text-sm font-medium break-words">
                                 {item.name}
@@ -410,7 +410,7 @@ export default function Jornadas({
                         <li key={item.id}>
                           <button
                             onClick={() => selectNode(item.id)}
-                            className="w-full rounded border border-border p-3 text-left text-sm focus-visible:outline-2 focus-visible:outline-accent"
+                            className="w-full rounded-md border border-border p-3 text-left text-sm focus-visible:outline-2 focus-visible:outline-accent"
                           >
                             <span className="mr-2 text-text-muted">{index + 1}.</span>
                             {item.label}
@@ -430,7 +430,7 @@ export default function Jornadas({
                       {map.nodes.map((item) => (
                         <li key={item.id}>
                           <button
-                            className="min-h-9 w-full rounded px-2 text-left text-xs hover:bg-accent-soft focus-visible:outline-2 focus-visible:outline-accent"
+                            className="min-h-9 w-full rounded-md px-2 text-left text-xs hover:bg-accent-soft focus-visible:outline-2 focus-visible:outline-accent"
                             onClick={() => selectNode(item.id)}
                           >
                             {item.label}
@@ -535,7 +535,7 @@ export default function Jornadas({
                           <p className="mt-2 text-sm leading-6 break-words">{source.message}</p>
                         )}
                       </div>
-                      <span className="rounded border border-border px-2 py-1 text-xs">
+                      <span className="rounded-md border border-border px-2 py-1 text-xs">
                         {source.status === "ok"
                           ? t("Consultada")
                           : source.status === "error"
