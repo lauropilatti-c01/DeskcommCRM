@@ -32,6 +32,10 @@
  * "R$ *997*" e "R$ 💰997" são 997); "BRL 997", "997 BRL" e "997 R$" são valores; o "+"
  * colado é lido ("R$ +997" é 997) e o "-" colado deixa o valor em dúvida ("R$ -997",
  * "-R$ 5", "-5 reais" nunca são iguais a "R$ 5").
+ *
+ * (C01, CRM-089 D4) A trava semântica de promessa usa a mesma leitura (`trechosAprovados`)
+ * para não vetar o texto exato da base, com qualquer assunto (`assuntos: null`) — ver
+ * `promessa-e-texto-afirmavel.ts`.
  */
 import { linksNoTexto } from './link-permitido';
 
@@ -40,8 +44,12 @@ export interface ColunasDoTextoAfirmavel {
   texto: string;
   podeAfirmar: string;
   assunto: string;
-  /** Os assuntos que liberam valor; a linha com outro assunto, ou sem assunto, não libera. */
-  assuntos: readonly string[];
+  /**
+   * Os assuntos que liberam valor; a linha com outro assunto, ou sem assunto, não libera.
+   * (C01, CRM-089 D4) `null` = qualquer assunto, inclusive nenhum: só a trava de promessa
+   * lê assim (`promessa-e-texto-afirmavel.ts`); a de dinheiro sempre tem a lista.
+   */
+  assuntos: readonly string[] | null;
 }
 
 /**
@@ -99,8 +107,7 @@ export function textosAfirmaveisNoResultado(
       typeof texto === 'string' &&
       texto.trim().length > 0 &&
       linha[colunas.podeAfirmar] === true &&
-      typeof assunto === 'string' &&
-      colunas.assuntos.includes(assunto)
+      (colunas.assuntos === null || (typeof assunto === 'string' && colunas.assuntos.includes(assunto)))
     ) {
       achados.add(texto);
     }
@@ -191,7 +198,7 @@ export function textoParaConferir(texto: string): string {
 }
 
 /** A frase para comparar: sem os espaços das pontas e sem a pontuação do fim. */
-function fraseParaComparar(frase: string): string {
+export function fraseParaComparar(frase: string): string {
   return frase.trim().replace(/[\s.!?;:,]+$/, '');
 }
 
