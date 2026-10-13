@@ -289,7 +289,9 @@ export default function Jornadas({
                   </Button>
                 </div>
               )}
-              <div className="overflow-hidden rounded-lg border border-border bg-surface xl:grid xl:grid-cols-[220px_minmax(0,1fr)_320px]">
+              <div
+                className={`overflow-hidden rounded-lg border border-border bg-surface xl:grid ${screen || node ? "xl:grid-cols-[220px_minmax(0,1fr)_320px]" : "xl:grid-cols-[220px_minmax(0,1fr)]"}`}
+              >
                 <aside
                   className="space-y-4 border-b border-border p-4 xl:max-h-[740px] xl:overflow-y-auto xl:border-r xl:border-b-0"
                   aria-label={t("Inventário de formulários")}
@@ -443,12 +445,14 @@ export default function Jornadas({
                     </p>
                   )}
                 </section>
-                <aside
-                  className="hidden max-h-[740px] overflow-y-auto border-l border-border xl:block"
-                  aria-label={t("Detalhes da etapa")}
-                >
-                  {detail}
-                </aside>
+                {(screen || node) && (
+                  <aside
+                    className="hidden max-h-[740px] overflow-y-auto border-l border-border xl:block"
+                    aria-label={t("Detalhes da etapa")}
+                  >
+                    {detail}
+                  </aside>
+                )}
               </div>
             </TabsContent>
             <TabsContent value="formularios" className="mt-4">

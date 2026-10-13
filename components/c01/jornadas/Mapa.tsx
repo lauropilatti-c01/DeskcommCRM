@@ -1,7 +1,7 @@
 "use client";
 import { useT } from "@/hooks/i18n/useT";
 
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   Background,
   Controls,
@@ -13,6 +13,7 @@ import {
   useNodesState,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { posicionar, type MapNode, type MapEdge } from "./modelo";
@@ -43,7 +44,7 @@ function Etapa({ data, selected }: NodeProps<EtapaNode>) {
       <p className="mb-2 text-[11px] font-medium tracking-wide text-text-muted uppercase">
         {t(kinds[data.kind] ?? "Etapa")}
       </p>
-      <p className="text-sm leading-5 font-semibold">{data.label}</p>
+      <p className="text-sm leading-5 font-semibold break-words">{data.label}</p>
       {data.detail && (
         <p className="mt-1 line-clamp-3 text-xs leading-5 text-text-muted">{data.detail}</p>
       )}
@@ -68,7 +69,21 @@ export default function Mapa({
   onSelect: (id: string) => void;
 }) {
   const t = useT();
-  const flowNodes = useMemo(
+  const container = useRef<HTMLDivElement>(null);
+  const instance = useRef<Pick<ReactFlowInstance, "setViewport"> | null>(null);
+  const focusNode = useCallback((node: EtapaNode, atStart = false) => {
+    const width = container.current?.clientWidth ?? 600;
+    const height = container.current?.clientHeight ?? 590;
+    void instance.current?.setViewport(
+      {
+        x: width / 2 - (node.position.x + 127.5) * 0.9,
+        y: atStart ? 24 : height / 2 - (node.position.y + 70) * 0.9,
+        zoom: 0.9,
+      },
+      { duration: atStart ? 0 : 200 },
+    );
+  }, []);
+  const flowNodes = useMemo<EtapaNode[]>(
     () =>
       posicionar(nodes, edges).map((node) => ({
         id: node.id,
@@ -106,13 +121,26 @@ export default function Mapa({
   useEffect(() => {
     setRenderNodes(flowNodes);
   }, [flowNodes, setRenderNodes]);
+  useEffect(() => {
+    const active = flowNodes.find((node) => node.id === selected);
+    if (active) focusNode(active);
+  }, [selected, flowNodes, focusNode]);
   return (
-    <div className={`${styles.canvas} h-full min-h-[480px] w-full`} data-testid="jornadas-mapa">
+    <div
+      ref={container}
+      className={`${styles.canvas} h-full min-h-[480px] w-full`}
+      data-testid="jornadas-mapa"
+    >
       <ReactFlow
         nodes={renderNodes}
         onNodesChange={onNodesChange}
         edges={flowEdges}
         nodeTypes={nodeTypes}
+        onInit={(api) => {
+          instance.current = api;
+          const first = flowNodes.find((node) => node.id === selected) ?? flowNodes[0];
+          if (first) focusNode(first, !selected);
+        }}
         onNodeClick={(_, node) => onSelect(node.id)}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -127,7 +155,6 @@ export default function Mapa({
         nodesDraggable={false}
         nodesConnectable={false}
         edgesFocusable={false}
-        fitView
         minZoom={0.18}
         maxZoom={1.5}
         proOptions={{ hideAttribution: false }}
@@ -141,6 +168,8 @@ export default function Mapa({
         <Background gap={22} size={1} color="var(--color-border)" />
         <Controls showInteractive={false} />
         <MiniMap
+          position="top-right"
+          style={{ width: 132, height: 96 }}
           pannable
           zoomable
           nodeColor="var(--color-accent)"
