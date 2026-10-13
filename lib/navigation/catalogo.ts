@@ -398,7 +398,8 @@ export const NAV_CATALOG = [
   {
     href: "/app/settings/tenant/proposals/modelos",
     label: "Modelos de proposta",
-    description: "Personalize os modelos da plataforma ou crie os da sua empresa, inclusive a partir de uma proposta que você já usa.",
+    description:
+      "Personalize os modelos da plataforma ou crie os da sua empresa, inclusive a partir de uma proposta que você já usa.",
     icon: "FileText",
     group: "organizacao",
     section: "Sua empresa",
@@ -511,7 +512,8 @@ export const NAV_CATALOG = [
     // e na busca, e quem usa pode pô-la no menu dela.
     href: "/app/ai/atendimento",
     label: "Fluxos de atendimento",
-    description: "Perguntas que a IA conduz durante a conversa, com as respostas guardadas na ficha do cliente.",
+    description:
+      "Perguntas que a IA conduz durante a conversa, com as respostas guardadas na ficha do cliente.",
     icon: "ListChecks",
     group: "ia",
     section: "Montar o agente",
@@ -553,7 +555,8 @@ export const NAV_CATALOG = [
     label: "Provedores",
     // O "Jev" vem cedo: o ⌘K mostra só o começo da descrição, e a versão
     // longa cortava antes do nome — quem procurava "jev" achava, mas não via por quê.
-    description: "Ligue o Jev para decisões rápidas e escolha qual inteligência atende cada parte do sistema.",
+    description:
+      "Ligue o Jev para decisões rápidas e escolha qual inteligência atende cada parte do sistema.",
     icon: "Plugs",
     group: "ia",
     section: "Montar o agente",
@@ -616,6 +619,18 @@ export const NAV_CATALOG = [
     // fosse procurar — medido numa loja que vende pelo WhatsApp.
     sidebar: true,
     contador: "casos",
+  },
+  {
+    href: "/app/jornadas",
+    label: "Jornadas",
+    description:
+      "Consulte os formulários, os caminhos de entrada e o encaminhamento ao atendimento.",
+    icon: "FlowArrow",
+    group: "ia",
+    section: "Acompanhar o agente",
+    minRole: "viewer",
+    sidebar: true,
+    modulo: "c01_jornadas",
   },
   {
     href: "/app/ai/inbox",

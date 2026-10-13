@@ -48,6 +48,7 @@ import { logger } from "@/lib/logger";
  * por trás, está ligado nesta instalação?".
  */
 export const MODULOS_OPCIONAIS = [
+  "c01_jornadas",
   "banco_externo",
   "fluxos_atendimento",
   "propostas",
@@ -68,6 +69,7 @@ const MODULOS_DE_TABELA = ["honorarios"] as const satisfies readonly ModuloOpcio
  * `CHAVE_DO_MODULO[modulo]` seria `undefined`.
  */
 export const MODULOS_OPCIONAIS_POR_FLAG = [
+  "c01_jornadas",
   "banco_externo",
   "fluxos_atendimento",
   "propostas",
@@ -77,6 +79,7 @@ export const MODULOS_OPCIONAIS_POR_FLAG = [
 /** A linha de cada módulo por FLAG em `platform_config`. O formato é o da CHECK da 0341.
  * Não inclui os módulos de tabela — esses vêm de `modulos_instalados`. */
 export const CHAVE_DO_MODULO: Record<(typeof MODULOS_OPCIONAIS_POR_FLAG)[number], string> = {
+  c01_jornadas: "MODULO_C01_JORNADAS",
   banco_externo: "MODULO_BANCO_EXTERNO",
   // Doc 64 (a): os fluxos de atendimento do #1130 entram desligados. A IA passa
   // a conduzir um roteiro de perguntas no turno — quem não liga não carrega o

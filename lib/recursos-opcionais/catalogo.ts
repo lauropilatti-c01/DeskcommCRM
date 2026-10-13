@@ -97,6 +97,10 @@ function peloServidor(id: string) {
 
 /** Nome e linha de cada módulo. `Record` exaustivo: módulo novo sem texto não compila. */
 const TEXTO_DO_MODULO: Record<ModuloOpcional, { nome: string; oQueFaz: string }> = {
+  c01_jornadas: {
+    nome: "Jornadas",
+    oQueFaz: "Consulte formulários, caminhos de entrada e o encaminhamento ao atendimento.",
+  },
   banco_externo: {
     nome: "Banco de dados externo",
     oQueFaz: "O agente consulta o banco de outro sistema da empresa, como um ERP ou outro CRM.",

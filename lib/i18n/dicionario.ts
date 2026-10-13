@@ -37,6 +37,401 @@ import type { Idioma } from "./idiomas";
 type Traducoes = Record<string, Partial<Record<Exclude<Idioma, "pt-BR">, string>>>;
 
 export const DICIONARIO: Traducoes = {
+  "Mensagem conforme as respostas.": { es: "Mensaje según las respuestas." },
+  "Referência técnica": { es: "Referencia técnica" },
+  "Carregando mapa…": {
+    es: "Cargando mapa…",
+  },
+  "Jornadas do atendimento": {
+    es: "Recorridos de atención",
+  },
+  "Do primeiro contato ao atendimento, em um só mapa.": {
+    es: "Desde el primer contacto hasta la atención, en un solo mapa.",
+  },
+  "Recarregar leitura": {
+    es: "Volver a cargar los datos",
+  },
+  "Solicitando…": {
+    es: "Solicitando…",
+  },
+  "Atualizar conferência": {
+    es: "Actualizar comprobación",
+  },
+  "Não foi possível conferir agora": {
+    es: "No se pudo comprobar ahora",
+  },
+  "Os dados abaixo são da última leitura exibida, de": {
+    es: "Los datos siguientes corresponden a la última lectura mostrada, del",
+  },
+  "Consultando as fontes…": {
+    es: "Consultando las fuentes…",
+  },
+  "Ainda não há uma leitura disponível": {
+    es: "Todavía no hay una lectura disponible",
+  },
+  "Reunindo os formulários e as regras de entrada.": {
+    es: "Recopilando los formularios y las reglas de entrada.",
+  },
+  "A página precisa de uma leitura do serviço Jornadas para mostrar o atendimento. Nenhum dado de exemplo substitui a configuração real.":
+    {
+      es: "La página necesita una lectura del servicio Recorridos para mostrar la atención. Ningún dato de ejemplo sustituye la configuración real.",
+    },
+  Laboratório: {
+    es: "Laboratorio",
+  },
+  "Exemplo fictício": {
+    es: "Ejemplo ficticio",
+  },
+  "Leitura de": {
+    es: "Lectura del",
+  },
+  "formulário(s)": {
+    es: "formulario(s)",
+  },
+  "Fontes consultadas": {
+    es: "Fuentes consultadas",
+  },
+  "Leitura parcial · veja Conferência": {
+    es: "Lectura parcial · vea Comprobación",
+  },
+  "Leitura ainda não conferida": {
+    es: "Lectura aún no comprobada",
+  },
+  "Parte das informações não pôde ser confirmada. Os estados desconhecidos continuam visíveis; consulte os detalhes em":
+    {
+      es: "Parte de la información no pudo confirmarse. Los estados desconocidos siguen visibles; consulte los detalles en",
+    },
+  Conferência: {
+    es: "Comprobación",
+  },
+  "Visões de Jornadas": {
+    es: "Vistas de Recorridos",
+  },
+  "Mapa geral": {
+    es: "Mapa general",
+  },
+  Formulários: {
+    es: "Formularios",
+  },
+  Cenários: {
+    es: "Escenarios",
+  },
+  "Inventário de formulários": {
+    es: "Inventario de formularios",
+  },
+  "Buscar texto ou opção": {
+    es: "Buscar texto u opción",
+  },
+  "Ex.: ensino médio": {
+    es: "Ej.: educación secundaria",
+  },
+  "etapa(s) encontrada(s)": {
+    es: "etapa(s) encontrada(s)",
+  },
+  "Todo o atendimento": {
+    es: "Toda la atención",
+  },
+  "etapas ·": {
+    es: "etapas ·",
+  },
+  Habilitado: {
+    es: "Habilitado",
+  },
+  "Sem novas entradas": {
+    es: "Sin nuevas entradas",
+  },
+  "Ativação desconhecida": {
+    es: "Activación desconocida",
+  },
+  "Percurso do atendimento": {
+    es: "Recorrido de la atención",
+  },
+  "Visão do atendimento": {
+    es: "Vista de la atención",
+  },
+  "Linhas tracejadas: caminho ainda não conferido.": {
+    es: "Líneas discontinuas: camino aún no comprobado.",
+  },
+  "Voltar ao geral": {
+    es: "Volver al mapa general",
+  },
+  "Abrir mapa em tela cheia": {
+    es: "Abrir mapa en pantalla completa",
+  },
+  "Navegar por lista de etapas": {
+    es: "Navegar por la lista de etapas",
+  },
+  "Nenhuma etapa disponível nesta leitura.": {
+    es: "No hay etapas disponibles en esta lectura.",
+  },
+  "Detalhes da etapa": {
+    es: "Detalles de la etapa",
+  },
+  "etapas · Identificador": {
+    es: "etapas · Identificador",
+  },
+  "Público não identificado nesta leitura.": {
+    es: "Público no identificado en esta lectura.",
+  },
+  "Caminhos reconhecidos pelo leitor.": {
+    es: "Caminos reconocidos por el lector.",
+  },
+  "Caminhos ainda não conferidos para esta versão.": {
+    es: "Caminos aún no comprobados para esta versión.",
+  },
+  "Abrir formulário no mapa": {
+    es: "Abrir formulario en el mapa",
+  },
+  "O inventário não retornou formulários. Confira o estado da fonte Meta.": {
+    es: "El inventario no devolvió formularios. Compruebe el estado de la fuente Meta.",
+  },
+  "Fontes desta leitura": {
+    es: "Fuentes de esta lectura",
+  },
+  "Cada origem é conferida separadamente. Publicar na Meta não habilita o formulário no atendimento.":
+    {
+      es: "Cada origen se comprueba por separado. Publicar en Meta no habilita el formulario en la atención.",
+    },
+  Consultada: {
+    es: "Consultada",
+  },
+  "Não foi possível conferir": {
+    es: "No se pudo comprobar",
+  },
+  "Não conferida": {
+    es: "No comprobada",
+  },
+  "Pontos de atenção": {
+    es: "Puntos de atención",
+  },
+  Informação: {
+    es: "Información",
+  },
+  "Ver etapa relacionada": {
+    es: "Ver etapa relacionada",
+  },
+  "Nenhuma divergência relatada pelas fontes consultadas. Isso não substitui a conferência das fontes indisponíveis.":
+    {
+      es: "Las fuentes consultadas no informaron discrepancias. Esto no sustituye la comprobación de las fuentes no disponibles.",
+    },
+  "Textos, opções e próximos destinos.": {
+    es: "Textos, opciones y próximos destinos.",
+  },
+  "Mapa do atendimento": {
+    es: "Mapa de la atención",
+  },
+  "Toque em uma etapa para abrir seus detalhes.": {
+    es: "Toque una etapa para abrir sus detalles.",
+  },
+  "Explore um caminho": {
+    es: "Explore un camino",
+  },
+  "Use respostas fictícias para acompanhar as perguntas e os dados entregues ao atendimento. Este ensaio não envia mensagens nem chama a Marina.":
+    {
+      es: "Use respuestas ficticias para seguir las preguntas y los datos entregados a la atención. Esta prueba no envía mensajes ni llama a Marina.",
+    },
+  "Ou comece pelo formulário": {
+    es: "O comience por el formulario",
+  },
+  "Selecione um formulário": {
+    es: "Seleccione un formulario",
+  },
+  " · Caminhos não conferidos": {
+    es: " · Caminos no comprobados",
+  },
+  "Consultando…": {
+    es: "Consultando…",
+  },
+  "Começar do início": {
+    es: "Comenzar desde el principio",
+  },
+  "Leitura fixada em": {
+    es: "Lectura fijada en",
+  },
+  "Há uma leitura mais recente. Este cenário continua usando a anterior; comece do início para usar a nova.":
+    {
+      es: "Hay una lectura más reciente. Este escenario sigue usando la anterior; comience desde el principio para usar la nueva.",
+    },
+  "Percurso conferido": {
+    es: "Recorrido comprobado",
+  },
+  "Percurso não conferido": {
+    es: "Recorrido no comprobado",
+  },
+  "Percurso do cenário": {
+    es: "Recorrido del escenario",
+  },
+  "Escolha uma opção": {
+    es: "Elija una opción",
+  },
+  "Opções indisponíveis nesta leitura. Não é possível avançar por esta etapa.": {
+    es: "Opciones no disponibles en esta lectura. No se puede avanzar por esta etapa.",
+  },
+  "Ver próxima etapa": {
+    es: "Ver siguiente etapa",
+  },
+  "Informações entregues ao atendimento": {
+    es: "Información entregada a la atención",
+  },
+  "Abra uma etapa": {
+    es: "Abra una etapa",
+  },
+  "Selecione uma caixa do mapa ou uma etapa da lista para consultar os textos e os destinos de cada opção.":
+    {
+      es: "Seleccione un recuadro del mapa o una etapa de la lista para consultar los textos y los destinos de cada opción.",
+    },
+  "Etapa do atendimento": {
+    es: "Etapa de la atención",
+  },
+  "Abrir telas do formulário": {
+    es: "Abrir pantallas del formulario",
+  },
+  "A resposta varia conforme as informações recebidas. O mapa apresenta as orientações disponíveis, sem gerar uma nova conversa.":
+    {
+      es: "La respuesta varía según la información recibida. El mapa presenta las orientaciones disponibles, sin generar una nueva conversación.",
+    },
+  "· versão": {
+    es: "· versión",
+  },
+  "Ver instruções publicadas": {
+    es: "Ver instrucciones publicadas",
+  },
+  "Instruções publicadas indisponíveis nesta leitura.": {
+    es: "Instrucciones publicadas no disponibles en esta lectura.",
+  },
+  "Próximos destinos": {
+    es: "Próximos destinos",
+  },
+  "Caminho ainda não conferido": {
+    es: "Camino aún no comprobado",
+  },
+  "Prévia do conteúdo": {
+    es: "Vista previa del contenido",
+  },
+  "Representação das perguntas. A aparência final é definida pelo WhatsApp.": {
+    es: "Representación de las preguntas. La apariencia final la define WhatsApp.",
+  },
+  "Texto preenchido conforme as respostas:": {
+    es: "Texto completado según las respuestas:",
+  },
+  "Aparece quando:": {
+    es: "Aparece cuando:",
+  },
+  "Opções consultadas conforme as respostas. Explore um cenário para ver os resultados.": {
+    es: "Opciones consultadas según las respuestas. Explore un escenario para ver los resultados.",
+  },
+  "Resposta preenchida pela pessoa.": {
+    es: "Respuesta completada por la persona.",
+  },
+  "Conclusão e envio das respostas": {
+    es: "Finalización y envío de las respuestas",
+  },
+  "Para onde vai": {
+    es: "A dónde va",
+  },
+  " · Não conferido": {
+    es: " · No comprobado",
+  },
+  "Fim deste formulário.": {
+    es: "Fin de este formulario.",
+  },
+  "Destino não identificado nesta leitura.": {
+    es: "Destino no identificado en esta lectura.",
+  },
+  "Informações desta etapa": {
+    es: "Información de esta etapa",
+  },
+  "Campos coletados; consulte o cenário para ver o que é entregue ao CRM.": {
+    es: "Campos recopilados; consulte el escenario para ver qué se entrega al CRM.",
+  },
+  "Publicado na Meta": {
+    es: "Publicado en Meta",
+  },
+  "Rascunho na Meta": {
+    es: "Borrador en Meta",
+  },
+  "Descontinuado na Meta": {
+    es: "Descontinuado en Meta",
+  },
+  "Publicação não conferida": {
+    es: "Publicación no comprobada",
+  },
+  "Habilitado para novas entradas": {
+    es: "Habilitado para nuevas entradas",
+  },
+  "Ativação não conferida": {
+    es: "Activación no comprobada",
+  },
+  Formulário: {
+    es: "Formulario",
+  },
+  Destino: {
+    es: "Destino",
+  },
+  "Aproximar mapa": {
+    es: "Acercar mapa",
+  },
+  "Afastar mapa": {
+    es: "Alejar mapa",
+  },
+  "Enquadrar mapa": {
+    es: "Ajustar mapa",
+  },
+  "Pressione Enter para abrir os detalhes da etapa.": {
+    es: "Presione Enter para abrir los detalles de la etapa.",
+  },
+  "Minimapa do atendimento": {
+    es: "Minimapa de la atención",
+  },
+  "Simular envio das respostas": {
+    es: "Simular envío de las respuestas",
+  },
+  "Nenhuma mensagem será enviada.": {
+    es: "No se enviará ningún mensaje.",
+  },
+  "O cenário não corresponde à leitura selecionada. Inicie um novo cenário.": {
+    es: "El escenario no corresponde a la lectura seleccionada. Inicie un nuevo escenario.",
+  },
+  "Não foi possível explorar este cenário.": {
+    es: "No se pudo explorar este escenario.",
+  },
+  "Não foi possível consultar as fontes.": {
+    es: "No se pudieron consultar las fuentes.",
+  },
+  "Conferência solicitada. A coleta acontece em segundo plano; consulte novamente em alguns instantes.":
+    {
+      es: "Comprobación solicitada. La recopilación se realiza en segundo plano; vuelva a consultar en unos instantes.",
+    },
+  "Não foi possível atualizar a conferência.": {
+    es: "No se pudo actualizar la comprobación.",
+  },
+  "Não foi possível consultar Jornadas. Tente novamente.": {
+    es: "No se pudo consultar Recorridos. Inténtelo de nuevo.",
+  },
+  "O serviço retornou uma leitura incompleta. Tente novamente.": {
+    es: "El servicio devolvió una lectura incompleta. Inténtelo de nuevo.",
+  },
+  "Horário indisponível": {
+    es: "Hora no disponible",
+  },
+  "Ver percurso no mapa": {
+    es: "Ver recorrido en el mapa",
+  },
+  "Limpar destaque do cenário": {
+    es: "Quitar resaltado del escenario",
+  },
+  "Etapas destacadas pertencem ao último cenário explorado.": {
+    es: "Las etapas resaltadas pertenecen al último escenario explorado.",
+  },
+  Jornadas: { es: "Recorridos" },
+  "Entender o atendimento": { es: "Entender la atención" },
+  "Consulte os formulários, os caminhos de entrada e o encaminhamento ao atendimento.": {
+    es: "Consulta los formularios, las rutas de entrada y la derivación a la atención.",
+  },
+  "Consulte formulários, caminhos de entrada e o encaminhamento ao atendimento.": {
+    es: "Consulta formularios, rutas de entrada y la derivación a la atención.",
+  },
+
   // ─── EMPRESAS, PESSOAS E IMPORTAÇÃO (metade B2B do #1621, de @renatofortal) ───
   "Arquivo": {"es": "Archivo"},
   "Atualizado": {"es": "Actualizado"},

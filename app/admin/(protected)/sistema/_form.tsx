@@ -88,7 +88,11 @@ export function FormularioDeComportamento({ inicial }: { inicial: ComportamentoD
             onValueChange={(v) => trocar("orcamento_de_ia", v as ChaveDeOrcamentoDaInstalacao)}
             disabled={pendente}
           >
-            <SelectTrigger id="orcamento-de-ia" className="w-[200px]" aria-label={t("Proteção de gasto de IA")}>
+            <SelectTrigger
+              id="orcamento-de-ia"
+              className="w-[200px]"
+              aria-label={t("Proteção de gasto de IA")}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -133,7 +137,10 @@ export function FormularioDeComportamento({ inicial }: { inicial: ComportamentoD
           <Select
             value={valores.divulgacao_de_pagamento}
             onValueChange={(v) =>
-              trocar("divulgacao_de_pagamento", v as ComportamentoDaInstalacao["divulgacao_de_pagamento"])
+              trocar(
+                "divulgacao_de_pagamento",
+                v as ComportamentoDaInstalacao["divulgacao_de_pagamento"],
+              )
             }
             disabled={pendente}
           >
@@ -187,7 +194,19 @@ export function FormularioDeComportamento({ inicial }: { inicial: ComportamentoD
  * `.env`). Mesmo desenho do cartão de cima: salva no clique, volta no erro.
  */
 /** Cada módulo, como ele aparece aqui. O texto diz o que ligar ABRE, não só o nome. */
-const MODULOS_NA_TELA: ReadonlyArray<{ modulo: ModuloPorFlag; id: string; rotulo: string; descricao: string }> = [
+const MODULOS_NA_TELA: ReadonlyArray<{
+  modulo: ModuloPorFlag;
+  id: string;
+  rotulo: string;
+  descricao: string;
+}> = [
+  {
+    modulo: "c01_jornadas",
+    id: "modulo-c01-jornadas",
+    rotulo: "Jornadas",
+    descricao:
+      "Mostra os formulários e caminhos do atendimento para a equipe. Só consulta: não altera nem envia mensagens. Exige o leitor privado configurado para a organização.",
+  },
   {
     modulo: "banco_externo",
     id: "modulo-banco-externo",
@@ -255,7 +274,10 @@ export function FormularioDeModulos({ ligados }: { ligados: readonly ModuloOpcio
       </CardHeader>
       <CardContent className="space-y-4">
         {MODULOS_NA_TELA.map((m) => (
-          <div key={m.modulo} className="flex items-start justify-between gap-4 rounded-lg border p-4">
+          <div
+            key={m.modulo}
+            className="flex items-start justify-between gap-4 rounded-lg border p-4"
+          >
             <div className="space-y-1">
               <Label htmlFor={m.id} className="text-base">
                 {t(m.rotulo)}

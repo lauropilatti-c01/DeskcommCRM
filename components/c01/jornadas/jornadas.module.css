@@ -1,0 +1,20 @@
+.canvas {
+  --xy-background-color: var(--color-bg);
+  --xy-node-color: var(--color-text);
+  --xy-controls-button-background-color: var(--color-surface);
+  --xy-controls-button-background-color-hover: var(--color-surface-elevated);
+  --xy-controls-button-color: var(--color-text);
+  --xy-controls-button-border-color: var(--color-border);
+  --xy-minimap-background-color: var(--color-surface);
+}
+.canvas :global(.react-flow__attribution) {
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+}
+.canvas :global(.react-flow__attribution a) {
+  color: inherit;
+}
+.canvas :global(.react-flow__node:focus-visible) {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 4px;
+}
