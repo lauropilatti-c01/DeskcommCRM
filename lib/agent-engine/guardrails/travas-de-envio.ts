@@ -54,7 +54,8 @@
  * (C01, -c01.14, CRM-097 da C01) Duas travas novas:
  *
  *   { "travas_de_envio": {
- *       "consulta_antes_de_enviar": { "agentes": ["<id do agente>"], "tabela": "<tabela>" },
+ *       "consulta_antes_de_enviar": { "agentes": ["<id do agente>"],
+ *         "tabelas": [{ "tabela": "<tabela>", "cobrar": "todo_turno" | "uma_vez_por_contato" }] },
  *       "marcador_entre_colchetes": { "ligada": true } } }
  *
  * - `consulta_antes_de_enviar`: liga POR AGENTE (ver `consulta-antes-de-enviar.ts`). Valor
@@ -165,11 +166,11 @@ export interface TravasArmadas {
   /** (C01, -c01.7) Link e valor de ferramenta: os links e os valores liberados neste momento do turno. */
   linkEValorDeFerramenta?: LinkEValorArmado;
   /**
-   * (C01, -c01.14) Consulte antes de enviar: a tabela e se o resultado dela estava no que
-   * o modelo leu ao escrever ESTA mensagem. Só arma no agente ligado e enquanto o contato
-   * não teve a consulta (some no turno ao chegar no limite de vetos).
+   * (C01, -c01.14) Consulte antes de enviar: as tabelas cobradas neste turno cujo resultado
+   * NÃO estava no que o modelo leu ao escrever ESTA mensagem (vazio = passa). Só arma no
+   * agente ligado (some no turno ao chegar no limite de vetos).
    */
-  consultaAntesDeEnviar?: { tabela: string; leu: boolean };
+  consultaAntesDeEnviar?: { faltando: readonly string[] };
   /** (C01, -c01.14) Nenhum marcador entre colchetes: só liga ou desliga. */
   marcadorEntreColchetes?: true;
 }

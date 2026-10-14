@@ -17,7 +17,7 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  * TURNO INTEIRO, contra Postgres real, com modelo e canal falsos e o AI SDK de verdade (é
  * ele que entrega ao `send_message` as mensagens que o modelo leu).
  *
- * Com a consulta ligada para o agente do turno, numa tabela:
+ * Com a consulta ligada para o agente do turno, numa tabela (uma vez por contato):
  *   - mandar sem consultar volta ao modelo; consultando e mandando de novo, sai;
  *   - consultar e mandar no MESMO passo volta (o modelo escreveu sem ler); no passo
  *     seguinte, com o resultado lido, sai;
@@ -25,6 +25,10 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *   - a segunda tentativa sem consulta passa (estilo: sem caso, sem passagem);
  *   - a consulta feita num turno anterior do contato libera o turno;
  *   - interruptor desligado (sem a chave, ou outro agente na lista): nada muda.
+ * Com duas tabelas (os fatos em todo turno, os vídeos uma vez por contato):
+ *   - o veto pede as duas; consultando as duas, sai;
+ *   - consultando só uma, a segunda tentativa sai (estilo);
+ *   - a consulta de um turno anterior libera só a tabela "uma vez por contato".
  * E o marcador "[link do vídeo]" nunca sai.
  *
  * Tabelas, links e textos são fictícios (regra do C01.md).
@@ -84,6 +88,7 @@ const AGORA = new Date("2026-07-30T15:00:00Z");
 const MENSAGEM_DO_CLIENTE_EM = "2026-07-30T14:55:00Z";
 
 const TABELA = "tabela_de_videos";
+const FATOS = "tabela_de_fatos";
 const VIDEO = "https://videos.exemplo.com.br/v/abc123";
 
 type Modules = {
@@ -233,10 +238,36 @@ async function travas(valor: Record<string, unknown>) {
     [ORG, JSON.stringify(valor)],
   );
 }
+/** A consulta ligada para `agentes`, com as tabelas (todo_turno / uma_vez_por_contato). */
+function consultaLigada(tabelas: Record<string, "todo_turno" | "uma_vez_por_contato">, agentes = [AGENTE]) {
+  return {
+    consulta_antes_de_enviar: { agentes, tabelas: Object.entries(tabelas).map(([tabela, cobrar]) => ({ tabela, cobrar })) },
+  };
+}
 const LIGADA = {
-  consulta_antes_de_enviar: { agentes: [AGENTE], tabela: TABELA },
+  ...consultaLigada({ [TABELA]: "uma_vez_por_contato" }),
   marcador_entre_colchetes: { ligada: true },
 };
+
+/** Um turno anterior do contato que consultou `tabelas` (o registro que o runtime grava). */
+async function turnoAnteriorConsultou(...tabelas: string[]) {
+  const { job } = await m.queue.enqueueJob(pool, ORG, {
+    kind: "inbound_turn",
+    leadId: CONTACT,
+    payload: { conversation_id: CONV, contact_id: CONTACT, channel_session_id: SESSION, inbound_message_id: MSG, crm_event_id: randomUUID() },
+    maxAttempts: 1,
+  });
+  await pool.query("update job_queue set status = 'done' where id = $1", [job.id]);
+  for (const tabela of tabelas) {
+    await pool.query(
+      `insert into api_audit_log (organization_id, action, resource_type, request_id, metadata)
+       values ($1, 'mcp.tool_called', 'mcp_tool', $2,
+               jsonb_build_object('tool_name','crm_query_external_data','success',true,
+                                  'args', jsonb_build_object('tabela', $3::text)))`,
+      [ORG, job.id, `c01.${tabela}`],
+    );
+  }
+}
 
 /** Os códigos que vetaram neste teste, na ordem. */
 async function vetos(): Promise<string[]> {
@@ -382,27 +413,14 @@ describe("(C01, -c01.14) 'consulte antes de enviar', no turno inteiro", () => {
 
   it("a consulta à tabela num turno anterior do contato libera o turno; a de outra tabela, não", async () => {
     const TABELA_DO_TURNO_ANTERIOR = "tabela_do_turno_anterior";
-    const { job } = await m.queue.enqueueJob(pool, ORG, {
-      kind: "inbound_turn",
-      leadId: CONTACT,
-      payload: { conversation_id: CONV, contact_id: CONTACT, channel_session_id: SESSION, inbound_message_id: MSG, crm_event_id: randomUUID() },
-      maxAttempts: 1,
-    });
-    await pool.query("update job_queue set status = 'done' where id = $1", [job.id]);
-    await pool.query(
-      `insert into api_audit_log (organization_id, action, resource_type, request_id, metadata)
-       values ($1, 'mcp.tool_called', 'mcp_tool', $2,
-               jsonb_build_object('tool_name','crm_query_external_data','success',true,
-                                  'args', jsonb_build_object('tabela', $3::text)))`,
-      [ORG, job.id, `c01.${TABELA_DO_TURNO_ANTERIOR}`],
-    );
-    await travas({ consulta_antes_de_enviar: { agentes: [AGENTE], tabela: TABELA_DO_TURNO_ANTERIOR } });
+    await turnoAnteriorConsultou(TABELA_DO_TURNO_ANTERIOR);
+    await travas(consultaLigada({ [TABELA_DO_TURNO_ANTERIOR]: "uma_vez_por_contato" }));
     await rodaTurno([{ envia: "Obrigado você!" }]);
     expect(enviados.map((e) => e.body)).toEqual(["Obrigado você!"]);
     expect(await vetos()).toEqual([]);
 
     enviados = [];
-    await travas({ consulta_antes_de_enviar: { agentes: [AGENTE], tabela: "outra_tabela" } });
+    await travas(consultaLigada({ outra_tabela: "uma_vez_por_contato" }));
     await rodaTurno([{ envia: "Primeira, outra tabela." }, { envia: "Segunda, outra tabela." }]);
     expect(enviados.map((e) => e.body)).toEqual(["Segunda, outra tabela."]);
   });
@@ -410,10 +428,55 @@ describe("(C01, -c01.14) 'consulte antes de enviar', no turno inteiro", () => {
   it("interruptor desligado: sem a chave, ou com outro agente na lista, sai de primeira", async () => {
     await travas({});
     await rodaTurno([{ envia: "Sem a chave." }]);
-    await travas({ consulta_antes_de_enviar: { agentes: [OUTRO_AGENTE], tabela: TABELA } });
+    await travas(consultaLigada({ [TABELA]: "todo_turno" }, [OUTRO_AGENTE]));
     await rodaTurno([{ envia: "Outro agente." }]);
     expect(enviados.map((e) => e.body)).toEqual(["Sem a chave.", "Outro agente."]);
     expect(await vetos()).toEqual([]);
+  });
+});
+
+describe("(C01, -c01.14) 'consulte antes de enviar' com duas tabelas", () => {
+  beforeEach(async () => {
+    await travas(consultaLigada({ [FATOS]: "todo_turno", [TABELA]: "uma_vez_por_contato" }));
+  });
+
+  it("o veto pede as duas; consultando as duas, sai", async () => {
+    const { estado, erro } = await rodaTurno([
+      { envia: "Duas tabelas, sem consulta." },
+      { base: FATOS },
+      { base: TABELA },
+      { envia: `Duas tabelas lidas:\n\n${VIDEO}` },
+    ]);
+    expect(erro).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([`Duas tabelas lidas:\n\n${VIDEO}`]);
+    expect(await vetos()).toEqual(["consulta_antes_de_enviar"]);
+    expect(estado.prompts[1]).toMatch(/você ainda não leu a consulta às tabelas tabela_de_fatos e tabela_de_videos/);
+  });
+
+  it("consultando só uma, a segunda tentativa sai (estilo), sem caso nem passagem", async () => {
+    const { estado, erro } = await rodaTurno([
+      { envia: "Só os fatos, primeira." },
+      { base: FATOS },
+      { envia: "Só os fatos, segunda." },
+    ]);
+    expect(erro).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual(["Só os fatos, segunda."]);
+    expect(await vetos()).toEqual(["consulta_antes_de_enviar", "consulta_antes_de_enviar"]);
+    expect(estado.prompts[1]).toMatch(/às tabelas tabela_de_fatos e tabela_de_videos/);
+    await semCasoNemPassagem();
+  });
+
+  it("a consulta de um turno anterior libera só a tabela 'uma vez por contato'; os fatos voltam a ser cobrados", async () => {
+    await turnoAnteriorConsultou(FATOS, TABELA);
+    const { estado, erro } = await rodaTurno([
+      { envia: "Obrigado, turno seguinte." },
+      { base: FATOS },
+      { envia: "De nada, turno seguinte." },
+    ]);
+    expect(erro).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual(["De nada, turno seguinte."]);
+    expect(await vetos()).toEqual(["consulta_antes_de_enviar"]);
+    expect(estado.prompts[1]).toMatch(/você ainda não leu a consulta à tabela tabela_de_fatos\./);
   });
 });
 

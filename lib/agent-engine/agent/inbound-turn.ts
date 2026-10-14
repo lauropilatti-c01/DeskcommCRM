@@ -3804,24 +3804,33 @@ async function executarTurnoDoAgente(
   if (travasDaOrg.leituraFalhou) {
     runLog.warn('travas de envio: leitura de organizations.settings falhou ou JSON inválido — todas desligadas');
   }
-  // (C01, -c01.14) Consulte antes de enviar: só no agente ligado, e enquanto o contato não
-  // teve a consulta à tabela num turno anterior (lido UMA vez, aqui, antes de qualquer
-  // ferramenta deste turno). Leitura que falha = desarmada, com o aviso: a trava é de
+  // (C01, -c01.14) Consulte antes de enviar: só no agente ligado. As tabelas cobradas neste
+  // turno: as de `todo_turno`, e as de `uma_vez_por_contato` que o contato ainda não teve
+  // num turno anterior (lido UMA vez, aqui, antes de qualquer ferramenta deste turno).
+  // Leitura que falha = aquela tabela fica sem cobrança no turno, com o aviso: a trava é de
   // estilo, e a resposta não pode esperar por ela.
   const consultaAntes = travasDaOrg.travas.consultaAntesDeEnviar;
-  let consultaAntesArmada = false;
+  const tabelasCobradas: string[] = [];
   if (consultaAntes !== null && agentConfig !== null && leadId && consultaAntes.agentes.includes(agentConfig.agentId)) {
-    try {
-      consultaAntesArmada = !(await consultaJaFeitaComOContato(pool, {
-        organizationId: tenantId,
-        contactId: leadId,
-        jobIdAtual: liveJob().id,
-        tabela: consultaAntes.tabela,
-      }));
-    } catch (err) {
-      runLog.warn('trava consulta_antes_de_enviar: leitura das consultas do contato falhou — desarmada no turno', {
-        error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
-      });
+    for (const { tabela, cobrar } of consultaAntes.tabelas) {
+      if (cobrar === 'todo_turno') {
+        tabelasCobradas.push(tabela);
+        continue;
+      }
+      try {
+        const feita = await consultaJaFeitaComOContato(pool, {
+          organizationId: tenantId,
+          contactId: leadId,
+          jobIdAtual: liveJob().id,
+          tabela,
+        });
+        if (!feita) tabelasCobradas.push(tabela);
+      } catch (err) {
+        runLog.warn('trava consulta_antes_de_enviar: leitura das consultas do contato falhou — tabela sem cobrança no turno', {
+          tabela,
+          error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+        });
+      }
     }
   }
   // (C01, -c01.3, item 3a) Os links já mandados nesta conversa, lidos uma vez, só com a
@@ -3878,12 +3887,13 @@ async function executarTurnoDoAgente(
   /**
    * (C01, -c01.3) O que o `send_message` arma em cada tentativa: as travas ligadas na
    * organização, com o que cada uma precisa saber do turno AGORA (quantas mensagens
-   * ainda cabem), menos as de estilo já desarmadas no turno. (C01, -c01.14) `leitura`: o
-   * que o modelo leu ao escrever a mensagem desta tentativa (sem ela, conta como lida).
+   * ainda cabem), menos as de estilo já desarmadas no turno. (C01, -c01.14) `leitura`: as
+   * tabelas cobradas cujo resultado NÃO estava no que o modelo leu ao escrever a mensagem
+   * desta tentativa (sem ela, nada falta).
    */
-  const travasArmadas = (leitura?: { consultaLida: boolean }): TravasArmadas => ({
-    ...(consultaAntesArmada && consultaAntes !== null && !estiloDesarmado('consulta_antes_de_enviar')
-      ? { consultaAntesDeEnviar: { tabela: consultaAntes.tabela, leu: leitura?.consultaLida ?? true } }
+  const travasArmadas = (leitura?: { consultasFaltando: readonly string[] }): TravasArmadas => ({
+    ...(tabelasCobradas.length > 0 && !estiloDesarmado('consulta_antes_de_enviar')
+      ? { consultaAntesDeEnviar: { faltando: leitura?.consultasFaltando ?? [] } }
       : {}),
     ...(travasDaOrg.travas.marcadorEntreColchetes ? { marcadorEntreColchetes: true as const } : {}),
     ...(travasDaOrg.travas.linkEValorDeFerramenta ? { linkEValorDeFerramenta: linkEValorLiberado() } : {}),
@@ -4492,13 +4502,10 @@ async function executarTurnoDoAgente(
       execute: async ({ body, produto_codigo }, opcoes) => {
         // (C01, -c01.8) Uma tentativa nova substitui a que o estilo vetou.
         envioVetadoPorEstilo = null;
-        // (C01, -c01.14) O resultado da consulta estava no que o modelo leu ao escrever
-        // ESTA mensagem? (`opcoes.messages` abre o passo, sem o passo desta chamada: a
-        // consulta pedida junto com o envio não conta.)
-        const consultaLida =
-          !consultaAntesArmada || consultaAntes === null
-            ? true
-            : leuConsultaDaTabela(opcoes?.messages, consultaAntes.tabela);
+        // (C01, -c01.14) As tabelas cobradas cujo resultado NÃO estava no que o modelo leu
+        // ao escrever ESTA mensagem. (`opcoes.messages` abre o passo, sem o passo desta
+        // chamada: a consulta pedida junto com o envio não conta.)
+        const consultasFaltando = tabelasCobradas.filter((tabela) => !leuConsultaDaTabela(opcoes?.messages, tabela));
         // CORPO VAZIO NÃO SAI. Medido ao vivo (2026-09-19): o `gpt-4o-mini`
         // chamou `send_message` várias vezes com corpo que virou vazio e o
         // WhatsApp do cliente recebeu bolhas em branco. O schema garante
@@ -4691,7 +4698,7 @@ async function executarTurnoDoAgente(
             // (C01, -c01.3) As travas novas ligadas na organização (só aqui: texto do
             // modelo), lidas a cada execução da cadeia. A frase de espera do fail-safe
             // abaixo herda estes args, mas é texto do sistema: sai sem elas.
-            travasDeEnvio: (): TravasArmadas => (enviandoFraseDeEspera ? {} : travasArmadas({ consultaLida })),
+            travasDeEnvio: (): TravasArmadas => (enviandoFraseDeEspera ? {} : travasArmadas({ consultasFaltando })),
             // Mesmo padrão do vocabulário interno: só o `send_message` arma — é o único
             // corpo escrito pelo modelo. `active` é ter QUALQUER ferramenta de agenda:
             // um agente que só CONSULTA promete "vou verificar" igual, e enquanto a

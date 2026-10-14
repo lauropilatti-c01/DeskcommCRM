@@ -8,21 +8,28 @@
  *
  * A trava confere o que o modelo LEU ao escrever: as mensagens que o AI SDK entrega ao
  * `execute` do `send_message` (`options.messages` — as que abriram o passo, sem o passo
- * que contém a chamada). Só conta o resultado de `crm_query_external_data` da tabela
- * configurada, sem erro, que já estava ali. A consulta pedida no mesmo passo do envio
- * não conta: o modelo escreveu sem tê-la lido.
+ * que contém a chamada). Só conta o resultado de `crm_query_external_data` de cada tabela
+ * cobrada, sem erro, que já estava ali. A consulta pedida no mesmo passo do envio não
+ * conta: o modelo escreveu sem tê-la lido. O histórico de turnos anteriores entra no
+ * modelo como texto: consulta de outro turno nunca está nessas mensagens.
  *
- * Só é cobrada enquanto o contato não teve essa consulta: feita num turno anterior (o
- * registro de cada chamada de ferramenta em `api_audit_log`, pela execução do contato em
- * `job_queue`), o turno passa sem ela — senão "obrigado" e "como pago?" voltariam ao
- * modelo em todo turno. Quando a fila ou o registro já foram podados pela retenção, a
- * trava cobra a consulta de novo, uma vez.
+ * Cada tabela diz quando é cobrada (`cobrar`):
+ * - `todo_turno`: em todo turno que fala com o contato. Num "obrigado" a mensagem volta
+ *   uma vez; a segunda tentativa sai (trava de estilo);
+ * - `uma_vez_por_contato`: só enquanto o contato não teve essa consulta. Feita num turno
+ *   anterior (o registro de cada chamada de ferramenta em `api_audit_log`, pela execução do
+ *   contato em `job_queue`), o turno passa sem ela. Quando a fila ou o registro já foram
+ *   podados pela retenção, a trava cobra a consulta de novo, uma vez.
  *
  * Interruptor POR AGENTE, em `organizations.settings.travas_de_envio`:
  *
- *   { "consulta_antes_de_enviar": { "agentes": ["<id do agente>"], "tabela": "<tabela>" } }
+ *   { "consulta_antes_de_enviar": {
+ *       "agentes": ["<id do agente>"],
+ *       "tabelas": [ { "tabela": "<tabela>", "cobrar": "todo_turno" },
+ *                    { "tabela": "<outra>", "cobrar": "uma_vez_por_contato" } ] } }
  *
- * Sem a chave, sem a tabela, com a lista vazia ou com outro agente: desarmada, nada muda.
+ * Sem a chave, sem tabela, com a lista de agentes vazia ou com outro agente: desarmada,
+ * nada muda.
  *
  * Trava de ESTILO (`TRAVAS_DE_ESTILO` em `inbound-turn.ts`): o 1º veto ensina; no 2º ela
  * se desarma no turno e a mensagem sai como está. Consultar é o caminho certo, não
@@ -37,20 +44,33 @@ import { resultadoComErro } from './link-e-valor-de-ferramenta';
 /** A ferramenta de consulta à base externa (a mesma `FERRAMENTA_DA_BASE` do turno). */
 export const FERRAMENTA_DE_CONSULTA = 'crm_query_external_data';
 
-/** O que a organização ligou: os agentes e a tabela. */
+/** Quando a consulta à tabela é cobrada. */
+export type CobrancaDaConsulta = 'todo_turno' | 'uma_vez_por_contato';
+
+/** O que a organização ligou: os agentes e as tabelas, cada uma com o jeito de cobrar. */
 export interface ConsultaAntesDeEnviarDaOrg {
   agentes: readonly string[];
-  tabela: string;
+  tabelas: ReadonlyArray<{ tabela: string; cobrar: CobrancaDaConsulta }>;
 }
 
 const configSchema = z
-  .object({ agentes: z.array(z.string()).optional(), tabela: z.string().optional() })
+  .object({
+    agentes: z.array(z.string()).optional(),
+    tabelas: z
+      .array(
+        z
+          .object({ tabela: z.string(), cobrar: z.enum(['todo_turno', 'uma_vez_por_contato']) })
+          .passthrough(),
+      )
+      .optional(),
+  })
   .passthrough();
 
 /**
  * Pura: o valor da chave `consulta_antes_de_enviar` → o que vale. `null` = desligada
  * (chave ausente, sem tabela ou sem agente); `invalida` = o valor não tem a forma certa
- * (só esta trava fica desligada).
+ * (só esta trava fica desligada). A mesma tabela repetida vale uma vez, com a cobrança
+ * mais forte (`todo_turno`).
  */
 export function interpretarConsultaAntesDeEnviar(valor: unknown): {
   consulta: ConsultaAntesDeEnviarDaOrg | null;
@@ -59,10 +79,16 @@ export function interpretarConsultaAntesDeEnviar(valor: unknown): {
   if (valor === null || valor === undefined) return { consulta: null, invalida: false };
   const lido = configSchema.safeParse(valor);
   if (!lido.success) return { consulta: null, invalida: true };
-  const tabela = normalizarTabela(lido.data.tabela ?? '');
+  const porTabela = new Map<string, CobrancaDaConsulta>();
+  for (const { tabela, cobrar } of lido.data.tabelas ?? []) {
+    const nome = normalizarTabela(tabela);
+    if (nome === '') continue;
+    porTabela.set(nome, porTabela.get(nome) === 'todo_turno' ? 'todo_turno' : cobrar);
+  }
   const agentes = (lido.data.agentes ?? []).map((a) => a.trim()).filter((a) => a.length > 0);
-  if (tabela === '' || agentes.length === 0) return { consulta: null, invalida: false };
-  return { consulta: { agentes, tabela }, invalida: false };
+  if (porTabela.size === 0 || agentes.length === 0) return { consulta: null, invalida: false };
+  const tabelas = [...porTabela].map(([tabela, cobrar]) => ({ tabela, cobrar }));
+  return { consulta: { agentes, tabelas }, invalida: false };
 }
 
 /** O nome da tabela sem o agrupamento ("c01.tabela" → "tabela"), sem aspas, minúsculo. */
@@ -156,21 +182,28 @@ export async function consultaJaFeitaComOContato(
 export const consultaAntesDeEnviarGate: Gate = {
   name: 'consulta_antes_de_enviar',
   evaluate: (ctx) => {
-    const armada = ctx.travasDeEnvio?.consultaAntesDeEnviar;
-    if (armada === undefined || armada.leu) return { pass: true };
+    const faltando = ctx.travasDeEnvio?.consultaAntesDeEnviar?.faltando ?? [];
+    if (faltando.length === 0) return { pass: true };
     return {
       pass: false,
       code: 'consulta_antes_de_enviar',
-      reason: renderVetoDeConsulta(armada.tabela),
+      reason: renderVetoDeConsulta(faltando),
+      // Nomes de tabela são configuração, não dado do contato.
+      detail: { tabelas: faltando.join(',') },
     };
   },
 };
 
-/** O erro de ensino. */
-export function renderVetoDeConsulta(tabela: string): string {
+/** O erro de ensino, com todas as tabelas que faltam (o 2º veto já deixa a mensagem sair). */
+export function renderVetoDeConsulta(tabelas: readonly string[]): string {
+  const lista =
+    tabelas.length === 1
+      ? `à tabela ${tabelas[0]}`
+      : `às tabelas ${tabelas.slice(0, -1).join(', ')} e ${tabelas[tabelas.length - 1]}`;
+  const onde = tabelas.length === 1 ? 'nessa tabela' : 'em cada uma';
   return (
-    `A mensagem NÃO foi enviada: você ainda não leu a consulta à tabela ${tabela}. ` +
-    `Chame ${FERRAMENTA_DE_CONSULTA} nessa tabela, ESPERE o resultado e só depois escreva a resposta com o que ` +
+    `A mensagem NÃO foi enviada: você ainda não leu a consulta ${lista}. ` +
+    `Chame ${FERRAMENTA_DE_CONSULTA} ${onde}, ESPERE o resultado e só depois escreva a resposta com o que ` +
     'ela devolveu. Não chame a consulta e o send_message no mesmo passo.'
   );
 }

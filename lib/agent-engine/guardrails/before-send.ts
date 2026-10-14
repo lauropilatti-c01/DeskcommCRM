@@ -863,10 +863,10 @@ const spinningGate: Gate = {
  * forma. Nasce DESARMADO (liga pela tela, por organização).
  * v13 (C01, -c01.14) = insere `consultaAntesDeEnviarGate` e `marcadorEntreColchetesGate`
  * entre `agenda_stall` e `link_e_valor_de_ferramenta` — a resposta só sai depois de o
- * modelo LER a consulta à tabela configurada (por agente, enquanto o contato não a teve;
- * estilo: no limite de vetos se desarma no turno), e nenhum marcador entre colchetes
- * ("[link do vídeo]") sai no lugar do conteúdo. Ler a base vem antes de conferir o link
- * e o valor que saíram dela. Nascem DESARMADOS.
+ * modelo LER a consulta às tabelas configuradas (por agente; cada tabela em todo turno
+ * ou uma vez por contato; estilo: no limite de vetos se desarma no turno), e nenhum
+ * marcador entre colchetes ("[link do vídeo]") sai no lugar do conteúdo. Ler a base vem
+ * antes de conferir o link e o valor que saíram dela. Nascem DESARMADOS.
  */
 export const BEFORE_SEND_CHAIN_VERSION = 13;
 
@@ -885,7 +885,7 @@ export const BEFORE_SEND_CHAIN_VERSION = 13;
  *         `separacao-fala-e-operacao.md`); antes do disclosure porque ele pode emendar o corpo;
  *   (6.9) agenda_stall — "vou verificar/confirmar horário" sem ter chamado a ferramenta de
  *         agenda neste turno; antes do disclosure pelo mesmo motivo do internal_vocabulary;
- *   (6.95) consulta_antes_de_enviar (C01) — a resposta depois de ler a consulta à tabela;
+ *   (6.95) consulta_antes_de_enviar (C01) — a resposta depois de ler a consulta às tabelas;
  *   (6.97) marcador_entre_colchetes (C01) — nenhum "[marcador]" no lugar do conteúdo;
  *   (7.0) link_e_valor_de_ferramenta (C01) — link e valor em reais só de consulta ou de
  *         mensagem nossa já enviada;

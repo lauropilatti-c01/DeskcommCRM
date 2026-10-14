@@ -77,26 +77,64 @@ describe("(C01) a trava 'consulte antes de enviar'", () => {
     };
 
   it("mandar sem ter lido a consulta volta ao modelo, com o que fazer", () => {
-    const v = avaliar({ consultaAntesDeEnviar: { tabela: TABELA, leu: false } });
+    const v = avaliar({ consultaAntesDeEnviar: { faltando: [TABELA] } });
     expect(v.pass).toBe(false);
     expect(v.code).toBe("consulta_antes_de_enviar");
     expect(v.reason).toMatch(/NÃO foi enviada/);
     expect(v.reason).toMatch(/ESPERE o resultado/);
-    expect(v.reason).toMatch(/tabela_de_videos/);
+    expect(v.reason).toMatch(/à tabela tabela_de_videos\. Chame crm_query_external_data nessa tabela/);
   });
 
-  it("com a consulta lida, passa; desarmada, passa", () => {
-    expect(avaliar({ consultaAntesDeEnviar: { tabela: TABELA, leu: true } }).pass).toBe(true);
+  it("com duas faltando, o erro pede as duas", () => {
+    const v = avaliar({ consultaAntesDeEnviar: { faltando: ["agente_fatos", TABELA] } });
+    expect(v.reason).toMatch(/às tabelas agente_fatos e tabela_de_videos\. Chame crm_query_external_data em cada uma/);
+  });
+
+  it("nada faltando, passa; desarmada, passa", () => {
+    expect(avaliar({ consultaAntesDeEnviar: { faltando: [] } }).pass).toBe(true);
     expect(avaliar({}).pass).toBe(true);
     expect(avaliar(undefined).pass).toBe(true);
   });
 
-  it("liga por agente e com tabela; sem um dos dois, ou com a forma errada, fica desligada", () => {
-    expect(interpretarConsultaAntesDeEnviar({ agentes: ["a1"], tabela: "c01.T" }).consulta).toEqual({ agentes: ["a1"], tabela: "t" });
+  it("liga por agente e com tabelas, cada uma com o jeito de cobrar; sem um dos dois, ou com a forma errada, fica desligada", () => {
+    expect(
+      interpretarConsultaAntesDeEnviar({
+        agentes: ["a1"],
+        tabelas: [
+          { tabela: "c01.Fatos", cobrar: "todo_turno" },
+          { tabela: "videos", cobrar: "uma_vez_por_contato" },
+        ],
+      }).consulta,
+    ).toEqual({
+      agentes: ["a1"],
+      tabelas: [
+        { tabela: "fatos", cobrar: "todo_turno" },
+        { tabela: "videos", cobrar: "uma_vez_por_contato" },
+      ],
+    });
     expect(interpretarConsultaAntesDeEnviar(undefined)).toEqual({ consulta: null, invalida: false });
-    expect(interpretarConsultaAntesDeEnviar({ agentes: [], tabela: "t" }).consulta).toBeNull();
+    expect(interpretarConsultaAntesDeEnviar({ agentes: [], tabelas: [{ tabela: "t", cobrar: "todo_turno" }] }).consulta).toBeNull();
     expect(interpretarConsultaAntesDeEnviar({ agentes: ["a1"] }).consulta).toBeNull();
-    expect(interpretarConsultaAntesDeEnviar({ agentes: "a1", tabela: "t" })).toEqual({ consulta: null, invalida: true });
+    expect(interpretarConsultaAntesDeEnviar({ agentes: ["a1"], tabelas: [] }).consulta).toBeNull();
+    expect(interpretarConsultaAntesDeEnviar({ agentes: "a1", tabelas: [] })).toEqual({ consulta: null, invalida: true });
+    // Sem o jeito de cobrar, ou com um que não existe: forma errada (não se adivinha).
+    expect(interpretarConsultaAntesDeEnviar({ agentes: ["a1"], tabelas: [{ tabela: "t" }] }).invalida).toBe(true);
+    expect(interpretarConsultaAntesDeEnviar({ agentes: ["a1"], tabelas: [{ tabela: "t", cobrar: "sempre" }] }).invalida).toBe(true);
+    // A forma antiga, com uma tabela só, não liga nada.
+    expect(interpretarConsultaAntesDeEnviar({ agentes: ["a1"], tabela: "t" }).consulta).toBeNull();
+  });
+
+  it("a mesma tabela repetida vale uma vez, com a cobrança mais forte", () => {
+    expect(
+      interpretarConsultaAntesDeEnviar({
+        agentes: ["a1"],
+        tabelas: [
+          { tabela: "t", cobrar: "uma_vez_por_contato" },
+          { tabela: "c01.t", cobrar: "todo_turno" },
+          { tabela: "T", cobrar: "uma_vez_por_contato" },
+        ],
+      }).consulta?.tabelas,
+    ).toEqual([{ tabela: "t", cobrar: "todo_turno" }]);
   });
 
   it("o valor errado dela desliga só ela: as outras travas da organização seguem valendo", () => {
@@ -109,8 +147,10 @@ describe("(C01) a trava 'consulte antes de enviar'", () => {
     expect(travas.consultaAntesDeEnviar).toBeNull();
     expect(interpretarTravasDeEnvio({}).travas.consultaAntesDeEnviar).toBeNull();
     expect(
-      interpretarTravasDeEnvio({ consulta_antes_de_enviar: { agentes: ["a1"], tabela: TABELA } }).travas.consultaAntesDeEnviar,
-    ).toEqual({ agentes: ["a1"], tabela: TABELA });
+      interpretarTravasDeEnvio({
+        consulta_antes_de_enviar: { agentes: ["a1"], tabelas: [{ tabela: TABELA, cobrar: "todo_turno" }] },
+      }).travas.consultaAntesDeEnviar,
+    ).toEqual({ agentes: ["a1"], tabelas: [{ tabela: TABELA, cobrar: "todo_turno" }] });
   });
 });
 
@@ -169,8 +209,16 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
 
   it("o send_message confere o que o modelo leu (as mensagens do passo) e arma só no agente ligado", () => {
     expect(TURNO).toMatch(/execute: async \(\{ body, produto_codigo \}, opcoes\) => \{/);
-    expect(TURNO).toMatch(/leuConsultaDaTabela\(opcoes\?\.messages, consultaAntes\.tabela\)/);
+    expect(TURNO).toMatch(/tabelasCobradas\.filter\(\(tabela\) => !leuConsultaDaTabela\(opcoes\?\.messages, tabela\)\)/);
     expect(TURNO).toMatch(/consultaAntes\.agentes\.includes\(agentConfig\.agentId\)/);
-    expect(TURNO).toMatch(/travasArmadas\(\{ consultaLida \}\)/);
+    expect(TURNO).toMatch(/travasArmadas\(\{ consultasFaltando \}\)/);
+  });
+
+  it("'todo_turno' é cobrada sem ler o banco; 'uma_vez_por_contato' lê os turnos anteriores do contato", () => {
+    const i = TURNO.indexOf("const tabelasCobradas: string[] = [];");
+    const trecho = TURNO.slice(i, TURNO.indexOf("const linksJaEnviados", i));
+    expect(trecho).toMatch(/if \(cobrar === 'todo_turno'\) \{\s*tabelasCobradas\.push\(tabela\);\s*continue;\s*\}/);
+    expect(trecho).toMatch(/consultaJaFeitaComOContato\(pool, \{/);
+    expect(trecho).toMatch(/if \(!feita\) tabelasCobradas\.push\(tabela\);/);
   });
 });
