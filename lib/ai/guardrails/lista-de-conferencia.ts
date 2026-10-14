@@ -188,6 +188,32 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     camada: null,
   },
   {
+    nome: "consulta_antes_de_enviar",
+    rotulo: "Consultar a base antes de responder",
+    oQueProtege:
+      "Quando o assistente escreve sem ter lido a consulta à sua base (ou consulta e responde ao mesmo " +
+      "tempo), a mensagem volta para ele consultar primeiro e responder com o que voltou.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "Vem desligada e se liga por assistente, na configuração da organização. Só vale enquanto a conversa " +
+      "ainda não teve a consulta. Se a mensagem voltar duas vezes, ela sai como está: nunca deixa o cliente sem resposta.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
+    nome: "marcador_entre_colchetes",
+    rotulo: "Nada entre colchetes no lugar do conteúdo",
+    oQueProtege:
+      'Barra a mensagem com um marcador entre colchetes, como "[link do vídeo]", no lugar do link ou do ' +
+      "dado: o assistente põe o conteúdo de verdade ou tira a frase.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "Vem desligada; liga-se na configuração da organização. Se o assistente insistir três vezes, a mensagem " +
+      "dele não sai: o cliente recebe uma frase de espera e a conversa passa para uma pessoa da equipe.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
     nome: "link_e_valor_de_ferramenta",
     rotulo: "Link e valor só do que foi consultado",
     oQueProtege:

@@ -11712,6 +11712,24 @@ export const DICIONARIO: Traducoes = {
   "Uma pergunta por mensagem": {
     es: "Una pregunta por mensaje",
   },
+  "Consultar a base antes de responder": {
+    es: "Consultar la base antes de responder",
+  },
+  "Quando o assistente escreve sem ter lido a consulta à sua base (ou consulta e responde ao mesmo tempo), a mensagem volta para ele consultar primeiro e responder com o que voltou.": {
+    es: "Cuando el asistente escribe sin haber leído la consulta a su base (o consulta y responde al mismo tiempo), el mensaje vuelve para que consulte primero y responda con lo que volvió.",
+  },
+  "Vem desligada e se liga por assistente, na configuração da organização. Só vale enquanto a conversa ainda não teve a consulta. Se a mensagem voltar duas vezes, ela sai como está: nunca deixa o cliente sem resposta.": {
+    es: "Viene desactivada y se activa por asistente, en la configuración de la organización. Solo vale mientras la conversación aún no tuvo la consulta. Si el mensaje vuelve dos veces, sale tal como está: nunca deja al cliente sin respuesta.",
+  },
+  "Nada entre colchetes no lugar do conteúdo": {
+    es: "Nada entre corchetes en lugar del contenido",
+  },
+  "Barra a mensagem com um marcador entre colchetes, como \"[link do vídeo]\", no lugar do link ou do dado: o assistente põe o conteúdo de verdade ou tira a frase.": {
+    es: "Bloquea el mensaje con un marcador entre corchetes, como \"[enlace del video]\", en lugar del enlace o del dato: el asistente pone el contenido real o quita la frase.",
+  },
+  "Vem desligada; liga-se na configuração da organização. Se o assistente insistir três vezes, a mensagem dele não sai: o cliente recebe uma frase de espera e a conversa passa para uma pessoa da equipe.": {
+    es: "Viene desactivada; se activa en la configuración de la organización. Si el asistente insiste tres veces, su mensaje no sale: el cliente recibe una frase de espera y la conversación pasa a una persona del equipo.",
+  },
   "Quando a mensagem faz mais de uma pergunta, ela volta para ser reescrita com uma só, para o cliente saber o que responder.": {
     es: "Cuando el mensaje hace más de una pregunta, vuelve para reescribirse con una sola, para que el cliente sepa qué responder.",
   },

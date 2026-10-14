@@ -570,9 +570,9 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
   const TURNO = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
   const CADEIA = readFileSync("lib/agent-engine/guardrails/before-send.ts", "utf8");
 
-  it("a cadeia roda a trava depois da agenda e antes da de link (v12)", () => {
-    expect(CADEIA).toMatch(/agendaStallGate,\s*linkEValorDeFerramentaGate,\s*linkPermitidoGate,/);
-    expect(CADEIA).toMatch(/export const BEFORE_SEND_CHAIN_VERSION = 12;/);
+  it("a cadeia roda a trava antes da de link, depois das de consulta e marcador (v12; v13 na -c01.14)", () => {
+    expect(CADEIA).toMatch(/marcadorEntreColchetesGate,\s*linkEValorDeFerramentaGate,\s*linkPermitidoGate,/);
+    expect(CADEIA).toMatch(/export const BEFORE_SEND_CHAIN_VERSION = 1[2-9];/);
   });
 
   it("é trava de conteúdo: contador e fail-safe (no 3º veto o texto não sai e a conversa passa à equipe)", async () => {

@@ -239,7 +239,8 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
 
   it("a cadeia roda a trava de link depois da agenda e antes do texto longo", () => {
     // (-c01.7) A trava de link e valor de ferramenta entrou entre as duas.
-    expect(CADEIA).toMatch(/agendaStallGate,\s*linkEValorDeFerramentaGate,\s*linkPermitidoGate,/);
+    // (-c01.14) E, antes dela, as de consulta antes de enviar e de marcador entre colchetes.
+    expect(CADEIA).toMatch(/marcadorEntreColchetesGate,\s*linkEValorDeFerramentaGate,\s*linkPermitidoGate,/);
   });
 
   it("é trava de conteúdo: contador e fail-safe da promessa semântica", () => {

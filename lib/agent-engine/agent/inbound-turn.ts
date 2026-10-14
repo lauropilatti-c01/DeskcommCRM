@@ -77,6 +77,8 @@ import {
   type TravasArmadas,
 } from '../guardrails/travas-de-envio';
 import { lerLinksJaEnviados, lerTextosJaEnviados, linksNoTexto, normalizarLink } from '../guardrails/link-permitido';
+// (C01, -c01.14) Consulte antes de enviar: o que o modelo leu e o que o contato já teve.
+import { consultaJaFeitaComOContato, leuConsultaDaTabela } from '../guardrails/consulta-antes-de-enviar';
 import {
   linksEValoresDosTextos,
   resultadoComErro,
@@ -546,6 +548,8 @@ export const TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE: Readonly<Record<string, string>> 
   valor_em_dinheiro: 'valor em dinheiro na conversa',
   // (C01, -c01.7) Ver `link-e-valor-de-ferramenta.ts`.
   link_ou_valor_sem_consulta: 'link ou valor que não veio de consulta',
+  // (C01, -c01.14) Ver `marcador-entre-colchetes.ts`.
+  marcador_entre_colchetes: 'marcador entre colchetes no lugar do conteúdo',
 };
 
 /** (C01, -c01.3) O limite das travas de conteúdo: o mesmo da de vocabulário interno. */
@@ -561,6 +565,8 @@ export const TRAVAS_DE_ESTILO: Readonly<Record<string, keyof TravasArmadas>> = {
   texto_longo: 'textoLongo',
   // (C01, -c01.3, item 3c) Ver `uma-pergunta.ts`.
   uma_pergunta: 'umaPergunta',
+  // (C01, -c01.14) Ver `consulta-antes-de-enviar.ts`.
+  consulta_antes_de_enviar: 'consultaAntesDeEnviar',
 };
 
 /** (C01, -c01.3) O limite das travas de estilo: no 2º veto a trava se desarma. */
@@ -3798,6 +3804,26 @@ async function executarTurnoDoAgente(
   if (travasDaOrg.leituraFalhou) {
     runLog.warn('travas de envio: leitura de organizations.settings falhou ou JSON inválido — todas desligadas');
   }
+  // (C01, -c01.14) Consulte antes de enviar: só no agente ligado, e enquanto o contato não
+  // teve a consulta à tabela num turno anterior (lido UMA vez, aqui, antes de qualquer
+  // ferramenta deste turno). Leitura que falha = desarmada, com o aviso: a trava é de
+  // estilo, e a resposta não pode esperar por ela.
+  const consultaAntes = travasDaOrg.travas.consultaAntesDeEnviar;
+  let consultaAntesArmada = false;
+  if (consultaAntes !== null && agentConfig !== null && leadId && consultaAntes.agentes.includes(agentConfig.agentId)) {
+    try {
+      consultaAntesArmada = !(await consultaJaFeitaComOContato(pool, {
+        organizationId: tenantId,
+        contactId: leadId,
+        jobIdAtual: liveJob().id,
+        tabela: consultaAntes.tabela,
+      }));
+    } catch (err) {
+      runLog.warn('trava consulta_antes_de_enviar: leitura das consultas do contato falhou — desarmada no turno', {
+        error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+      });
+    }
+  }
   // (C01, -c01.3, item 3a) Os links já mandados nesta conversa, lidos uma vez, só com a
   // trava de link ligada. Leitura que falha (`null`) desarma a trava no turno, com aviso.
   const linksJaEnviados = travasDaOrg.travas.linkPermitido
@@ -3852,9 +3878,14 @@ async function executarTurnoDoAgente(
   /**
    * (C01, -c01.3) O que o `send_message` arma em cada tentativa: as travas ligadas na
    * organização, com o que cada uma precisa saber do turno AGORA (quantas mensagens
-   * ainda cabem), menos as de estilo já desarmadas no turno.
+   * ainda cabem), menos as de estilo já desarmadas no turno. (C01, -c01.14) `leitura`: o
+   * que o modelo leu ao escrever a mensagem desta tentativa (sem ela, conta como lida).
    */
-  const travasArmadas = (): TravasArmadas => ({
+  const travasArmadas = (leitura?: { consultaLida: boolean }): TravasArmadas => ({
+    ...(consultaAntesArmada && consultaAntes !== null && !estiloDesarmado('consulta_antes_de_enviar')
+      ? { consultaAntesDeEnviar: { tabela: consultaAntes.tabela, leu: leitura?.consultaLida ?? true } }
+      : {}),
+    ...(travasDaOrg.travas.marcadorEntreColchetes ? { marcadorEntreColchetes: true as const } : {}),
     ...(travasDaOrg.travas.linkEValorDeFerramenta ? { linkEValorDeFerramenta: linkEValorLiberado() } : {}),
     ...(travasDaOrg.travas.linkPermitido && linksJaEnviados !== null
       ? {
@@ -4458,9 +4489,16 @@ async function executarTurnoDoAgente(
     }),
     send_message: tool({
       ...AGENT_TOOL_DEFS.send_message,
-      execute: async ({ body, produto_codigo }) => {
+      execute: async ({ body, produto_codigo }, opcoes) => {
         // (C01, -c01.8) Uma tentativa nova substitui a que o estilo vetou.
         envioVetadoPorEstilo = null;
+        // (C01, -c01.14) O resultado da consulta estava no que o modelo leu ao escrever
+        // ESTA mensagem? (`opcoes.messages` abre o passo, sem o passo desta chamada: a
+        // consulta pedida junto com o envio não conta.)
+        const consultaLida =
+          !consultaAntesArmada || consultaAntes === null
+            ? true
+            : leuConsultaDaTabela(opcoes?.messages, consultaAntes.tabela);
         // CORPO VAZIO NÃO SAI. Medido ao vivo (2026-09-19): o `gpt-4o-mini`
         // chamou `send_message` várias vezes com corpo que virou vazio e o
         // WhatsApp do cliente recebeu bolhas em branco. O schema garante
@@ -4653,7 +4691,7 @@ async function executarTurnoDoAgente(
             // (C01, -c01.3) As travas novas ligadas na organização (só aqui: texto do
             // modelo), lidas a cada execução da cadeia. A frase de espera do fail-safe
             // abaixo herda estes args, mas é texto do sistema: sai sem elas.
-            travasDeEnvio: (): TravasArmadas => (enviandoFraseDeEspera ? {} : travasArmadas()),
+            travasDeEnvio: (): TravasArmadas => (enviandoFraseDeEspera ? {} : travasArmadas({ consultaLida })),
             // Mesmo padrão do vocabulário interno: só o `send_message` arma — é o único
             // corpo escrito pelo modelo. `active` é ter QUALQUER ferramenta de agenda:
             // um agente que só CONSULTA promete "vou verificar" igual, e enquanto a
