@@ -443,6 +443,13 @@ export const respostaDoGanchoSchema = z
     passar_a_equipe: z.boolean().nullish(),
     /** (C01, -c01.7) Apagar a memória do contato; só vale no celular de teste (`apagarMemoriaDoContato`). */
     apagar_memoria: z.boolean().nullish(),
+    /**
+     * (C01, -c01.15) Só com `seguir`: mensagens fixas que saem ANTES do modelo, no mesmo
+     * turno e pelo mesmo caminho do `enviar` do `segurar`; o modelo as lê no histórico
+     * (`enviarAntesDoModelo`). A -c01.14 descarta a chave (o `z.object` ignora chave
+     * desconhecida) e segue como `seguir` puro.
+     */
+    enviar_antes: z.array(z.discriminatedUnion('tipo', [itemTexto, itemInterativo])).max(5).nullish(),
   })
   .refine((r) => r.acao !== 'segurar' || Array.isArray(r.enviar), {
     message: 'segurar sem a lista enviar (para não enviar nada, enviar: [])',
@@ -455,6 +462,10 @@ export const respostaDoGanchoSchema = z
   .refine((r) => r.passar_a_equipe !== true || r.acao === 'segurar', {
     message: 'passar_a_equipe só com segurar',
     path: ['passar_a_equipe'],
+  })
+  .refine((r) => (r.enviar_antes ?? []).length === 0 || r.acao === 'seguir', {
+    message: 'enviar_antes só com seguir (no segurar, use enviar)',
+    path: ['enviar_antes'],
   });
 
 export type RespostaDoGancho = z.infer<typeof respostaDoGanchoSchema>;
@@ -518,6 +529,11 @@ type DecisaoAnotada =
       ate: string | null;
       /** A fonte foi um recibo opaco do piloto, conferido no pedido montado. */
       recibo_opaco?: true;
+      /**
+       * (C01, -c01.15) O `enviar_antes` já foi tentado neste job: a re-execução não manda
+       * nada dele de novo (nem o item que falhou); o que saiu já está no histórico lido.
+       */
+      enviar_antes_feito?: true;
     }
   | {
       situacao: 'modelo';
@@ -557,6 +573,7 @@ function decisaoAnotada(payload: Record<string, unknown> | null | undefined): De
         : null,
     ate: typeof d.ate === 'string' ? d.ate : null,
     ...(d.recibo_opaco === true ? { recibo_opaco: true as const } : {}),
+    ...(d.enviar_antes_feito === true ? { enviar_antes_feito: true as const } : {}),
   };
 }
 
@@ -722,6 +739,11 @@ export type DesfechoDoGancho =
       fim: false;
       resumo?: { mensagemId: string; sentAt: string | null; texto: string };
       camposDoCard?: Record<string, unknown>;
+      /**
+       * (C01, -c01.15) O que o `enviar_antes` mandou NESTA execução, na ordem: o turno
+       * acrescenta ao histórico já lido (`acrescentarEnviadasAntesNoContexto`).
+       */
+      enviadasAntes?: EnviadaAntes[];
     };
 
 export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<DesfechoDoGancho> {
@@ -854,6 +876,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     acao: resposta.acao,
     motivo: (resposta.motivo ?? '').slice(0, 40),
     enviar: resposta.enviar?.length ?? 0,
+    ...(resposta.enviar_antes?.length ? { enviar_antes: resposta.enviar_antes.length } : {}),
   });
 
   // 3. Os efeitos.
@@ -861,11 +884,15 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
 
   if (resposta.acao === 'seguir') {
     await guardServiceEffect();
+    // (C01, -c01.15) As mensagens fixas do `enviar_antes` saem antes do resto: falha não
+    // muda a decisão (o turno segue para o modelo, que lê o que saiu).
+    const enviadasAntes = await enviarAntesDoModelo(ctx, decisao, canalInterativo);
+    const antes = enviadasAntes.length > 0 ? { enviadasAntes } : {};
     // Antes do `gravar`: a etiqueta conferida é a de antes desta resposta.
     await apagarMemoriaSePedida(ctx, resposta);
     const gravou = await aplicarGravar(ctx, card, resposta.gravar);
     const relido = gravou ? await lerCardComCuidado(ctx) : null;
-    const campos = relido !== null ? { camposDoCard: relido.campos } : {};
+    const campos = relido !== null ? { camposDoCard: relido.campos, ...antes } : antes;
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
     const f = decisao.formulario;
     if (f !== null) {
@@ -1300,3 +1327,92 @@ async function enviarItem(
 
 /** `metadata.origem` das mensagens que o gancho envia. */
 export const ORIGEM_DO_GANCHO = 'pre_turn_hook';
+
+// ─── (C01, -c01.15) `seguir` com `enviar_antes` ───────────────────────────────────
+
+/**
+ * Posições do ledger do `enviar_antes`: -101 a -105. Negativas, como as do `enviar`
+ * (`doGancho` do ledger, fora da conta e do teto do modelo), mas em outra faixa: a
+ * re-execução com a pergunta refeita pode trocar `seguir` por `segurar` no mesmo job.
+ */
+export const SEQ_DO_ENVIAR_ANTES = -100;
+
+/** Uma mensagem do `enviar_antes` que saiu: o texto da linha da conversa e o instante. */
+export interface EnviadaAntes {
+  texto: string;
+  em: Date;
+}
+
+/**
+ * Manda os itens do `enviar_antes`, na ordem, pelo mesmo caminho do `enviar` do
+ * `segurar` (`enviarItem`: a cadeia de antes do envio, sem atraso humano; o item que o
+ * ledger deste job já tem vai direto ao canal). Devolve o que saiu NESTA execução e
+ * ainda não estava no ledger — o que já estava, o histórico lido no começo do turno já
+ * mostra.
+ *
+ * O 1º item que não sai (veto, falha do canal, interativo num canal que não o envia)
+ * fica no log, os seguintes não saem (o cliente não recebe a 2ª parte sem a 1ª) e o
+ * turno segue para o modelo. A anotação `enviar_antes_feito` impede a re-execução de
+ * tentar de novo, inclusive o item que falhou.
+ */
+async function enviarAntesDoModelo(
+  ctx: ContextoDoGancho,
+  decisao: Extract<DecisaoAnotada, { situacao: 'decidido' }>,
+  canalJaLido: boolean | null,
+): Promise<EnviadaAntes[]> {
+  const itens = decisao.resposta.enviar_antes ?? [];
+  if (itens.length === 0) return [];
+  if (decisao.enviar_antes_feito === true) {
+    ctx.log.info('gancho antes do turno: enviar_antes já tentado neste job — não sai de novo', {
+      previstas: itens.length,
+    });
+    return [];
+  }
+  const registrados = await Promise.all(itens.map((item) => registradoNoJob(ctx, item)));
+  let canalInterativo = canalJaLido;
+  if (canalInterativo === null && itens.some((i, n) => i.tipo === 'interativo' && !registrados[n])) {
+    try {
+      canalInterativo = await canalDoNumeroEnviaInterativo(ctx);
+    } catch (err) {
+      if (eDeFronteira(err)) throw err;
+      ctx.log.warn('gancho antes do turno: canal do número não lido — enviar_antes sem interativo', {
+        erro: err instanceof Error ? err.name : 'desconhecido',
+      });
+      canalInterativo = false;
+    }
+  }
+  const enviadas: EnviadaAntes[] = [];
+  for (const [i, item] of itens.entries()) {
+    const desfecho: DesfechoDoItem | 'canal_sem_interativo' =
+      item.tipo === 'interativo' && !registrados[i] && canalInterativo !== true
+        ? 'canal_sem_interativo'
+        : await enviarItem(ctx, item, SEQ_DO_ENVIAR_ANTES - (i + 1), canalInterativo === true, registrados[i] === true);
+    if (desfecho !== 'ok') {
+      ctx.log.warn('gancho antes do turno: enviar_antes parou — o turno segue para o modelo com o que saiu', {
+        item: i + 1,
+        desfecho,
+        enviadas: i,
+        previstas: itens.length,
+      });
+      break;
+    }
+    if (!registrados[i]) enviadas.push({ texto: conteudoDoItem(item).body, em: ctx.now() });
+  }
+  await anotarComCuidado(ctx, { ...decisao, enviar_antes_feito: true });
+  return enviadas;
+}
+
+/**
+ * O que o `enviar_antes` mandou, no fim do histórico já lido pelo turno (a abertura do
+ * modelo usa a leitura do começo do turno, feita antes do envio): o modelo responde
+ * sabendo o que o cliente já recebeu.
+ */
+export function acrescentarEnviadasAntesNoContexto(
+  mensagens: LeadContextMessage[],
+  enviadas: readonly EnviadaAntes[],
+  fuso: string,
+): void {
+  for (const e of enviadas) {
+    mensagens.push({ direction: 'outbound', body: e.texto, sent_at: isoLocalComOffset(e.em, fuso) });
+  }
+}

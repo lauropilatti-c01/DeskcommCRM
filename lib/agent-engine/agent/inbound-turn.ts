@@ -131,6 +131,7 @@ import {
 import { buildOpeningMessage, ritualBlocks } from "./abertura/ritual";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
 import {
+  acrescentarEnviadasAntesNoContexto,
   eReconsultaDoGancho,
   rodarGanchoAntesDoTurno,
   trocarResumoNoContexto,
@@ -228,6 +229,7 @@ import { capabilitiesOf } from '@/lib/channels/capabilities';
 import { renderTemplateBody } from '@/lib/channels/meta/render-template';
 import { acenderDigitando, esperarComoHumano } from './atraso-humano';
 import { instrucaoDeBolhas, OK_KINDS, sendInBubbles, splitForSend } from './split-message';
+import { umaRespostaPorTurno } from './c01-uma-resposta-por-turno';
 import type { DisclosureMode } from '../guardrails/disclosure/template';
 import { decidePromise } from '../guardrails/promise/engine';
 import { loadPromiseTable } from '../guardrails/promise/table';
@@ -3366,6 +3368,9 @@ async function executarTurnoDoAgente(
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     });
     if (desfechoDoGancho.fim) return; // o gancho respondeu o cliente: sem modelo e sem fail-safe
+    // (C01, -c01.15) `seguir` com `enviar_antes`: o que saiu entra no histórico que o modelo lê.
+    if (desfechoDoGancho.enviadasAntes !== undefined)
+      acrescentarEnviadasAntesNoContexto(openingContext.context.messages, desfechoDoGancho.enviadasAntes, fusoDaOrg);
     if (desfechoDoGancho.camposDoCard !== undefined) {
       const campos = camposCompactosDoCard(desfechoDoGancho.camposDoCard);
       if (Object.keys(campos).length > 0) openingContext.context.campos_do_card = campos;
@@ -3918,6 +3923,8 @@ async function executarTurnoDoAgente(
             ...((agentConfig?.splitMessages ?? false)
               ? { maxChars: agentConfig?.splitMaxChars ?? 600 }
               : { maxChars: travasDaOrg.travas.textoLongoMaxCaracteres, semDivisor: true as const }),
+            // (C01, -c01.15) Com o divisor, também o total da resposta (`texto-longo.ts`).
+            maxTotal: travasDaOrg.travas.textoLongoMaxCaracteres,
           },
         }
       : {}),
@@ -4094,6 +4101,9 @@ async function executarTurnoDoAgente(
               { tenantId, leadId: leadId || null, jobId: job?.id },
               {
                 candidate: texto,
+                // (C01, -c01.15) A lista dos textos aprovados lidos no turno: a paráfrase de
+                // um benefício dela não é promessa (`blocoDosTextosAprovados`).
+                aprovados: [...textosAfirmaveisDaPromessa],
                 ...argsAux(deps.knobs.promiseSemantic?.model),
               },
               { ...(deps.registry !== undefined ? { registry: deps.registry } : {}), log: runLog },
@@ -4835,6 +4845,12 @@ async function executarTurnoDoAgente(
                     // `esperaForaDoLock` (paga antes de o guardrail tomar o lock do número) —
                     // issue #654. Neste ponto fica só o jitter anti-ban entre bolhas.
                     send: (bubble) => enviar(bubble),
+                    // (C01, -c01.15) A emenda do teto nunca é silenciosa.
+                    aoEmendar: (conta) =>
+                      runLog.warn('bolhas além do teto do turno emendadas na última', {
+                        ...conta,
+                        trava_texto_longo_armada: travasDaOrg.travas.textoLongo && !estiloDesarmado('texto_longo'),
+                      }),
                   }),
               });
             },
@@ -5427,6 +5443,11 @@ async function executarTurnoDoAgente(
       },
     }),
   };
+  // (C01, -c01.15) Com o divisor de bolhas, uma resposta por turno: depois de um
+  // `send_message` que saiu, o seguinte é recusado (`c01-uma-resposta-por-turno.ts`).
+  if ((agentConfig?.splitMessages ?? false) && rawTools.send_message !== undefined) {
+    rawTools.send_message = umaRespostaPorTurno(rawTools.send_message);
+  }
 
   // F3-02: a tool nativa só entra com janela configurada e callback habilitado
   // na versão publicada. Tenant/lead vêm da ROW do job (closure), nunca do

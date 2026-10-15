@@ -201,6 +201,13 @@ export interface SendInBubblesOpts<T extends BubbleOutcome = BubbleOutcome> {
    * nenhuma bolha é conhecida: exatamente o fatiamento de antes.
    */
   jaRegistrada?: (bolha: string) => Promise<boolean>;
+  /**
+   * (C01, -c01.15) Avisado quando o teto do turno emenda bolhas novas na última (o
+   * excedente sai junto, numa bolha maior que `maxChars`). Com a trava `texto_longo`
+   * armada isso não acontece (ela veta antes); o aviso cobre o que sobra — a trava
+   * desligada ou desarmada no turno — para a emenda nunca ser silenciosa. Só números.
+   */
+  aoEmendar?: (conta: { bolhas: number; enviadas: number }) => void;
 }
 
 /**
@@ -324,6 +331,7 @@ export async function sendInBubbles<T extends BubbleOutcome>(
     ? await Promise.all(naturais.map((bolha) => opts.jaRegistrada!(bolha)))
     : naturais.map(() => false);
   const bubbles = aplicarTetoAsNovas(naturais, registradas, opts.maxBubbles ?? Number.POSITIVE_INFINITY);
+  if (bubbles.length < naturais.length) opts.aoEmendar?.({ bolhas: naturais.length, enviadas: bubbles.length });
   if (bubbles.length === 0) return opts.send(body); // corpo vazio: deixa o canal decidir
   let last: T | undefined;
   for (let i = 0; i < bubbles.length; i++) {

@@ -142,6 +142,14 @@ export async function descreverTabela(
 }
 
 /**
+ * Nomes de coluna com o tipo de cada uma (`information_schema.columns.data_type`)
+ * em `tipos`, lido na mesma consulta (C01: o valor do filtro é conferido e
+ * convertido pelo tipo antes de ir ao banco). `tipos` é opcional: sem ele, o
+ * filtro vai como veio.
+ */
+export type ColunasDaTabela = Set<string> & { tipos?: ReadonlyMap<string, string> };
+
+/**
  * Nomes de coluna da tabela, para validar o pedido de leitura. `null` quando a
  * tabela não existe — o chamador distingue "não existe" de "existe sem colunas".
  */
@@ -149,8 +157,10 @@ export async function colunasDaTabela(
   pool: pg.Pool,
   schema: string,
   tabela: string,
-): Promise<Set<string> | null> {
+): Promise<ColunasDaTabela | null> {
   const descricao = await descreverTabela(pool, schema, tabela);
   if (!descricao) return null;
-  return new Set(descricao.colunas.map((c) => c.nome));
+  const nomes: ColunasDaTabela = new Set(descricao.colunas.map((c) => c.nome));
+  nomes.tipos = new Map(descricao.colunas.map((c) => [c.nome, c.tipo]));
+  return nomes;
 }
