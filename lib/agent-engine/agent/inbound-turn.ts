@@ -237,6 +237,7 @@ import { classifyPromise } from '../guardrails/promise/semantic';
 import { expectativaDeAtendimento } from '@/lib/escalacao/disponibilidade';
 import {
   abrirCasoDoPedidoDePessoa,
+  AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM,
   AVISO_AO_MODELO_SEM_PASSAGEM,
   AVISO_DE_ULTIMA_TENTATIVA_SEM_PASSAGEM,
   BLOCO_DO_PEDIDO_DE_PESSOA_SEM_PASSAGEM,
@@ -4298,6 +4299,11 @@ async function executarTurnoDoAgente(
   // (C01, -c01.3) Os contadores das travas de conteúdo (`TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE`),
   // um por código. Por turno (closure), nunca cross-turno.
   const vetosDeConteudo = new Map<string, number>();
+  // (C01, -c01.15, revisão) O último envio vetado por uma trava de conteúdo antes do limite
+  // (as de `TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE`, a de vocabulário interno e, sem passagem, a
+  // "consulte antes de enviar"). Sem passagem, se o turno acaba sem nova tentativa e nada
+  // saiu, o fail-safe sem silêncio roda depois do laço com ele.
+  let ultimoVetoDeConteudo = null as { trava: string; vetos: number; texto: string } | null;
   // Uma recusa deste tipo devolve o texto confirmado ao modelo para que ele
   // reescreva antes de falar com o cliente. Não gasta envio nem toca no canal.
   let falseEmptyInboundVetoCount = 0;
@@ -5132,6 +5138,7 @@ async function executarTurnoDoAgente(
             // inteira (pacing, LGPD, stop) — nunca chamamos o canal por fora.
             internalVocabularyVetoCount += 1;
             if (internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO) {
+              ultimoVetoDeConteudo = { trava: chain.code, vetos: internalVocabularyVetoCount, texto: body };
               const ultima = internalVocabularyVetoCount === MAX_VETOS_DE_VOCABULARIO_INTERNO - 1;
               return {
                 ok: false,
@@ -5188,6 +5195,23 @@ async function executarTurnoDoAgente(
             openedCaseThisTurn = true;
             moverParaHandoffBestEffort('vocabulario_interno_autofallback');
             passadoAoHumano = true;
+            // (C01, -c01.15, revisão) Sem passagem, com mensagem deste turno já no lead, só o
+            // caso: a frase de verificação depois da resposta seria outra mensagem fora de hora.
+            if (semPassagem && (leadTemResposta || corposEnviados.length > 0)) {
+              runLog.info('fail-safe de vocabulário interno sem passagem: o lead já tem mensagem deste turno — só o caso', {
+                vetos: internalVocabularyVetoCount,
+              });
+              return {
+                ok: false,
+                error: {
+                  code: 'internal_vocabulary_leak_handoff',
+                  message:
+                    `Sua mensagem NÃO foi enviada: depois de ${internalVocabularyVetoCount} tentativas ela ainda levava ` +
+                    `vocabulário interno do sistema. ${AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM} ` +
+                    'NÃO escreva mais nada neste turno — encerre agora.',
+                },
+              };
+            }
             // A frase de espera é texto de código, não do modelo: a cadeia inteira vale
             // (inclusive este gate), menos o spinning — frase fixa repetida entre leads
             // não é blast, é a mesma razão do aviso de escalação (`enforceSpinning`).
@@ -5278,6 +5302,7 @@ async function executarTurnoDoAgente(
             const vetos = (vetosDeConteudo.get(chain.code) ?? 0) + 1;
             vetosDeConteudo.set(chain.code, vetos);
             if (vetos < MAX_VETOS_DE_CONTEUDO) {
+              ultimoVetoDeConteudo = { trava: chain.code, vetos, texto: body };
               const ultima = vetos === MAX_VETOS_DE_CONTEUDO - 1;
               return {
                 ok: false,
@@ -5287,7 +5312,7 @@ async function executarTurnoDoAgente(
                 },
               };
             }
-            let desfecho: DesfechoDaFraseDeEspera;
+            let desfecho: DesfechoDaFraseDeEspera | 'sem_frase';
             try {
               desfecho = await passarAoHumanoSemResposta({
                 motivo: 'veto_de_conteudo',
@@ -5313,7 +5338,7 @@ async function executarTurnoDoAgente(
                 code: `${chain.code}_handoff`,
                 message:
                   `Sua mensagem NÃO foi enviada: depois de ${vetos} tentativas a revisão automática ainda a ` +
-                  `travava. ${avisoAoModeloDoFailSafe[desfecho]} ` +
+                  `travava. ${desfecho === 'sem_frase' ? AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM : avisoAoModeloDoFailSafe[desfecho]} ` +
                   'NÃO escreva mais nada neste turno — encerre agora.',
               },
             };
@@ -5874,7 +5899,7 @@ async function executarTurnoDoAgente(
    * neste job — `leadTemResposta` —, sem passagem, turno não descartado, turno que fala
    * com o lead).
    */
-  const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {
+  const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera | 'sem_frase'> => {
     // (C01, -c01.15) Sem passagem: o caso (com o texto retido, no veto de conteúdo), a
     // frase de verificação pela cadeia e NADA gravado — sem `force_human`, sem silêncio.
     const textos = textosDoFimSemResposta(fim, { semPassagem });
@@ -5905,6 +5930,15 @@ async function executarTurnoDoAgente(
     openedCaseThisTurn = true;
     moverParaHandoffBestEffort(fim.motivo);
     passadoAoHumano = true;
+    // (C01, -c01.15, revisão) Sem passagem, com mensagem deste turno já no lead (o veto de
+    // conteúdo no limite depois de uma resposta que saiu), só o caso: a frase de verificação
+    // depois da resposta seria outra mensagem fora de hora, ou a mesma frase lida duas vezes.
+    if (semPassagem && (leadTemResposta || corposEnviados.length > 0)) {
+      runLog.info('fail-safe do turno sem resposta: passagem desligada e o lead já tem mensagem deste turno — só o caso', {
+        motivo: fim.motivo,
+      });
+      return 'sem_frase';
+    }
     // A frase passa pela cadeia inteira (pacing, LGPD, stop), menos o spinning — frase
     // fixa repetida entre leads não é blast —, e sai pelo `send` só dela.
     const espera = await runBeforeSend({
@@ -6482,30 +6516,38 @@ async function executarTurnoDoAgente(
       runLog.info('trava de estilo sem etapa para reescrever: desarmada no turno, a mensagem sai sem ela', {
         trava,
       });
-      const solta: unknown = await rawTools.send_message?.execute?.(entrada, {
+      await rawTools.send_message?.execute?.(entrada, {
         toolCallId: 'c01-estilo-sem-etapa',
         messages: [],
         context: undefined,
       });
-      // (C01, -c01.15) Sem passagem, se uma trava de conteúdo (a consulta inclusive) vetou a
-      // solta e nada saiu, o fail-safe sem silêncio: caso aberto com o texto retido e a frase
-      // de verificação pela cadeia. Com a passagem ligada, o de hoje.
-      if (
-        semPassagem &&
-        corposEnviados.length === 0 &&
-        !leadTemResposta &&
-        runError === null &&
-        !outcomes.some((o) => o.kind === 'failed') &&
-        !passadoAoHumano
-      ) {
-        const codigoDaSolta = (solta as { error?: { code?: unknown } } | null | undefined)?.error?.code;
-        await passarAoHumanoSemResposta({
-          motivo: 'veto_de_conteudo',
-          trava: typeof codigoDaSolta === 'string' ? codigoDaSolta : trava,
-          vetos: 1,
-          texto: entrada.body,
-        });
-      }
+    }
+
+    // ═══ (C01, -c01.15, revisão) SEM PASSAGEM, O VETO DE CONTEÚDO SEM NOVA TENTATIVA NÃO CALA O TURNO ═══
+    //
+    // Antes do limite, a trava de conteúdo só ensina e espera a reescrita. Se o modelo
+    // encerrou o turno ('stop') sem reescrever, ou se a solta da mensagem de estilo (acima)
+    // foi vetada por uma delas, nada saiu e nenhum caso abriu: o lead ficava mudo. Sem
+    // passagem, o fail-safe sem silêncio com o último texto vetado: caso com ele e a frase de
+    // verificação. Só com veto de CONTEÚDO registrado e sem veto de pacing: o cap diário e o
+    // de warm-up reagendam o job e a resposta sai depois (o caso seria falso e a frase viria
+    // seguida da resposta). Com a passagem ligada, o de hoje. (O nome em `const` não
+    // estreita `pacingCapVeto` para o reagendamento abaixo.)
+    const semVetoDePacing = pacingCapVeto === null;
+    if (
+      semPassagem &&
+      !preview &&
+      ultimoVetoDeConteudo !== null &&
+      semVetoDePacing &&
+      !leadTemResposta &&
+      corposEnviados.length === 0 &&
+      runError === null &&
+      !outcomes.some((o) => o.kind === 'failed') &&
+      !passadoAoHumano &&
+      !turnoDescartado &&
+      turnoVaiFalarComOLead(liveJob())
+    ) {
+      await passarAoHumanoSemResposta({ motivo: 'veto_de_conteudo', ...ultimoVetoDeConteudo });
     }
 
     // ═══ (C01, rodada 8) O LAÇO FOI CORTADO POR NOSSO TETO ANTES DE QUALQUER MENSAGEM AO LEAD ═══

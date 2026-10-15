@@ -27,29 +27,31 @@
  * botão da tela (`devolverAtendimentoAoAgente`: dono humano, silêncio,
  * `force_human`). O turno segue normal, e o gancho faz a limpeza do card.
  *
- * A etiqueta sozinha NÃO autoriza: um vigia da produção a põe em todo contato
- * novo. Quem autoriza é o administrador, pela lista de teste do canal
- * (`channel_sessions.metadata.ai_test_phone_numbers`, a de pré-lançamento, lida
- * por `lerNumerosDeTeste` e comparada por `numeroPodeTestar`, qualquer que seja o
- * modo do canal). Faltou uma das duas: nada muda e nada mais é consultado. Texto
- * que não é o comando: nem uma consulta. Nunca lança: a mensagem do cliente já
- * está gravada (ver o cabeçalho de `lib/channels/pos-entrada.ts`).
+ * A etiqueta sozinha NÃO autoriza: etiqueta é coisa que qualquer automação ou
+ * pessoa da equipe põe num contato (um vigia da produção chegou a ser montado para
+ * pô-la em todo contato novo e foi parado em 15/10/2026, às 19h50, sem etiquetar
+ * ninguém; hoje nada a põe sozinho). Quem autoriza é o administrador, pela lista
+ * de teste do canal (`channel_sessions.metadata.ai_test_phone_numbers`, a de
+ * pré-lançamento, qualquer que seja o modo do canal). A régua das duas é uma só,
+ * a de `lib/c01/celular-de-teste.ts`, a mesma do `apagar_memoria` e do
+ * `celular_de_teste` do pedido ao gancho. Faltou uma das duas: nada muda e nada
+ * mais é consultado. Texto que não é o comando: nem uma consulta. Nunca lança: a
+ * mensagem do cliente já está gravada (ver o cabeçalho de `lib/channels/pos-entrada.ts`).
  */
-import { lerNumerosDeTeste, numeroPodeTestar } from "@/lib/ai/elegibilidade/pre-go-live";
 import { audit } from "@/lib/audit";
+import {
+  ETIQUETA_DO_CELULAR_DE_TESTE,
+  telefoneNaListaDeTeste,
+  temEtiquetaDeTeste,
+} from "@/lib/c01/celular-de-teste";
 import { devolverAtendimentoAoAgente } from "@/lib/escalacao/retomada";
 import { logger } from "@/lib/logger";
 import type { createAdminClient } from "@/lib/supabase/admin";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
-/**
- * A etiqueta que autoriza o comando. É a MESMA de `ETIQUETA_DO_CELULAR_DE_TESTE`
- * (`lib/agent-engine/agent/gancho-antes-do-turno.ts`), repetida aqui para a
- * ingestão não importar o motor do agente inteiro. Mudar uma exige mudar a outra:
- * `tests/unit/c01-zerar-celular-de-teste.test.ts` compara as duas.
- */
-export const ETIQUETA_DO_CELULAR_DE_TESTE = "celular-de-teste";
+/** A etiqueta que autoriza o comando, a de `lib/c01/celular-de-teste.ts` (a mesma do gancho). */
+export { ETIQUETA_DO_CELULAR_DE_TESTE };
 
 /** O comando: exatamente `#zerar`, sem espaços nas pontas e sem diferença de maiúsculas. */
 export function ehComandoZerar(texto: string | null): boolean {
@@ -88,13 +90,6 @@ interface ConversaDoZerar {
   assigned_to_user_id: string | null;
 }
 
-/** Mesma comparação de `apagarMemoriaDoContato`: `lower(btrim(tag))`. */
-function temEtiquetaDeTeste(tags: readonly unknown[] | null | undefined): boolean {
-  return (tags ?? []).some(
-    (tag) => typeof tag === "string" && tag.trim().toLowerCase() === ETIQUETA_DO_CELULAR_DE_TESTE,
-  );
-}
-
 const detalhe = (err: unknown): string =>
   (err instanceof Error ? err.message : String(err)).slice(0, 160);
 
@@ -126,8 +121,7 @@ export async function zerarCelularDeTesteSePedido(
       .eq("id", entrada.channelSessionId)
       .maybeSingle();
     if (erroDoCanal) throw new Error(erroDoCanal.message);
-    const lista = lerNumerosDeTeste((canal as { metadata: unknown } | null)?.metadata);
-    if (!numeroPodeTestar(contato.phone_number, lista)) {
+    if (!telefoneNaListaDeTeste(contato.phone_number, (canal as { metadata: unknown } | null)?.metadata)) {
       return { aplicado: false, motivo: "fora_da_lista_de_teste", ...nada };
     }
     // (b) A etiqueta, no contato ou num card dele.

@@ -103,6 +103,14 @@ export const AVISO_AO_MODELO_SEM_PASSAGEM: Record<DesfechoDaFrase, string> = {
   nao_sai: 'Um caso foi aberto para a equipe; o cliente pediu para não receber mensagens e nada sai a ele.',
 };
 
+/**
+ * (-c01.15, revisão) O que o modelo lê quando o fail-safe abre o caso e NÃO manda a frase: algo
+ * deste turno já chegou ao cliente, e a frase de verificação depois da resposta seria outra
+ * mensagem fora de hora (ou a mesma frase lida duas vezes).
+ */
+export const AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM =
+  'Um caso foi aberto para a equipe; o cliente já recebeu mensagem deste turno e nada mais sai a ele agora.';
+
 /** O aviso de última tentativa das travas de conteúdo, sem "a conversa passa a uma pessoa". */
 export const AVISO_DE_ULTIMA_TENTATIVA_SEM_PASSAGEM =
   'Esta é a ÚLTIMA tentativa: se a próxima versão repetir o problema, a mensagem não sai, um caso é ' +
