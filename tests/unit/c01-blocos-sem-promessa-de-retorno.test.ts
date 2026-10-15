@@ -16,6 +16,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import * as turno from "@/lib/agent-engine/agent/inbound-turn";
+import {
+  CASES_SYSTEM_BLOCK_SEM_PASSAGEM,
+  TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM,
+} from "@/lib/c01/passagem-desligada";
 
 const FONTE = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
 const blocos = (): Record<string, string> => {
@@ -60,9 +64,40 @@ describe("(C01) os blocos de caso e de transparência", () => {
   });
 
   it("os dois blocos continuam residentes no prompt (transparência sempre; casos com casos ligados)", () => {
-    expect(FONTE).toMatch(/const blocosResidentes = \[systemWithMemory, TRANSPARENCIA_SYSTEM_BLOCK\];/);
+    // (-c01.15) Com a passagem desligada, as versões "vou verificar e já te retorno"; com
+    // ela ligada, os blocos de sempre.
     expect(FONTE).toMatch(
-      /if \(agentConfig !== null && agentConfig\.casesEnabled\) blocosResidentes\.push\(CASES_SYSTEM_BLOCK\);/,
+      /const blocosResidentes = \[\s*systemWithMemory,\s*semPassagem \? TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM : TRANSPARENCIA_SYSTEM_BLOCK,\s*\];/,
     );
+    expect(FONTE).toMatch(
+      /if \(agentConfig !== null && agentConfig\.casesEnabled\)\s*blocosResidentes\.push\(semPassagem \? CASES_SYSTEM_BLOCK_SEM_PASSAGEM : CASES_SYSTEM_BLOCK\);/,
+    );
+    expect(FONTE).toMatch(/const semPassagem = passagemDesligada\(agentConfig\);/);
+  });
+});
+
+describe("(C01, -c01.15) os blocos com a passagem desligada", () => {
+  it("o bloco de casos manda \"vou verificar e já te retorno\" depois do caso e proíbe \"ficou registrado/anotado\"", () => {
+    expect(CASES_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/vou verificar e já te retorno/);
+    expect(CASES_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/Nunca diga que o pedido "ficou registrado" ou "anotado"/);
+    expect(CASES_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/sem prometer prazo nem resultado/);
+    // O que já valia continua: caso antes de prometer, e nada de diagnóstico ao lead.
+    expect(CASES_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/sem antes chamar open_human_case/);
+    expect(CASES_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/NUNCA narre a causa técnica ou interna/);
+    expect(CASES_SYSTEM_BLOCK_SEM_PASSAGEM).not.toMatch(/o que ficou registrado e o que ele pode fazer/);
+  });
+
+  it("o bloco de transparência manda a mesma frase e proíbe \"ficou registrado\" e \"a equipe vai te avisar\"", () => {
+    expect(TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/vou verificar e já te retorno/);
+    expect(TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/Nunca diga que o pedido "ficou registrado" ou "anotado"/);
+    expect(TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/a equipe vai te avisar/);
+    expect(TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM).toMatch(/nunca\s+admita/);
+    expect(TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM).not.toMatch(/o que ficou registrado e o que ele pode fazer/);
+  });
+
+  it("com a passagem ligada, os blocos de sempre não mudam (não mandam verificar e voltar)", () => {
+    const { casos, transparencia } = blocos();
+    expect(casos).not.toMatch(/vou verificar e já te retorno/);
+    expect(transparencia).not.toMatch(/vou verificar e já te retorno/);
   });
 });

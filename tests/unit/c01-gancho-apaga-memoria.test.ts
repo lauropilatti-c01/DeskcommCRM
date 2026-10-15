@@ -6,7 +6,10 @@
  *   2. com a etiqueta de teste, as notas do contato são apagadas, na mesma instrução
  *      que confere a etiqueta, junto com o `gravar` e antes dele;
  *   3. recusa, sem apagar e com o motivo no log: contato sem a etiqueta, erro na
- *      leitura, a própria resposta pondo a etiqueta, o 1º envio do `segurar` que não sai.
+ *      leitura, a própria resposta pondo a etiqueta, o 1º envio do `segurar` que não sai;
+ *   4. (-c01.15, revisão) a etiqueta sozinha não autoriza: o telefone do contato tem de
+ *      estar na lista de teste do canal da mensagem (a mesma checagem do `#zerar` na
+ *      entrada). Fora da lista, nada é apagado e a etiqueta nem é consultada.
  * A prova contra o Postgres (só aquele contato, só com a etiqueta) está no invariante
  * `tests/invariants/c01-gancho-antes-do-turno.test.ts`.
  */
@@ -53,13 +56,22 @@ interface Consulta {
 }
 
 const eOApagar = (sql: string) => sql.includes("delete from lead_notes");
+const eALista = (sql: string) => sql.includes("left join channel_sessions s");
+
+/** O telefone do contato (fictício) e a lista de teste do canal. */
+const TELEFONE = "+5511900000001";
+const NA_LISTA = { phone_number: "5511900000001", metadata: { ai_test_phone_numbers: [TELEFONE] } };
 
 /** Um banco de mentira: responde o que o gancho lê e guarda o que ele escreve. */
-function banco(apagar: { autorizado: boolean; apagadas: number } | "erro") {
+function banco(
+  apagar: { autorizado: boolean; apagadas: number } | "erro",
+  lista: { phone_number: string | null; metadata: unknown } | null = NA_LISTA,
+) {
   const consultas: Consulta[] = [];
   const db = {
     query: vi.fn(async (sql: string, params: unknown[] = []) => {
       consultas.push({ sql, params });
+      if (eALista(sql)) return { rows: lista === null ? [] : [lista], rowCount: lista === null ? 0 : 1 };
       if (eOApagar(sql)) {
         if (apagar === "erro") throw new Error("statement timeout");
         return { rows: [apagar], rowCount: 1 };
@@ -77,9 +89,13 @@ function banco(apagar: { autorizado: boolean; apagadas: number } | "erro") {
 
 async function rodar(
   resposta: unknown,
-  opcoes: { apagar?: { autorizado: boolean; apagadas: number } | "erro"; payload?: Record<string, unknown> } = {},
+  opcoes: {
+    apagar?: { autorizado: boolean; apagadas: number } | "erro";
+    lista?: { phone_number: string | null; metadata: unknown } | null;
+    payload?: Record<string, unknown>;
+  } = {},
 ) {
-  const { db, consultas } = banco(opcoes.apagar ?? { autorizado: true, apagadas: 3 });
+  const { db, consultas } = banco(opcoes.apagar ?? { autorizado: true, apagadas: 3 }, opcoes.lista);
   const pedidos: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -213,5 +229,51 @@ describe("3. recusa: nada é apagado, o log diz por quê (sem dado pessoal) e o 
     expect(desfecho).toEqual({ fim: false });
     expect(apagou(consultas)).toEqual([]);
     expect(consultas.some((c) => c.sql.includes("update crm_leads"))).toBe(false);
+  });
+});
+
+describe("4. (-c01.15, revisão) a etiqueta sozinha não autoriza: telefone na lista de teste do canal", () => {
+  const recusaPelaLista = [
+    "gancho antes do turno: memória não apagada — telefone fora da lista de teste do canal",
+    { porque: "fora_da_lista_de_teste" },
+  ];
+
+  it("a lista é lida do canal da mensagem, para aquele contato naquela organização, antes do apagar", async () => {
+    const { consultas } = await rodar(ZERAR);
+    const lista = consultas.findIndex((c) => eALista(c.sql));
+    const apagar = consultas.findIndex((c) => eOApagar(c.sql));
+    expect(consultas[lista]?.params).toEqual([ORG, CONTATO, SESSAO]);
+    expect(apagar).toBeGreaterThan(lista);
+  });
+
+  it("etiqueta sem a lista (o vigia põe a etiqueta em todo contato novo): nada é apagado e a etiqueta nem é consultada", async () => {
+    const { desfecho, consultas, log } = await rodar(ZERAR, { lista: { phone_number: NA_LISTA.phone_number, metadata: {} } });
+    expect(desfecho).toEqual({ fim: true });
+    expect(apagou(consultas)).toEqual([]);
+    expect(avisos(log)).toEqual([recusaPelaLista]);
+    // O `gravar` do `#zerar` continua valendo.
+    expect(consultas.some((c) => c.sql.includes("update crm_leads"))).toBe(true);
+  });
+
+  it("número fora da lista, contato sem telefone, ou canal/contato que não se acha: nada é apagado", async () => {
+    for (const lista of [
+      { phone_number: "+5511900000002", metadata: NA_LISTA.metadata },
+      { phone_number: null, metadata: NA_LISTA.metadata },
+      { phone_number: NA_LISTA.phone_number, metadata: null },
+      null,
+    ]) {
+      const { consultas, log } = await rodar(ZERAR, { lista });
+      expect(apagou(consultas)).toEqual([]);
+      expect(avisos(log)).toEqual([recusaPelaLista]);
+    }
+  });
+
+  it("na lista e com a etiqueta: apaga; na lista e sem a etiqueta: não apaga", async () => {
+    const com = await rodar(ZERAR);
+    expect(apagou(com.consultas)).toHaveLength(1);
+    const sem = await rodar(ZERAR, { apagar: { autorizado: false, apagadas: 0 } });
+    expect(avisos(sem.log)).toEqual([
+      ["gancho antes do turno: memória não apagada — contato sem a etiqueta de teste", { porque: "sem_etiqueta" }],
+    ]);
   });
 });

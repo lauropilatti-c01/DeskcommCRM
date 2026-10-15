@@ -144,16 +144,26 @@ describe("(C01) os desfechos da frase de espera, um a um", () => {
 
 describe("(C01) a ligação no fail-safe e o fim do turno", () => {
   const FONTE = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
-  const i = FONTE.indexOf("body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO");
+  // (-c01.15) A frase dos fail-safes é `fraseDoFailSafe`: a de espera com a passagem ligada.
+  const i = FONTE.indexOf("body: fraseDoFailSafe");
   const failSafe = FONTE.slice(i, FONTE.indexOf("code: 'internal_vocabulary_leak_handoff'", i));
 
   it("o fail-safe trata a frase por `desfechoDaFraseDeEspera` e fala ao modelo conforme o desfecho", () => {
     expect(i).toBeGreaterThan(-1);
-    expect(failSafe).toMatch(
-      /const desfecho = desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);/,
+    expect(FONTE).toMatch(
+      /const fraseDoFailSafe = semPassagem \? FRASE_DE_VERIFICACAO : \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\);/,
+    );
+    // (-c01.15) O desfecho passa por `desfechoDoFailSafe`, que com a passagem ligada é
+    // `desfechoDaFraseDeEspera` como antes; o aviso ao modelo, pelo do turno.
+    expect(failSafe).toMatch(/const desfecho = desfechoDoFailSafe\(espera\);/);
+    expect(FONTE).toMatch(
+      /const desfechoDoFailSafe = \(espera: BeforeSendResult\): DesfechoDaFraseDeEspera => \{[\s\S]*?return desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);\s*\};/,
     );
     const retorno = FONTE.slice(i, FONTE.indexOf("encerre agora.',", i));
-    expect(retorno).toMatch(/\$\{AVISO_AO_MODELO_POR_DESFECHO\[desfecho\]\}/);
+    expect(retorno).toMatch(/\$\{avisoAoModeloDoFailSafe\[desfecho\]\}/);
+    expect(FONTE).toMatch(
+      /const avisoAoModeloDoFailSafe = semPassagem \? AVISO_AO_MODELO_SEM_PASSAGEM : AVISO_AO_MODELO_POR_DESFECHO;/,
+    );
     // Sem o atalho antigo: nenhum `outcomes.push` da frase fora da função que decide.
     expect(failSafe).not.toMatch(/outcomes\.push\(espera\.outcome\)/);
     expect(failSafe).not.toMatch(/espera\.status === 'vetoed'/);

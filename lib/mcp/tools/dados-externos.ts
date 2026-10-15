@@ -24,7 +24,13 @@
 import { z } from "zod";
 
 import { abrirAcesso } from "@/lib/external-db/acesso";
-import { colunasDaTabela, listarTabelas } from "@/lib/external-db/introspeccao";
+import {
+  converterValoresDosFiltros,
+  erroDeValorDoBanco,
+  MENSAGEM_INDISPONIVEL,
+  MENSAGEM_VALOR_INVALIDO_DO_BANCO,
+} from "@/lib/external-db/c01-valor-do-filtro";
+import { colunasDaTabela, listarTabelas, type ColunasDaTabela } from "@/lib/external-db/introspeccao";
 import { LeituraInvalidaError, lerTabela } from "@/lib/external-db/leitura";
 import { LIMITE_FILTROS, LIMITE_LINHAS } from "@/lib/external-db/limites";
 import type { OperadorDeFiltro, PedidoDeLeitura, TabelaExterna } from "@/lib/external-db/types";
@@ -344,7 +350,7 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
     }
 
     let schema = input.schema;
-    let permitidas: Set<string> | null = null;
+    let permitidas: ColunasDaTabela | null = null;
 
     // 1) Com schema informado, tenta direto. 2) Sem schema OU schema errado/
     //    inventado → resolve pelo CATÁLOGO real. O modelo manda schema inventado
@@ -363,7 +369,8 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
       try {
         catalogo = await listarTabelas(acesso.pool);
       } catch {
-        return { erro: "falha_na_leitura", mensagem: "não foi possível ler o catálogo do banco externo." };
+        // C01: banco fora é `indisponivel`, separado de `valor_invalido` e do vazio.
+        return { erro: "indisponivel", mensagem: MENSAGEM_INDISPONIVEL };
       }
       const alvo = input.tabela.toLowerCase();
       const candidatas = catalogo.filter((t) => t.nome.toLowerCase() === alvo);
@@ -376,7 +383,7 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
       try {
         permitidas = await colunasDaTabela(acesso.pool, schema, input.tabela);
       } catch {
-        return { erro: "falha_na_leitura", mensagem: "não foi possível conferir a tabela." };
+        return { erro: "indisponivel", mensagem: MENSAGEM_INDISPONIVEL };
       }
     }
 
@@ -387,15 +394,23 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
       };
     }
 
-    const pedido: PedidoDeLeitura = {
-      schema: schema!,
-      tabela: input.tabela,
-      colunas: input.colunas ?? [],
-      filtros: filtros.map((f) => ({
+    // C01: o valor do filtro é conferido e convertido pelo tipo da coluna ("Não" numa
+    // coluna boolean vira `false`; "abc" numa de número volta como `valor_invalido`).
+    const valores = converterValoresDosFiltros(
+      filtros.map((f) => ({
         coluna: f.coluna,
         operador: f.operador as OperadorDeFiltro,
         ...(f.valor !== undefined ? { valor: f.valor } : {}),
       })),
+      permitidas.tipos,
+    );
+    if (!valores.ok) return { erro: "valor_invalido", mensagem: valores.mensagem };
+
+    const pedido: PedidoDeLeitura = {
+      schema: schema!,
+      tabela: input.tabela,
+      colunas: input.colunas ?? [],
+      filtros: valores.filtros,
       ...(input.ordem ? { ordem: { coluna: input.ordem.coluna, desc: input.ordem.desc ?? false } } : {}),
       // O teto é o da conexão, não o que o modelo pediu.
       limite: Math.min(input.limite, acesso.conexao.maxRows),
@@ -415,7 +430,13 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
           detalhe: err.message,
         };
       }
-      return { erro: "falha_na_leitura", mensagem: "não foi possível consultar o banco externo agora." };
+      // C01: o erro de tipo do banco (Postgres 22xxx, 42883) é do valor pedido, não do banco;
+      // o resto (conexão, tempo esgotado) é o banco indisponível. Nada do erro volta ao
+      // modelo: a mensagem do Postgres repete o valor.
+      if (erroDeValorDoBanco(err)) {
+        return { erro: "valor_invalido", mensagem: MENSAGEM_VALOR_INVALIDO_DO_BANCO };
+      }
+      return { erro: "indisponivel", mensagem: MENSAGEM_INDISPONIVEL };
     }
 
     // Filtro que não casou nada devolve VAZIO — nunca a tabela sem o filtro.

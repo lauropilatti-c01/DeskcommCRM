@@ -55,6 +55,7 @@ const PEDIDO: PedidoDoGancho = {
   organizacao_id: ORG,
   agente_id: null,
   conversa: { id: CONV, canal: "meta", pessoa_atendendo: false, ultima_entrada_em: null },
+  celular_de_teste: false,
   lead: { id: null, etapa: null, campos: {}, etiquetas: [] },
   mensagens: [],
 };
@@ -158,7 +159,7 @@ describe("o pedido não leva dado pessoal", () => {
       expect(chaveEDadoPessoal(k)).toBe(false);
   });
 
-  it("`montarPedidoDoGancho` não lê o contato e filtra os campos do card", async () => {
+  it("`montarPedidoDoGancho` não põe dado do contato no pedido e filtra os campos do card", async () => {
     const consultas: string[] = [];
     const db = {
       query: vi.fn(async (sql: string) => {
@@ -198,7 +199,12 @@ describe("o pedido não leva dado pessoal", () => {
       inboundMessageId: null,
       etiquetasDoContato: ["cliente"],
     });
-    expect(consultas.some((s) => /from contacts/.test(s))).toBe(false);
+    // (-c01.15) O contato só é lido pela conferência do celular de teste (telefone e
+    // etiquetas, para o `celular_de_teste`); nome, e-mail e telefone não vão ao pedido.
+    const doContato = consultas.filter((s) => /from contacts/.test(s));
+    expect(doContato).toHaveLength(1);
+    expect(doContato[0]).toMatch(/as etiquetas/);
+    expect(doContato[0]).not.toMatch(/\bname\b|email/);
     expect(canalEnviaInterativo).toBe(true);
     expect(pedido).toEqual({
       versao: 1,
@@ -206,6 +212,7 @@ describe("o pedido não leva dado pessoal", () => {
       organizacao_id: ORG,
       agente_id: "agente-1",
       conversa: { id: CONV, canal: "meta", pessoa_atendendo: true, ultima_entrada_em: "2026-07-30T14:55:00.000Z" },
+      celular_de_teste: false,
       lead: { id: "card-1", etapa: "novo", campos: { interesse: "plano-b" }, etiquetas: ["etiqueta-antiga", "cliente"] },
       mensagens: [
         { direcao: "entrada", texto: "[image]", em: "2026-07-30T14:55:00.000Z", interativo: null, status: "delivered" },

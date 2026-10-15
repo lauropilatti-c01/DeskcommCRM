@@ -390,8 +390,9 @@ describe("(C01) a ligação no turno", () => {
     // `tests/invariants/c01-handoff-depois-de-envio-falhado.test.ts`).
     expect(FONTE).not.toMatch(/seq === 0/);
     // (-c01.8, 2ª revisão) A 4ª: a mensagem vetada por estilo só sai depois do laço se
-    // nenhuma mensagem chegou ao lead no turno.
-    expect(FONTE.match(/!leadTemResposta &&/g)).toHaveLength(4);
+    // nenhuma mensagem chegou ao lead no turno. (-c01.15) A 5ª: sem passagem, o fail-safe da
+    // solta vetada por conteúdo só roda se nenhuma mensagem chegou ao lead no turno.
+    expect(FONTE.match(/!leadTemResposta &&/g)).toHaveLength(5);
     expect(FONTE.match(/!leadTemResposta \|\| respostaAoLead === null/g)).toHaveLength(1);
     expect(FONTE).toMatch(/let seq = estadoInicial\.enviadas;\n(?: {2}\/\/.*\n)*\s*let leadTemResposta = estadoInicial\.enviadas > 0;/);
     // (-c01.3, rodada 3) A evidência é marcada logo depois do aceite do canal, antes de

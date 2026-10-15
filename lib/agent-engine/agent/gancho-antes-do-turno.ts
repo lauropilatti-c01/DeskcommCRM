@@ -19,7 +19,8 @@
  * O pedido leva a conversa (canal, pessoa atendendo, última entrada), o card do funil
  * (etapa, campos, etiquetas), as últimas 12 mensagens (com o `status` de cada uma e,
  * na que falhou, o código do `erro`) e o `formulario`: a resposta de formulário mais
- * nova dessas 12, enquanto o gancho ainda não a processou. Nunca telefone, e-mail ou
+ * nova dessas 12, enquanto o gancho ainda não a processou. (-c01.15) E sempre o
+ * `celular_de_teste` (verdadeiro/falso, `lerCelularDeTeste`). Nunca telefone, e-mail ou
  * nome do contato: campo do card com nome de dado pessoal (`chaveEDadoPessoal`) fica
  * de fora.
  *
@@ -44,9 +45,11 @@
  * contato (`lead_notes`: as notas, o índice que o turno monta delas e o embedding de
  * cada uma) junto com o `gravar` e nas mesmas condições dele. Só para o celular de
  * teste: o contato ou um card dele tem de ter a etiqueta `ETIQUETA_DO_CELULAR_DE_TESTE`,
- * conferida no banco na mesma instrução que apaga. Sem a etiqueta, com a etiqueta posta
- * pela própria resposta ou com erro na leitura: nada é apagado, fica no log e o turno
- * segue. Não mexe em mensagens, casos, campos, card nem no checkpoint do contato.
+ * conferida no banco na mesma instrução que apaga. (-c01.15) E, antes, o telefone na
+ * lista de teste do canal: a etiqueta sozinha não autoriza. Fora da lista, sem a
+ * etiqueta, com a etiqueta posta pela própria resposta ou com erro na leitura: nada é
+ * apagado, fica no log e o turno segue. Não mexe em mensagens, casos, campos, card nem
+ * no checkpoint do contato.
  *
  * ## Falha nunca cala o cliente
  *
@@ -114,11 +117,17 @@ import { isoLocalComOffset } from '@/lib/tempo/agora';
 import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 import { chaveEDadoPessoal, lerCardDoContato, type CardDoContato } from '../edge/crm/card-do-contato';
 import { MARCA_DE_PROCESSADO, type LeadContextMessage } from '../edge/crm/get-lead-context';
-import { conteudoRegistradoNoJob } from '../edge/crm/send-ledger';
+import { conteudoRegistradoNoJob, SEQ_DO_ENVIAR_ANTES } from '../edge/crm/send-ledger';
 import { scheduleCronJob } from '../cron/scheduler';
 import { runBeforeSend } from '../guardrails/before-send';
 import type { DesfechoDoAviso } from './aviso-de-escalacao';
 import { performHumanHandoff } from './human-handoff';
+import { abrirCasoDoPedidoDePessoa } from '@/lib/c01/passagem-desligada';
+import {
+  ETIQUETA_DO_CELULAR_DE_TESTE,
+  passaNaConferenciaDoCelularDeTeste,
+  telefoneNaListaDeTeste,
+} from '@/lib/c01/celular-de-teste';
 import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
 import type { Logger } from '../obs/logger';
 import { claimOfJob } from '../queue/claim';
@@ -194,6 +203,15 @@ export interface PedidoDoGancho {
   organizacao_id: string;
   agente_id: string | null;
   conversa: { id: string; canal: string; pessoa_atendendo: boolean; ultima_entrada_em: string | null };
+  /**
+   * (C01, -c01.15) O contato é celular de teste: telefone na lista de teste do canal do
+   * job E a etiqueta, no contato ou num card dele (`lerCelularDeTeste`, a régua de
+   * `lib/c01/celular-de-teste.ts`). Lido no servidor a cada pedido, antes da chamada:
+   * etiqueta gravada pela resposta não muda o valor deste turno. `false` em qualquer erro
+   * de leitura. Sempre presente; o telefone em si nunca vai no pedido. O porteiro o
+   * exige para o `#zerar` e o `apagar_memoria`.
+   */
+  celular_de_teste: boolean;
   lead: { id: string | null; etapa: string | null; campos: Record<string, unknown>; etiquetas: string[] };
   mensagens: MensagemDoPedido[];
   formulario?: FormularioDoPedido;
@@ -288,6 +306,41 @@ export async function formularioDoTurno(
 /** A etapa como o serviço a lê: `won`/`lost` quando o negócio fechou, senão o slug da etapa. */
 const etapaDoCard = (card: CardDoContato): string | null => (card.status !== 'open' ? card.status : card.etapa);
 
+/**
+ * (C01, -c01.15) O contato é celular de teste? Lê, na organização do job, o telefone do
+ * contato, a lista de teste do canal do job e as etiquetas do contato e dos cards dele, e
+ * aplica `passaNaConferenciaDoCelularDeTeste` (a régua do `#zerar`). Qualquer erro de
+ * leitura, contato ou canal que não se acha: `false`, nunca `true` por falta de dado.
+ */
+export async function lerCelularDeTeste(
+  db: Queryable,
+  organizationId: string,
+  contactId: string,
+  channelSessionId: string,
+): Promise<boolean> {
+  try {
+    const { rows } = await db.query<{ phone_number: string | null; metadata: unknown; etiquetas: unknown[] | null }>(
+      `select ct.phone_number,
+              (select s.metadata from channel_sessions s where s.organization_id = $1 and s.id = $3) as metadata,
+              coalesce(ct.tags, '{}'::text[])
+                || coalesce((select array_agg(t.tag) from crm_leads l, unnest(l.tags) as t(tag)
+                              where l.organization_id = $1 and l.contact_id = $2), '{}'::text[]) as etiquetas
+         from contacts ct
+        where ct.organization_id = $1 and ct.id = $2`,
+      [organizationId, contactId, channelSessionId],
+    );
+    const lido = rows[0];
+    if (lido === undefined) return false;
+    return passaNaConferenciaDoCelularDeTeste({
+      telefone: lido.phone_number,
+      metadataDoCanal: lido.metadata,
+      etiquetas: Array.isArray(lido.etiquetas) ? lido.etiquetas : [],
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function montarPedidoDoGancho(
   db: Queryable,
   alvo: {
@@ -342,6 +395,8 @@ export async function montarPedidoDoGancho(
   // (C01, -c01.6) A reconsulta não atende formulário: a resposta que chegar enquanto
   // ela espera é do turno da própria mensagem (marcá-la aqui a tiraria dele).
   const formulario = alvo.reconsulta === true ? null : await formularioDoTurno(db, alvo);
+  // (C01, -c01.15) Antes da chamada: o `gravar` desta resposta não muda o valor do turno.
+  const celularDeTeste = await lerCelularDeTeste(db, alvo.organizationId, alvo.contactId, alvo.channelSessionId);
 
   const pedido: PedidoDoGancho = {
     versao: 1,
@@ -356,6 +411,7 @@ export async function montarPedidoDoGancho(
         (conversa?.assignee_kind == null && conversa?.assigned_to_user_id != null),
       ultima_entrada_em: iso(conversa?.last_inbound_at),
     },
+    celular_de_teste: celularDeTeste,
     lead: {
       id: card?.id ?? null,
       etapa: card ? etapaDoCard(card) : null,
@@ -443,6 +499,13 @@ export const respostaDoGanchoSchema = z
     passar_a_equipe: z.boolean().nullish(),
     /** (C01, -c01.7) Apagar a memória do contato; só vale no celular de teste (`apagarMemoriaDoContato`). */
     apagar_memoria: z.boolean().nullish(),
+    /**
+     * (C01, -c01.15) Só com `seguir`: mensagens fixas que saem ANTES do modelo, no mesmo
+     * turno e pelo mesmo caminho do `enviar` do `segurar`; o modelo as lê no histórico
+     * (`enviarAntesDoModelo`). A -c01.14 descarta a chave (o `z.object` ignora chave
+     * desconhecida) e segue como `seguir` puro.
+     */
+    enviar_antes: z.array(z.discriminatedUnion('tipo', [itemTexto, itemInterativo])).max(5).nullish(),
   })
   .refine((r) => r.acao !== 'segurar' || Array.isArray(r.enviar), {
     message: 'segurar sem a lista enviar (para não enviar nada, enviar: [])',
@@ -455,6 +518,10 @@ export const respostaDoGanchoSchema = z
   .refine((r) => r.passar_a_equipe !== true || r.acao === 'segurar', {
     message: 'passar_a_equipe só com segurar',
     path: ['passar_a_equipe'],
+  })
+  .refine((r) => (r.enviar_antes ?? []).length === 0 || r.acao === 'seguir', {
+    message: 'enviar_antes só com seguir (no segurar, use enviar)',
+    path: ['enviar_antes'],
   });
 
 export type RespostaDoGancho = z.infer<typeof respostaDoGanchoSchema>;
@@ -518,6 +585,11 @@ type DecisaoAnotada =
       ate: string | null;
       /** A fonte foi um recibo opaco do piloto, conferido no pedido montado. */
       recibo_opaco?: true;
+      /**
+       * (C01, -c01.15) O `enviar_antes` já foi tentado neste job: a re-execução não manda
+       * nada dele de novo (nem o item que falhou); o que saiu já está no histórico lido.
+       */
+      enviar_antes_feito?: true;
     }
   | {
       situacao: 'modelo';
@@ -557,6 +629,7 @@ function decisaoAnotada(payload: Record<string, unknown> | null | undefined): De
         : null,
     ate: typeof d.ate === 'string' ? d.ate : null,
     ...(d.recibo_opaco === true ? { recibo_opaco: true as const } : {}),
+    ...(d.enviar_antes_feito === true ? { enviar_antes_feito: true as const } : {}),
   };
 }
 
@@ -702,6 +775,12 @@ export interface ContextoDoGancho {
   etiquetasDoContato: readonly string[];
   channel: ChannelAdapter;
   optedOutThisTurn: boolean;
+  /**
+   * (C01, -c01.15) A versão publicada do agente tem a passagem desligada
+   * (`handoff_tool_enabled === false`): `passar_a_equipe` abre um caso com o motivo do
+   * gancho e NÃO silencia a conversa (`abrirCasoPeloGancho`). Ausente = a passagem de hoje.
+   */
+  passagemDesligada?: boolean;
   lgpd?: LgpdInput;
   disclosureMode?: 'inject' | 'veto';
   now: () => Date;
@@ -722,6 +801,11 @@ export type DesfechoDoGancho =
       fim: false;
       resumo?: { mensagemId: string; sentAt: string | null; texto: string };
       camposDoCard?: Record<string, unknown>;
+      /**
+       * (C01, -c01.15) O que o `enviar_antes` mandou NESTA execução, na ordem: o turno
+       * acrescenta ao histórico já lido (`acrescentarEnviadasAntesNoContexto`).
+       */
+      enviadasAntes?: EnviadaAntes[];
     };
 
 export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<DesfechoDoGancho> {
@@ -854,6 +938,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     acao: resposta.acao,
     motivo: (resposta.motivo ?? '').slice(0, 40),
     enviar: resposta.enviar?.length ?? 0,
+    ...(resposta.enviar_antes?.length ? { enviar_antes: resposta.enviar_antes.length } : {}),
   });
 
   // 3. Os efeitos.
@@ -861,11 +946,15 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
 
   if (resposta.acao === 'seguir') {
     await guardServiceEffect();
+    // (C01, -c01.15) As mensagens fixas do `enviar_antes` saem antes do resto: falha não
+    // muda a decisão (o turno segue para o modelo, que lê o que saiu).
+    const enviadasAntes = await enviarAntesDoModelo(ctx, decisao, canalInterativo);
+    const antes = enviadasAntes.length > 0 ? { enviadasAntes } : {};
     // Antes do `gravar`: a etiqueta conferida é a de antes desta resposta.
     await apagarMemoriaSePedida(ctx, resposta);
     const gravou = await aplicarGravar(ctx, card, resposta.gravar);
     const relido = gravou ? await lerCardComCuidado(ctx) : null;
-    const campos = relido !== null ? { camposDoCard: relido.campos } : {};
+    const campos = relido !== null ? { camposDoCard: relido.campos, ...antes } : antes;
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
     const f = decisao.formulario;
     if (f !== null) {
@@ -949,7 +1038,9 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
       });
     }
   }
-  if (resposta.passar_a_equipe === true) {
+  if (resposta.passar_a_equipe === true && ctx.passagemDesligada === true) {
+    await abrirCasoPeloGancho(ctx, resposta);
+  } else if (resposta.passar_a_equipe === true) {
     await passarAEquipe(ctx, resposta, enviadas);
   } else {
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
@@ -1024,6 +1115,47 @@ export const MOTIVO_DA_PASSAGEM_PELO_GANCHO =
   'O atendimento de entrada passou a conversa para uma pessoa antes de a IA responder';
 export const TITULO_DA_PASSAGEM_PELO_GANCHO = 'Passado à equipe na entrada — assumir a conversa';
 
+/** (C01, -c01.15) O título do caso aberto pelo `passar_a_equipe` com a passagem desligada. */
+export const TITULO_DO_CASO_PELO_GANCHO = 'O atendimento de entrada pediu uma pessoa';
+
+/**
+ * (C01, -c01.15) `passar_a_equipe` com a passagem desligada: os itens fixos já saíram
+ * (como sempre), e no lugar da passagem abre um caso para a equipe, com o motivo do
+ * gancho no bloqueio e o resumo dele no caso. Sem `force_human`, sem silêncio: o próximo
+ * turno é da IA de novo. `case_already_open` é sucesso. Erro sobe como na passagem: o job
+ * tenta de novo, e os envios voltam `already_sent` pelo ledger.
+ */
+async function abrirCasoPeloGancho(ctx: ContextoDoGancho, resposta: RespostaDoGancho): Promise<void> {
+  const motivo = (resposta.motivo ?? '').trim().slice(0, 60);
+  try {
+    await guardServiceEffect();
+    await abrirCasoDoPedidoDePessoa(
+      ctx.pool,
+      { tenantId: ctx.tenantId, leadId: ctx.contactId, conversationId: ctx.conversationId, agentId: ctx.agentId },
+      {
+        pendentes: [],
+        titulo: TITULO_DO_CASO_PELO_GANCHO,
+        resumo: resposta.resumo ?? MOTIVO_DA_PASSAGEM_PELO_GANCHO,
+        bloqueio:
+          `Aberto automaticamente: o atendimento de entrada pediu uma pessoa${motivo !== '' ? ` (motivo: ${motivo})` : ''}. ` +
+          'A passagem de atendimento está desligada neste agente: a conversa continua com a IA; uma pessoa ' +
+          'precisa verificar e responder.',
+        motivoDaEtapa: 'gancho_sem_passagem',
+        log: ctx.log,
+      },
+    );
+    ctx.log.info('gancho antes do turno: passagem desligada — caso aberto, a conversa segue com a IA', { motivo });
+  } catch (err) {
+    if (!eDeFronteira(err)) {
+      ctx.log.error('gancho antes do turno: caso da passagem desligada não aberto — o job tenta de novo', {
+        erro: err instanceof Error ? err.name : 'desconhecido',
+        motivo,
+      });
+    }
+    throw err;
+  }
+}
+
 async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho, enviadas: number): Promise<void> {
   const motivo = (resposta.motivo ?? '').trim().slice(0, 60);
   // O aviso ao cliente é o que o próprio serviço de entrada mandou neste turno: a Central
@@ -1062,8 +1194,9 @@ async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho, 
  * (C01, -c01.7) A etiqueta que autoriza `apagar_memoria`: o contato, ou um card dele, a
  * tem (comparada já normalizada, como o banco guarda). Constante genérica, sem nada de
  * uma organização: quem usa o `#zerar` no celular de teste põe essa etiqueta nele.
+ * (-c01.15) Vem de `lib/c01/celular-de-teste.ts`, a régua única do celular de teste.
  */
-export const ETIQUETA_DO_CELULAR_DE_TESTE = 'celular-de-teste';
+export { ETIQUETA_DO_CELULAR_DE_TESTE };
 
 /**
  * (C01, -c01.7) Apaga a memória do contato (`lead_notes`) só se o contato ou um card
@@ -1071,12 +1204,29 @@ export const ETIQUETA_DO_CELULAR_DE_TESTE = 'celular-de-teste';
  * janela entre a etiqueta lida e as notas apagadas. O índice da memória e o embedding
  * são da própria linha e saem com ela. Só lê `contacts.tags` e `crm_leads.tags`; só
  * apaga `lead_notes` daquele contato naquela organização.
+ *
+ * (C01, -c01.15, revisão) A etiqueta sozinha NÃO autoriza. Antes, o telefone do contato
+ * tem de estar na lista de teste do canal (`telefoneNaListaDeTeste`, de
+ * `lib/c01/celular-de-teste.ts`, a mesma régua do `#zerar` na entrada). Fora da lista,
+ * nada é apagado e a etiqueta nem é consultada.
  */
 export async function apagarMemoriaDoContato(
   db: Queryable,
   organizationId: string,
   contactId: string,
-): Promise<{ autorizado: boolean; apagadas: number }> {
+  channelSessionId: string,
+): Promise<{ autorizado: boolean; apagadas: number; porque?: 'fora_da_lista_de_teste' | 'sem_etiqueta' }> {
+  const { rows: lidos } = await db.query<{ phone_number: string | null; metadata: unknown }>(
+    `select ct.phone_number, s.metadata
+       from contacts ct
+       left join channel_sessions s on s.organization_id = ct.organization_id and s.id = $3
+      where ct.organization_id = $1 and ct.id = $2`,
+    [organizationId, contactId, channelSessionId],
+  );
+  const lido = lidos[0];
+  if (lido === undefined || !telefoneNaListaDeTeste(lido.phone_number, lido.metadata)) {
+    return { autorizado: false, apagadas: 0, porque: 'fora_da_lista_de_teste' };
+  }
   const { rows } = await db.query<{ autorizado: boolean; apagadas: number }>(
     `with autorizado as (
        select (
@@ -1094,12 +1244,18 @@ export async function apagarMemoriaDoContato(
      select (select ok from autorizado) as autorizado, (select count(*) from apagadas)::int as apagadas`,
     [organizationId, contactId, ETIQUETA_DO_CELULAR_DE_TESTE],
   );
-  return { autorizado: rows[0]?.autorizado === true, apagadas: Number(rows[0]?.apagadas ?? 0) };
+  const autorizado = rows[0]?.autorizado === true;
+  return {
+    autorizado,
+    apagadas: Number(rows[0]?.apagadas ?? 0),
+    ...(autorizado ? {} : { porque: 'sem_etiqueta' as const }),
+  };
 }
 
 /**
  * (C01, -c01.7) `apagar_memoria`. Recusa, sem apagar nada e com o motivo no log: o
- * contato sem a etiqueta de teste; a própria resposta pondo a etiqueta
+ * telefone fora da lista de teste do canal (-c01.15); o contato sem a etiqueta de teste;
+ * a própria resposta pondo a etiqueta
  * (`gravar.etiquetas_mais`, que valeria na re-execução); erro na leitura. Um erro do
  * gancho nunca apaga a memória de quem não é celular de teste. Falhar aqui não cala o
  * cliente: o turno segue.
@@ -1114,11 +1270,19 @@ async function apagarMemoriaSePedida(ctx: ContextoDoGancho, resposta: RespostaDo
   }
   try {
     await guardServiceEffect();
-    const { autorizado, apagadas } = await apagarMemoriaDoContato(ctx.pool, ctx.tenantId, ctx.contactId);
+    const { autorizado, apagadas, porque } = await apagarMemoriaDoContato(
+      ctx.pool,
+      ctx.tenantId,
+      ctx.contactId,
+      ctx.channelSessionId,
+    );
     if (!autorizado) {
-      ctx.log.warn('gancho antes do turno: memória não apagada — contato sem a etiqueta de teste', {
-        porque: 'sem_etiqueta',
-      });
+      ctx.log.warn(
+        porque === 'fora_da_lista_de_teste'
+          ? 'gancho antes do turno: memória não apagada — telefone fora da lista de teste do canal'
+          : 'gancho antes do turno: memória não apagada — contato sem a etiqueta de teste',
+        { porque: porque ?? 'sem_etiqueta' },
+      );
       return;
     }
     ctx.log.info('gancho antes do turno: memória do contato apagada (celular de teste)', { notas: apagadas });
@@ -1300,3 +1464,91 @@ async function enviarItem(
 
 /** `metadata.origem` das mensagens que o gancho envia. */
 export const ORIGEM_DO_GANCHO = 'pre_turn_hook';
+
+// ─── (C01, -c01.15) `seguir` com `enviar_antes` ───────────────────────────────────
+
+/**
+ * Posições do ledger do `enviar_antes`: -101 a -105 (a constante mora no ledger, que
+ * separa a faixa do `enviar`: o `enviar_antes` não conta como resposta em `doGancho`).
+ */
+export { SEQ_DO_ENVIAR_ANTES };
+
+/** Uma mensagem do `enviar_antes` que saiu: o texto da linha da conversa e o instante. */
+export interface EnviadaAntes {
+  texto: string;
+  em: Date;
+}
+
+/**
+ * Manda os itens do `enviar_antes`, na ordem, pelo mesmo caminho do `enviar` do
+ * `segurar` (`enviarItem`: a cadeia de antes do envio, sem atraso humano; o item que o
+ * ledger deste job já tem vai direto ao canal). Devolve o que saiu NESTA execução e
+ * ainda não estava no ledger — o que já estava, o histórico lido no começo do turno já
+ * mostra.
+ *
+ * O 1º item que não sai (veto, falha do canal, interativo num canal que não o envia)
+ * fica no log, os seguintes não saem (o cliente não recebe a 2ª parte sem a 1ª) e o
+ * turno segue para o modelo. A anotação `enviar_antes_feito` impede a re-execução de
+ * tentar de novo, inclusive o item que falhou.
+ */
+async function enviarAntesDoModelo(
+  ctx: ContextoDoGancho,
+  decisao: Extract<DecisaoAnotada, { situacao: 'decidido' }>,
+  canalJaLido: boolean | null,
+): Promise<EnviadaAntes[]> {
+  const itens = decisao.resposta.enviar_antes ?? [];
+  if (itens.length === 0) return [];
+  if (decisao.enviar_antes_feito === true) {
+    ctx.log.info('gancho antes do turno: enviar_antes já tentado neste job — não sai de novo', {
+      previstas: itens.length,
+    });
+    return [];
+  }
+  const registrados = await Promise.all(itens.map((item) => registradoNoJob(ctx, item)));
+  let canalInterativo = canalJaLido;
+  if (canalInterativo === null && itens.some((i, n) => i.tipo === 'interativo' && !registrados[n])) {
+    try {
+      canalInterativo = await canalDoNumeroEnviaInterativo(ctx);
+    } catch (err) {
+      if (eDeFronteira(err)) throw err;
+      ctx.log.warn('gancho antes do turno: canal do número não lido — enviar_antes sem interativo', {
+        erro: err instanceof Error ? err.name : 'desconhecido',
+      });
+      canalInterativo = false;
+    }
+  }
+  const enviadas: EnviadaAntes[] = [];
+  for (const [i, item] of itens.entries()) {
+    const desfecho: DesfechoDoItem | 'canal_sem_interativo' =
+      item.tipo === 'interativo' && !registrados[i] && canalInterativo !== true
+        ? 'canal_sem_interativo'
+        : await enviarItem(ctx, item, SEQ_DO_ENVIAR_ANTES - (i + 1), canalInterativo === true, registrados[i] === true);
+    if (desfecho !== 'ok') {
+      ctx.log.warn('gancho antes do turno: enviar_antes parou — o turno segue para o modelo com o que saiu', {
+        item: i + 1,
+        desfecho,
+        enviadas: i,
+        previstas: itens.length,
+      });
+      break;
+    }
+    if (!registrados[i]) enviadas.push({ texto: conteudoDoItem(item).body, em: ctx.now() });
+  }
+  await anotarComCuidado(ctx, { ...decisao, enviar_antes_feito: true });
+  return enviadas;
+}
+
+/**
+ * O que o `enviar_antes` mandou, no fim do histórico já lido pelo turno (a abertura do
+ * modelo usa a leitura do começo do turno, feita antes do envio): o modelo responde
+ * sabendo o que o cliente já recebeu.
+ */
+export function acrescentarEnviadasAntesNoContexto(
+  mensagens: LeadContextMessage[],
+  enviadas: readonly EnviadaAntes[],
+  fuso: string,
+): void {
+  for (const e of enviadas) {
+    mensagens.push({ direction: 'outbound', body: e.texto, sent_at: isoLocalComOffset(e.em, fuso) });
+  }
+}

@@ -54,6 +54,7 @@ import { ehContatoDoNumeroInterno } from "@/lib/escalacao/numero-interno-de-avis
 import { acelerarPipelineDeEventos } from "@/lib/dev/kick-local-pipeline";
 import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
 import { casarCampanha, lerCampanhas } from "@/lib/ai/elegibilidade/campanha";
+import { zerarCelularDeTesteSePedido } from "@/lib/c01/zerar-celular-de-teste";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -142,6 +143,13 @@ export async function aplicarEfeitosPosEntrada(
     return;
   }
 
+  // (C01, -c01.15, P8) O `#zerar` do celular de teste solta o bloqueio de opt-out, o
+  // `force_human`, o silêncio e o dono humano ANTES do despacho: o drain
+  // (`decidirElegibilidadeDaConversa`), o handler (`isLeadInHandoff`) e o turno
+  // (`optedOutThisTurn` segura o gancho) descartam o turno de conversa calada ou
+  // bloqueada, e o comando nunca chegava ao gancho. O gancho/porteiro faz a limpeza do
+  // card no turno que segue. Número sem a etiqueta de teste: nada muda.
+  await zerarCelularDeTesteSePedido(admin, entrada);
   await aplicarOptOut(admin, entrada);
   await guardarOrigemDaPagina(admin, entrada);
   await abrirDemanda(admin, entrada);

@@ -23,6 +23,7 @@ import type { Logger } from '../../obs/logger';
 import type { ProviderRegistry } from '../../edge/llm/providers';
 import { runModelCall, type LlmEdgeConfig } from '../../edge/llm/run-model-call';
 import type { LlmResolveOverride } from '../../edge/llm/credentials';
+import { blocoDosTextosAprovados } from '../promessa-e-texto-afirmavel';
 
 /** Veredito binário do classificador. suspectPhrase = null quando isPromise = false. */
 export interface PromiseClassification {
@@ -51,10 +52,17 @@ export const PROMISE_SEMANTIC_INSTRUCTION =
   '{"isPromise": true|false, "suspectPhrase": "<trecho literal da promessa na mensagem>"|null}. ' +
   'suspectPhrase é null quando isPromise=false.';
 
-function buildPromiseMessage(candidate: string): string {
-  return ['## Mensagem candidata (que o vendedor quer enviar ao lead)', candidate, '', PROMISE_SEMANTIC_INSTRUCTION].join(
-    '\n',
-  );
+function buildPromiseMessage(candidate: string, aprovados: readonly string[] = []): string {
+  // (C01, -c01.15) Os textos aprovados da base lidos no turno, com a regra da paráfrase;
+  // sem eles, a mensagem é a de antes.
+  const bloco = blocoDosTextosAprovados(aprovados);
+  return [
+    '## Mensagem candidata (que o vendedor quer enviar ao lead)',
+    candidate,
+    '',
+    ...(bloco !== null ? [bloco, ''] : []),
+    PROMISE_SEMANTIC_INSTRUCTION,
+  ].join('\n');
 }
 
 /**
@@ -100,7 +108,7 @@ export async function classifyPromise(
   db: pg.Pool,
   cfg: LlmEdgeConfig,
   ids: { tenantId: string; leadId?: string | null; jobId?: string },
-  args: { candidate: string; model?: string; llmOverride?: LlmResolveOverride },
+  args: { candidate: string; model?: string; llmOverride?: LlmResolveOverride; aprovados?: readonly string[] },
   deps: { registry?: ProviderRegistry; log: Logger },
 ): Promise<PromiseClassification> {
   const call = await runModelCall(
@@ -113,7 +121,7 @@ export async function classifyPromise(
       purpose: 'promise_semantic',
       ...(args.model !== undefined ? { model: args.model } : {}),
       ...(args.llmOverride !== undefined ? { llmOverride: args.llmOverride } : {}),
-      messages: [{ role: 'user', content: buildPromiseMessage(args.candidate) }],
+      messages: [{ role: 'user', content: buildPromiseMessage(args.candidate, args.aprovados) }],
     },
     { registry: deps.registry, log: deps.log },
   );

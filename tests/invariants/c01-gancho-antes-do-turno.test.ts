@@ -1343,6 +1343,13 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     apagar_memoria: true,
   };
 
+  /** (-c01.15, revisão) A lista de teste do canal: a etiqueta sozinha não autoriza. */
+  const listaDeTeste = (numeros: string[]) =>
+    pool.query(
+      "update channel_sessions set metadata = jsonb_build_object('ai_test_phone_numbers', $3::jsonb) where organization_id = $1 and id = $2",
+      [ORG, SESSION, JSON.stringify(numeros)],
+    );
+
   beforeAll(async () => {
     await pool.query(
       `insert into contacts (id, organization_id, name, phone_number, tags)
@@ -1351,7 +1358,12 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     );
   });
 
+  afterAll(async () => {
+    await pool.query("update channel_sessions set metadata = '{}'::jsonb where organization_id = $1 and id = $2", [ORG, SESSION]);
+  });
+
   beforeEach(async () => {
+    await listaDeTeste([TELEFONE]);
     await pool.query("delete from lead_notes where organization_id = $1", [ORG]);
     await pool.query("update contacts set tags = '{}'::text[] where organization_id = $1 and id = $2", [ORG, CONTACT]);
     for (const [contato, headline] of [
@@ -1430,6 +1442,37 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     expect(linhaDoLog("memória do contato apagada")).toBeUndefined();
     const recusa = JSON.stringify(linhaDoLog("contato sem a etiqueta de teste"));
     for (const pessoal of [NOME, TELEFONE, EMAIL, NOTA_ANTIGA]) expect(recusa).not.toContain(pessoal);
+  });
+
+  it("(-c01.15) etiqueta sem o telefone na lista de teste do canal: nada é apagado e o log diz por quê", async () => {
+    await etiquetaNoCard();
+    await listaDeTeste(["+5511900000882"]);
+    respostaDoGancho = async () => json(ZERAR);
+    expect(await executa(montaHandler(modelo().doGenerate, true), await enfileira(await novaEntrada("#zerar")))).toBeNull();
+
+    expect(await notas(CONTACT)).toHaveLength(2);
+    expect(corpos()).toEqual([CONFIRMACAO]);
+    expect(linhaDoLog("fora da lista de teste do canal")).toMatchObject({ porque: "fora_da_lista_de_teste" });
+    expect(linhaDoLog("memória do contato apagada")).toBeUndefined();
+  });
+
+  it("(-c01.15) o pedido leva `celular_de_teste`: verdadeiro só com a lista e a etiqueta, e nunca o telefone", async () => {
+    respostaDoGancho = async () => json({ acao: "seguir" });
+    const handler = montaHandler(modelo().doGenerate, true);
+    const pedido = async () => {
+      expect(await executa(handler, await enfileira(await novaEntrada("Oi")))).toBeNull();
+      const corpo = pedidosAoGancho.at(-1)!.corpo;
+      expect(corpo).not.toContain(TELEFONE.slice(1));
+      return (JSON.parse(corpo) as { celular_de_teste?: unknown }).celular_de_teste;
+    };
+    // Na lista, sem a etiqueta.
+    expect(await pedido()).toBe(false);
+    // Na lista e com a etiqueta no card.
+    await etiquetaNoCard();
+    expect(await pedido()).toBe(true);
+    // Com a etiqueta, fora da lista do canal.
+    await listaDeTeste(["+5511900000882"]);
+    expect(await pedido()).toBe(false);
   });
 
   it("a própria resposta pondo a etiqueta não se autoriza, nem na re-execução do job", async () => {
@@ -1634,5 +1677,151 @@ describe("c01 — recibo opaco do piloto recupera no mesmo job, sem IA às cegas
     expect(await executa(montaHandler(mod.doGenerate,true),job)).toBeNull();
     expect(mod.estado.etapas).toBeGreaterThan(0);
     expect(await anotacaoDoJob(job)).toMatchObject({situacao:"modelo"});
+  });
+});
+
+describe("-c01.15: `seguir` com `enviar_antes` e a resposta do modelo no mesmo turno (com o divisor de bolhas)", () => {
+  const VERSAO_BOLHAS = "c5c5c5c5-0000-4000-8000-0000000000b1";
+  const CRONOGRAMA = "Este é o cronograma da sua formação: https://exemplo.com.br/cronograma";
+  const RESPOSTA_DUVIDA = "Sobre a sua dúvida: as aulas são gravadas e você assiste quando quiser.\n\nQuer que eu te mande a página?";
+  const SEGUNDA = "Mais uma coisa: tem desconto hoje.";
+
+  /** O modelo responde a dúvida (2 parágrafos), tenta um 2º `send_message` e encerra. */
+  function modeloQueTentaDuasRespostas() {
+    const estado = { etapas: 0, prompts: [] as string[] };
+    const chamada = (id: string, body: string) => ({
+      content: [{ type: "tool-call" as const, toolCallId: id, toolName: "send_message", input: JSON.stringify({ body }) }],
+      finishReason: { unified: "tool-calls" as const, raw: undefined },
+      usage: USO,
+      warnings: [],
+    });
+    const doGenerate = async (opts: { prompt?: unknown }) => {
+      const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
+      const ultima = msgs[msgs.length - 1];
+      const pedeCheckpoint =
+        ultima?.role === "user" &&
+        Array.isArray(ultima.content) &&
+        (ultima.content as Array<Record<string, unknown>>).some(
+          (p) => p.type === "text" && p.text === m.turno.CHECKPOINT_INSTRUCTION,
+        );
+      if (pedeCheckpoint) return texto(CHECKPOINT);
+      estado.etapas += 1;
+      estado.prompts.push(JSON.stringify(opts.prompt));
+      if (estado.etapas === 1) return chamada("r1", RESPOSTA_DUVIDA);
+      if (estado.etapas === 2) return chamada("r2", SEGUNDA);
+      return texto("pronto");
+    };
+    return { doGenerate, estado };
+  }
+
+  beforeAll(async () => {
+    await pool.query(
+      `insert into ai_agent_versions (id, organization_id, agent_id, version_number, system_prompt, provider, model,
+                                      channel_session_id, status, published_at, token_budget, max_steps,
+                                      split_messages, split_max_chars)
+       values ($1,$2,$3,2,'Você é um atendente de teste.','anthropic','claude-sonnet-4-6',$4,'published',now(),100000,4,true,300)
+       on conflict (id) do nothing`,
+      [VERSAO_BOLHAS, ORG, AGENTE, SESSION],
+    );
+    await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO_BOLHAS, AGENTE]);
+  });
+
+  afterAll(async () => {
+    await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO, AGENTE]);
+  });
+
+  it("o cronograma do gancho e a resposta da IA saem; o 2º `send_message` do modelo é recusado; a re-execução não reenvia nada", async () => {
+    respostaDoGancho = async () =>
+      json({ acao: "seguir", motivo: "cronograma", enviar_antes: [{ tipo: "texto", texto: CRONOGRAMA }] });
+    const mod = modeloQueTentaDuasRespostas();
+    const jobId = await enfileira(MSG);
+    expect(await executa(montaHandler(mod.doGenerate, true), jobId)).toBeNull();
+
+    // As duas saem, na ordem: o item fixo do gancho e a resposta da IA em 2 bolhas. A 2ª
+    // resposta do modelo não sai: o gancho não conta como a resposta do turno, e ela sim.
+    const RESPOSTA_EM_BOLHAS = RESPOSTA_DUVIDA.split("\n\n");
+    expect(corpos()).toEqual([CRONOGRAMA, ...RESPOSTA_EM_BOLHAS]);
+    expect(corpos()).not.toContain(SEGUNDA);
+    // O modelo leu o cronograma no histórico, e leu a recusa do 2º envio.
+    expect(mod.estado.prompts[0]).toContain("cronograma da sua formação");
+    expect(mod.estado.prompts[2]).toContain("uma_resposta_por_turno");
+    // Os recibos: o gancho na posição negativa dele, a IA nas positivas.
+    const ledger = async () =>
+      (
+        await pool.query<{ seq: number; status: string }>(
+          "select seq, status from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+          [ORG, jobId],
+        )
+      ).rows;
+    expect(await ledger()).toEqual([
+      { seq: -101, status: "accepted" },
+      { seq: 1, status: "accepted" },
+      { seq: 2, status: "accepted" },
+    ]);
+    expect((await mensagensDeSaida()).map((x) => x.body)).toEqual([CRONOGRAMA, ...RESPOSTA_EM_BOLHAS]);
+    expect(await anotacaoDoJob(jobId)).toMatchObject({ enviar_antes_feito: true });
+
+    // Retentativa do job (o reaper o devolve): o gancho não é perguntado de novo, o
+    // cronograma não sai de novo, a resposta da IA é reconhecida pelo ledger.
+    const reexecucao = modeloQueTentaDuasRespostas();
+    expect(await reexecuta(montaHandler(reexecucao.doGenerate, true), jobId)).toBeNull();
+    expect(pedidosAoGancho).toHaveLength(1);
+    expect(corpos()).toEqual([CRONOGRAMA, ...RESPOSTA_EM_BOLHAS]);
+    expect(await ledger()).toEqual([
+      { seq: -101, status: "accepted" },
+      { seq: 1, status: "accepted" },
+      { seq: 2, status: "accepted" },
+    ]);
+    expect(await mensagensDeSaida()).toHaveLength(3);
+    expect(await passouAoHumano()).toBe(false);
+  });
+});
+
+describe("-c01.15: a escolta da preparação não conta o `enviar_antes` como resposta", () => {
+  it("`seguir` com `enviar_antes` [cronograma] e `statement_timeout` na preparação, na última tentativa: caso, frase de espera e passagem", async () => {
+    const CRONOGRAMA = "Este é o cronograma da sua formação: https://exemplo.com.br/cronograma";
+    respostaDoGancho = async () => json({ acao: "seguir", enviar_antes: [{ tipo: "texto", texto: CRONOGRAMA }] });
+    const jobId = await enfileira(MSG, 1);
+    // Depois do gancho, a leitura do ledger que o turno faz antes do modelo cai por
+    // `statement_timeout` (uma vez; a escolta relê o ledger e consegue).
+    let caiu = false;
+    const poolQueCai = new Proxy(pool, {
+      get(alvo, prop) {
+        if (prop === "query") {
+          return (sql: unknown, ...resto: unknown[]) => {
+            const texto = typeof sql === "string" ? sql : ((sql as { text?: string })?.text ?? "");
+            if (
+              !caiu &&
+              pedidosAoGancho.length > 0 &&
+              texto.startsWith("select seq,status from send_ledger where organization_id=$1 and job_id=$2")
+            ) {
+              caiu = true;
+              return Promise.reject(
+                Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }),
+              );
+            }
+            return (alvo.query as (...a: unknown[]) => unknown)(sql, ...resto);
+          };
+        }
+        const valor = Reflect.get(alvo, prop) as unknown;
+        return typeof valor === "function" ? (valor as (...a: unknown[]) => unknown).bind(alvo) : valor;
+      },
+    });
+    const mod = modelo();
+    const erro = await executa(montaHandler(mod.doGenerate, true), jobId, poolQueCai);
+
+    expect(caiu).toBe(true);
+    expect(erro?.message).toContain("statement timeout");
+    expect(mod.estado.etapas).toBe(0);
+    // O cronograma saiu e a dúvida ficou sem resposta: a escolta abre o caso, manda a
+    // frase de espera depois dele e passa a conversa.
+    expect(corpos()).toHaveLength(2);
+    expect(corpos()[0]).toBe(CRONOGRAMA);
+    expect(await casosAbertos()).toBe(1);
+    expect(await passouAoHumano()).toBe(true);
+    expect(linhasDoLog.some((l) => l.includes("o lead já tem resposta deste job — sem passagem"))).toBe(false);
+    // O ledger continua separando as faixas: o `enviar_antes` reconciliado, fora de `doGancho`.
+    const estado = await m.ledger.estadoInicialDoJob(pool, { tenantId: ORG, jobId });
+    expect(estado.doGancho).toBeUndefined();
   });
 });

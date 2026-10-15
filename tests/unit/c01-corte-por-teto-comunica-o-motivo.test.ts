@@ -246,7 +246,7 @@ describe("(C01) a ligação pelo código", () => {
     );
     // (-c01.3) A sequência mora em `passarAoHumanoSemResposta`; os textos vêm de
     // `textosDoFimSemResposta` (o corte pelo teto de tokens: os constantes de sempre).
-    const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {");
+    const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera | 'sem_frase'> => {");
     expect(ini).toBeGreaterThan(-1);
     const bloco = TURNO.slice(ini, TURNO.indexOf("\n  };\n", ini));
     // Caso ANTES da frase, com a origem do fail-safe; sem caso (e não é "já havia") o job falha.
@@ -260,11 +260,17 @@ describe("(C01) a ligação pelo código", () => {
     expect(bloco).toMatch(
       /openedCaseThisTurn = true;\s*moverParaHandoffBestEffort\(fim\.motivo\);\s*passadoAoHumano = true;/,
     );
+    // (-c01.15) A frase é `fraseDoFailSafe` e o desfecho passa por `desfechoDoFailSafe`:
+    // com a passagem ligada, a frase de espera e `desfechoDaFraseDeEspera`, como antes.
     expect(bloco).toMatch(
-      /const espera = await runBeforeSend\(\{[\s\S]*?body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,[\s\S]*?hasOpenCase: true,\s*openedCaseThisTurn: true,\s*enforceSpinning: false,[\s\S]*?send: enviarFraseDeEspera,\s*\}\);/,
+      /const espera = await runBeforeSend\(\{[\s\S]*?body: fraseDoFailSafe,[\s\S]*?hasOpenCase: true,\s*openedCaseThisTurn: true,\s*enforceSpinning: false,[\s\S]*?send: enviarFraseDeEspera,\s*\}\);/,
     );
-    expect(bloco).toMatch(
-      /const desfecho = desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);/,
+    expect(TURNO).toMatch(
+      /const fraseDoFailSafe = semPassagem \? FRASE_DE_VERIFICACAO : \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\);/,
+    );
+    expect(bloco).toMatch(/const desfecho = desfechoDoFailSafe\(espera\);/);
+    expect(TURNO).toMatch(
+      /const desfechoDoFailSafe = \(espera: BeforeSendResult\): DesfechoDaFraseDeEspera => \{[\s\S]*?return desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);\s*\};/,
     );
     expect(bloco).toMatch(
       /await gravarPassagemComNovaTentativa\(\s*\(\) =>\s*performHumanHandoff\(\s*pool,\s*\{ tenantId, leadId, conversationId: input\.conversationId \},\s*\{\s*reason: textos\.motivoDaPassagem,\s*conversationSummary: buildHandoffSummary\(previous\),\s*inboxTitle: textos\.tituloDaPassagem,\s*avisoAoLead: avisoAoLeadPelaFraseDeEspera\(espera\),/,

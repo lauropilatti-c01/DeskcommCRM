@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 
 import { tool } from "ai";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import pg from "pg";
 import { z } from "zod";
 
@@ -30,6 +30,13 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *   - consultando só uma, a segunda tentativa sai (estilo);
  *   - a consulta de um turno anterior libera só a tabela "uma vez por contato".
  * E o marcador "[link do vídeo]" nunca sai.
+ *
+ * (C01, -c01.15, revisão) Com a passagem desligada (`handoff_tool_enabled = false` na
+ * versão publicada), a consulta vale como trava de conteúdo e:
+ *   - o modelo que encerra o turno depois do veto, sem reescrever, não deixa o lead mudo:
+ *     caso com o texto retido e a frase de verificação, sem passagem gravada;
+ *   - o fail-safe da trava de conteúdo no limite, com uma resposta do turno já no lead,
+ *     só abre o caso: a frase de verificação não sai depois da resposta.
  *
  * Tabelas, links e textos são fictícios (regra do C01.md).
  */
@@ -507,5 +514,103 @@ describe("(C01, -c01.14) 'marcador entre colchetes', no turno inteiro", () => {
     await travas({});
     await rodaTurno([{ envia: "Olha: [link do vídeo]" }]);
     expect(enviados.map((e) => e.body)).toEqual(["Olha: [link do vídeo]"]);
+  });
+});
+
+describe("(C01, -c01.15, revisão) sem passagem, no turno inteiro", () => {
+  const VERSAO_SEM_PASSAGEM = "a8a8a8a8-0000-4000-8000-000000000008";
+  let FRASE = "";
+
+  beforeAll(async () => {
+    FRASE = (await import("@/lib/c01/passagem-desligada")).FRASE_DE_VERIFICACAO;
+    // Versão publicada é imutável: a sem passagem é outra versão, e o ponteiro troca.
+    await pool.query(
+      `insert into ai_agent_versions (id, organization_id, agent_id, version_number, system_prompt,
+                                      provider, model, channel_session_id, status, published_at, max_steps, tool_ids,
+                                      handoff_tool_enabled)
+       values ($1,$2,$3,2,'Você é um atendente de teste.','anthropic','claude-sonnet-4-6',$4,'published',now(),8,
+               array['crm_query_external_data'], false)
+       on conflict (id) do nothing`,
+      [VERSAO_SEM_PASSAGEM, ORG, AGENTE, SESSION],
+    );
+  });
+  beforeEach(async () => {
+    await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO_SEM_PASSAGEM, AGENTE]);
+    // A tabela cobrada em todo turno: a consulta de um turno anterior (dos testes acima) não libera.
+    await travas({ ...consultaLigada({ [FATOS]: "todo_turno" }), marcador_entre_colchetes: { ligada: true } });
+  });
+  afterAll(async () => {
+    await pool.query("update ai_agents set published_version_id = $1 where id = $2", [VERSAO, AGENTE]);
+  });
+
+  async function casos(): Promise<Array<{ summary: string; source: string }>> {
+    const { rows } = await pool.query<{ summary: string; source: string }>(
+      "select summary, source from agent_cases where organization_id = $1 order by created_at",
+      [ORG],
+    );
+    return rows;
+  }
+  async function semPassagemGravada() {
+    const passagens = await pool.query("select 1 from passagens_de_atendimento where organization_id = $1", [ORG]);
+    expect(passagens.rowCount).toBe(0);
+    const { rows } = await pool.query<{ force_human: boolean }>(
+      "select force_human from contacts where organization_id = $1 and id = $2",
+      [ORG, CONTACT],
+    );
+    expect(rows[0]?.force_human).toBe(false);
+    const conversa = await pool.query<{ bot_silenced_until: string | null }>(
+      "select bot_silenced_until from conversations where organization_id = $1 and id = $2",
+      [ORG, CONV],
+    );
+    expect(conversa.rows[0]?.bot_silenced_until).toBeNull();
+  }
+
+  it("o modelo encerra o turno depois do veto da consulta, sem reescrever: caso com o texto retido e a frase de verificação", async () => {
+    const { erro } = await rodaTurno([{ envia: "Cada curso combina com um perfil." }]);
+    expect(erro).toBeNull();
+    expect(await vetos()).toEqual(["consulta_antes_de_enviar"]);
+    expect(enviados.map((e) => e.body)).toEqual([FRASE]);
+    const abertos = await casos();
+    expect(abertos).toHaveLength(1);
+    expect(abertos[0]?.source).toBe("guardrail_autofallback");
+    expect(abertos[0]?.summary).toContain("Cada curso combina com um perfil.");
+    await semPassagemGravada();
+  });
+
+  it("o modelo encerra o turno depois de um veto de conteúdo (marcador), sem reescrever: o mesmo fail-safe", async () => {
+    const { erro } = await rodaTurno([{ base: FATOS }, { envia: "Separei um vídeo:\n\n[link do vídeo]" }]);
+    expect(erro).toBeNull();
+    expect(await vetos()).toEqual(["marcador_entre_colchetes"]);
+    expect(enviados.map((e) => e.body)).toEqual([FRASE]);
+    expect((await casos())[0]?.summary).toContain("[link do vídeo]");
+    await semPassagemGravada();
+  });
+
+  it("a trava de conteúdo no limite com uma resposta do turno já no lead: só o caso, sem a frase depois da resposta", async () => {
+    const { erro } = await rodaTurno([
+      { base: FATOS },
+      { envia: "Cada curso combina com um perfil." },
+      { envia: "Olha: [link do vídeo]" },
+      { envia: "Olha de novo: [link do vídeo]" },
+      { envia: "Mais uma: [link do vídeo]" },
+    ]);
+    expect(erro).toBeNull();
+    expect(await vetos()).toEqual(["marcador_entre_colchetes", "marcador_entre_colchetes", "marcador_entre_colchetes"]);
+    expect(enviados.map((e) => e.body)).toEqual(["Cada curso combina com um perfil."]);
+    const abertos = await casos();
+    expect(abertos).toHaveLength(1);
+    expect(abertos[0]?.summary).toContain("Mais uma: [link do vídeo]");
+    await semPassagemGravada();
+  });
+
+  it("veto de conteúdo e depois a reescrita que sai: nenhum caso, nenhuma frase", async () => {
+    const { erro } = await rodaTurno([
+      { envia: "Cada curso combina com um perfil." },
+      { base: FATOS },
+      { envia: `Tem um vídeo sobre isso:\n\n${VIDEO}` },
+    ]);
+    expect(erro).toBeNull();
+    expect(enviados.map((e) => e.body)).toEqual([`Tem um vídeo sobre isso:\n\n${VIDEO}`]);
+    await semCasoNemPassagem();
   });
 });
