@@ -158,6 +158,104 @@ describe("(a) o link não é partido: a bolha que o cliente recebe leva o link i
   });
 });
 
+/**
+ * (2ª rodada da revisão) A trava julga a SAÍDA REAL: as mensagens físicas que o envio
+ * mandaria (a mesma divisão do `sendInBubbles`, com o parágrafo longo partido pelo
+ * `split_max_chars`), sem emenda do teto, o total com os links e cada link inteiro.
+ */
+type Saida = { naturais: number; fisicas: string[]; emendou: boolean; paragrafos: number; linksPartidos: number };
+async function saidaReal(): Promise<(body: string, maxChars: number, restantes: number) => Saida> {
+  const m = (await import("@/lib/agent-engine/guardrails/texto-longo")) as unknown as {
+    saidaEmBolhas: (body: string, maxChars: number, restantes: number) => Saida;
+  };
+  return m.saidaEmBolhas;
+}
+
+/** O que o `sendInBubbles` de verdade manda, com o teto do turno. */
+async function enviadoDeVerdade(body: string, maxChars: number, maxBubbles: number) {
+  const enviados: string[] = [];
+  const aoEmendar = vi.fn();
+  await sendInBubbles(body, {
+    enabled: true,
+    maxChars,
+    maxBubbles,
+    send: async (b: string) => {
+      enviados.push(b);
+      return { kind: "sent" };
+    },
+    sleep: async () => undefined,
+    jitter: () => 0,
+    aoEmendar,
+  });
+  return { enviados, emendou: aoEmendar.mock.calls.length > 0 };
+}
+
+describe("(a, 2ª rodada) a trava julga a saída real do divisor, não a conta de parágrafos", () => {
+  // 3 parágrafos; o 1º, com 2 frases de 100, passa do split_max_chars (120) e vira 2 mensagens.
+  const LONGO_E_DOIS_CURTOS = [`${paragrafo(100, "a")} ${paragrafo(100, "b")}`, "Tudo bem?", "Posso te mandar a página?"].join("\n\n");
+
+  it("3 parágrafos, um maior que split_max_chars: são 4 mensagens físicas, o envio emendaria, e a trava veta", async () => {
+    const real = await enviadoDeVerdade(LONGO_E_DOIS_CURTOS, 120, 3);
+    expect(real.emendou).toBe(true);
+    const saida = (await saidaReal())(LONGO_E_DOIS_CURTOS, 120, 3);
+    expect(saida).toMatchObject({ naturais: 4, paragrafos: 3, emendou: true });
+    expect(saida.fisicas).toEqual(real.enviados);
+
+    const v = (await trava())(LONGO_E_DOIS_CURTOS, { maxChars: 120, restantes: 3, maxTotal: 700 });
+    expect(v.pass).toBe(false);
+    expect(v.reason).toMatch(/viraria 4 mensagens no WhatsApp e neste turno só cabem 3 mensagens \(parágrafo com mais de 120 caracteres é partido em mais de uma mensagem\)/);
+    expect(v.detail).toMatchObject({ bolhas: 4, paragrafos: 3, restantes: 3 });
+  });
+
+  it("um parágrafo só, abaixo de 700, mas que o divisor parte em 4: veta", async () => {
+    const corpo = [paragrafo(100, "a"), paragrafo(100, "b"), paragrafo(100, "c"), paragrafo(100, "d"), paragrafo(100, "e"), paragrafo(100, "f"), paragrafo(100, "g")].join(" ");
+    expect([...corpo].length).toBeLessThan(710);
+    const saida = (await saidaReal())(corpo, 210, 3);
+    expect(saida).toMatchObject({ naturais: 4, paragrafos: 1, emendou: true });
+    const v = (await trava())(corpo, { maxChars: 210, restantes: 3, maxTotal: 710 });
+    expect(v.pass).toBe(false);
+    expect(v.detail).toMatchObject({ bolhas: 4, paragrafos: 1 });
+  });
+
+  it("4 parágrafos curtos: o envio emendaria a 4ª na 3ª; a trava veta", async () => {
+    const corpo = ["Oi!", "Tudo bem?", "Vi seu formulário.", "Posso te mandar a página?"].join("\n\n");
+    const real = await enviadoDeVerdade(corpo, 350, 3);
+    expect(real.enviados).toEqual(["Oi!", "Tudo bem?", "Vi seu formulário.\n\nPosso te mandar a página?"]);
+    expect((await saidaReal())(corpo, 350, 3).fisicas).toEqual(real.enviados);
+    expect((await trava())(corpo, { maxChars: 350, restantes: 3, maxTotal: 700 }).pass).toBe(false);
+  });
+
+  it("o que a trava deixa passar sai exatamente como ela contou, sem emenda", async () => {
+    const corpo = [`${paragrafo(100, "a")} ${paragrafo(100, "b")}`, "Posso te mandar a página?"].join("\n\n");
+    const v = (await trava())(corpo, { maxChars: 120, restantes: 3, maxTotal: 700 });
+    expect(v.pass).toBe(true);
+    const real = await enviadoDeVerdade(corpo, 120, 3);
+    expect(real.emendou).toBe(false);
+    expect(real.enviados).toEqual((await saidaReal())(corpo, 120, 3).fisicas);
+    expect(real.enviados).toHaveLength(3);
+  });
+
+  it("URLs inteiras: link maior que split_max_chars, dentro de parágrafo longo, sai inteiro numa mensagem", async () => {
+    const corpo = `${paragrafo(60, "a")} A página é ${LINK} e lá está tudo.\n\nQualquer dúvida, me chama.`;
+    const saida = (await saidaReal())(corpo, 50, 5);
+    expect(saida.linksPartidos).toBe(0);
+    expect(saida.fisicas.filter((b) => b.includes(LINK))).toHaveLength(1);
+    expect(saida.fisicas.some((b) => b.length > 50 && b.includes(LINK))).toBe(true);
+    const real = await enviadoDeVerdade(corpo, 50, 5);
+    expect(real.enviados).toEqual(saida.fisicas);
+    expect((await trava())(corpo, { maxChars: 50, restantes: 5, maxTotal: 700 }).pass).toBe(true);
+  });
+
+  it("o erro de ensino diz quando um link sairia partido", async () => {
+    const m = (await import("@/lib/agent-engine/guardrails/texto-longo")) as unknown as {
+      renderVetoDeRespostaEmBolhas: (c: Record<string, number>) => string;
+    };
+    const r = m.renderVetoDeRespostaEmBolhas({ bolhas: 2, restantes: 3, maxChars: 300, caracteres: 400, maxTotal: 700, linksPartidos: 1 });
+    expect(r).toMatch(/NÃO foi enviada: um link sairia partido entre mensagens\./);
+    expect(r).toMatch(/sem mudar nenhum link/);
+  });
+});
+
 const CAMINHO_DO_ENVOLTORIO = "@/lib/agent-engine/agent/c01-uma-resposta-por-turno";
 
 type Resultado = { ok: boolean; error?: { code: string; message: string } };

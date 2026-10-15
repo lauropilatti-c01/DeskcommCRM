@@ -29,8 +29,54 @@
  * (todas as bolhas somadas, contando os links como o cliente os vê), e o erro de ensino
  * dá os dois números de uma vez: até N parágrafos e até X caracteres no total.
  */
-import { splitIntoBubbles } from '../agent/split-message';
+import { aplicarTetoAsNovas, splitForSend, splitIntoBubbles } from '../agent/split-message';
 import type { Gate, GateVerdict } from './before-send';
+import { trechosDeLink } from './link-permitido';
+
+/**
+ * (C01, -c01.15, 2ª rodada) A SAÍDA REAL do divisor para o corpo: as mensagens físicas que
+ * o envio mandaria, pelas MESMAS funções do `sendInBubbles` (`splitForSend` e o teto do
+ * turno de `aplicarTetoAsNovas`), e não a conta de parágrafos — o `split_max_chars` parte
+ * o parágrafo longo em mais de uma mensagem, e o teto emenda o excedente na última.
+ *
+ * - `naturais`: as mensagens do divisor antes do teto; `fisicas`: as que sairiam;
+ *   `emendou`: o teto juntou mensagens na última (a saída que a trava não deixa passar);
+ * - `paragrafos`: os blocos separados por linha em branco (para o erro de ensino dizer
+ *   quando é o parágrafo longo que vira duas mensagens);
+ * - `linksPartidos`: links do corpo (o reconhecedor da trava `link_permitido`) que não
+ *   saem inteiros numa mensagem só. O divisor não parte link (`trechosIndivisiveis`); a
+ *   conferência é a rede, sobre o que sairia.
+ *
+ * Na re-execução do job as mensagens que o ledger já conhece não gastam o teto
+ * (`jaRegistrada` no envio); aqui todas contam: a trava, síncrona, não lê o ledger, e
+ * fica do lado mais estrito.
+ */
+export function saidaEmBolhas(
+  body: string,
+  maxChars: number,
+  restantes: number,
+): {
+  naturais: number;
+  fisicas: string[];
+  emendou: boolean;
+  paragrafos: number;
+  linksPartidos: number;
+} {
+  const naturais = splitForSend(body, true, maxChars);
+  const fisicas = aplicarTetoAsNovas(
+    naturais,
+    naturais.map(() => false),
+    Math.max(1, restantes),
+  );
+  const paragrafos = body
+    .trim()
+    .split(/\n{2,}/)
+    .filter((p) => p.trim() !== '').length;
+  const linksPartidos = trechosDeLink(body)
+    .map((t) => body.slice(t.ini, t.fim))
+    .filter((link) => !fisicas.some((bolha) => bolha.includes(link))).length;
+  return { naturais: naturais.length, fisicas, emendou: fisicas.length < naturais.length, paragrafos, linksPartidos };
+}
 
 export const textoLongoGate: Gate = {
   name: 'texto_longo',
@@ -48,11 +94,16 @@ export const textoLongoGate: Gate = {
         detail: { caracteres, max_chars: trava.maxChars },
       };
     }
-    const bolhas = splitIntoBubbles(ctx.body, trava.maxChars).length;
     if (trava.maxTotal !== undefined) {
-      // (C01, -c01.15) O total conta como o cliente vê (um emoji é um), com o link inteiro.
+      // (C01, -c01.15) A saída real: as mensagens físicas do divisor (com o parágrafo longo
+      // partido), sem emenda do teto, todas no turno, o total como o cliente vê (um emoji é
+      // um, o link inteiro) e cada link inteiro numa mensagem.
+      const saida = saidaEmBolhas(ctx.body, trava.maxChars, trava.restantes);
+      const bolhas = saida.naturais;
       const caracteres = [...ctx.body.trim()].length;
-      if (bolhas <= trava.restantes && caracteres <= trava.maxTotal) return { pass: true };
+      if (!saida.emendou && bolhas <= trava.restantes && caracteres <= trava.maxTotal && saida.linksPartidos === 0) {
+        return { pass: true };
+      }
       return {
         pass: false,
         code: 'texto_longo',
@@ -62,6 +113,8 @@ export const textoLongoGate: Gate = {
           maxChars: trava.maxChars,
           caracteres,
           maxTotal: trava.maxTotal,
+          paragrafos: saida.paragrafos,
+          linksPartidos: saida.linksPartidos,
         }),
         // Só números: nunca o corpo (sem PII no trace).
         detail: {
@@ -70,9 +123,12 @@ export const textoLongoGate: Gate = {
           max_chars: trava.maxChars,
           caracteres,
           max_total: trava.maxTotal,
+          ...(saida.paragrafos !== bolhas ? { paragrafos: saida.paragrafos } : {}),
+          ...(saida.linksPartidos > 0 ? { links_partidos: saida.linksPartidos } : {}),
         },
       };
     }
+    const bolhas = splitIntoBubbles(ctx.body, trava.maxChars).length;
     if (bolhas <= trava.restantes) return { pass: true };
     return {
       pass: false,
@@ -95,18 +151,26 @@ export function renderVetoDeRespostaEmBolhas(conta: {
   maxChars: number;
   caracteres: number;
   maxTotal: number;
+  paragrafos?: number;
+  linksPartidos?: number;
 }): string {
   const { bolhas, restantes, maxChars, caracteres, maxTotal } = conta;
+  const paragrafosDoCorpo = conta.paragrafos ?? bolhas;
   const motivos = [
     ...(bolhas > restantes
       ? [
           `ela viraria ${bolhas} mensagens no WhatsApp e neste turno só cabem ` +
-            (restantes === 1 ? '1 mensagem' : `${restantes} mensagens`),
+            (restantes === 1 ? '1 mensagem' : `${restantes} mensagens`) +
+            // O parágrafo longo é partido pelo sistema: dizer, para a reescrita não só juntar parágrafos.
+            (bolhas > paragrafosDoCorpo
+              ? ` (parágrafo com mais de ${maxChars} caracteres é partido em mais de uma mensagem)`
+              : ''),
         ]
       : []),
     ...(caracteres > maxTotal
       ? [`ela tem ${caracteres} caracteres no total, contando os links, e o limite é ${maxTotal}`]
       : []),
+    ...((conta.linksPartidos ?? 0) > 0 ? ['um link sairia partido entre mensagens'] : []),
   ];
   const paragrafos = restantes === 1 ? '1 parágrafo' : `${restantes} parágrafos`;
   return (
