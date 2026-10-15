@@ -46,7 +46,8 @@
  *
  * - `texto_longo.max_caracteres`: o limite da mensagem quando o divisor de bolhas está
  *   desligado (uma mensagem por resposta); padrão `MAX_CARACTERES_SEM_DIVISOR`. Com o
- *   divisor ligado, a trava continua contando bolhas.
+ *   divisor ligado, a trava continua contando bolhas e, desde a -c01.15, também barra a
+ *   resposta cujo total (todas as bolhas, com os links) passa deste limite.
  * - `valor_em_dinheiro.texto_afirmavel`: as colunas da linha afirmável da base externa e
  *   os assuntos que liberam valor, uma lista de PERMITIDOS (ver `texto-afirmavel.ts`);
  *   cada chave ausente vale o padrão `COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL`.
@@ -150,9 +151,11 @@ export interface TravasArmadas {
    * Texto longo: o teto de caracteres por bolha do divisor (`split_max_chars`) e
    * quantas mensagens físicas ainda cabem no turno. (C01, -c01.8) Com o divisor
    * desligado (`semDivisor`), `maxChars` é o limite da mensagem inteira
-   * (`texto_longo.max_caracteres`).
+   * (`texto_longo.max_caracteres`). (C01, -c01.15) Com o divisor ligado, `maxTotal` é o
+   * limite da resposta inteira, somadas as bolhas e contados os links
+   * (`texto_longo.max_caracteres`); ausente = só a conta de bolhas.
    */
-  textoLongo?: { maxChars: number; restantes: number; semDivisor?: true };
+  textoLongo?: { maxChars: number; restantes: number; semDivisor?: true; maxTotal?: number };
   /** Link permitido: os links e os domínios liberados neste momento do turno. */
   linkPermitido?: LinkPermitidoArmado;
   /**

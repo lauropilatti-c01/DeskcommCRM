@@ -20,6 +20,14 @@
  * Conta caractere como o cliente vê (um emoji é um), com o link inteiro. A régua é a
  * mesma: estilo, no limite de vetos a mensagem sai inteira — nunca cortada, e o link
  * nunca sai partido.
+ *
+ * (C01, -c01.15) Com o divisor LIGADO, a conta de bolhas sozinha deixava passar a resposta
+ * de 3 parágrafos de 340 caracteres (mais de mil no total), e o que passava do teto de
+ * mensagens só era barrado se a trava estivesse armada — fora dela, o excedente saía
+ * emendado na última bolha sem aviso. Agora, com `maxTotal` (o mesmo
+ * `texto_longo.max_caracteres`, padrão 700), a trava barra também o TOTAL da resposta
+ * (todas as bolhas somadas, contando os links como o cliente os vê), e o erro de ensino
+ * dá os dois números de uma vez: até N parágrafos e até X caracteres no total.
  */
 import { splitIntoBubbles } from '../agent/split-message';
 import type { Gate, GateVerdict } from './before-send';
@@ -41,6 +49,30 @@ export const textoLongoGate: Gate = {
       };
     }
     const bolhas = splitIntoBubbles(ctx.body, trava.maxChars).length;
+    if (trava.maxTotal !== undefined) {
+      // (C01, -c01.15) O total conta como o cliente vê (um emoji é um), com o link inteiro.
+      const caracteres = [...ctx.body.trim()].length;
+      if (bolhas <= trava.restantes && caracteres <= trava.maxTotal) return { pass: true };
+      return {
+        pass: false,
+        code: 'texto_longo',
+        reason: renderVetoDeRespostaEmBolhas({
+          bolhas,
+          restantes: trava.restantes,
+          maxChars: trava.maxChars,
+          caracteres,
+          maxTotal: trava.maxTotal,
+        }),
+        // Só números: nunca o corpo (sem PII no trace).
+        detail: {
+          bolhas,
+          restantes: trava.restantes,
+          max_chars: trava.maxChars,
+          caracteres,
+          max_total: trava.maxTotal,
+        },
+      };
+    }
     if (bolhas <= trava.restantes) return { pass: true };
     return {
       pass: false,
@@ -51,6 +83,39 @@ export const textoLongoGate: Gate = {
     };
   },
 };
+
+/**
+ * (C01, -c01.15) O erro de ensino com o divisor ligado e o limite do total: o que passou
+ * (bolhas a mais, caracteres a mais, ou os dois) e os dois limites de uma vez, para a
+ * reescrita não trocar um veto pelo outro.
+ */
+export function renderVetoDeRespostaEmBolhas(conta: {
+  bolhas: number;
+  restantes: number;
+  maxChars: number;
+  caracteres: number;
+  maxTotal: number;
+}): string {
+  const { bolhas, restantes, maxChars, caracteres, maxTotal } = conta;
+  const motivos = [
+    ...(bolhas > restantes
+      ? [
+          `ela viraria ${bolhas} mensagens no WhatsApp e neste turno só cabem ` +
+            (restantes === 1 ? '1 mensagem' : `${restantes} mensagens`),
+        ]
+      : []),
+    ...(caracteres > maxTotal
+      ? [`ela tem ${caracteres} caracteres no total, contando os links, e o limite é ${maxTotal}`]
+      : []),
+  ];
+  const paragrafos = restantes === 1 ? '1 parágrafo' : `${restantes} parágrafos`;
+  return (
+    `A mensagem NÃO foi enviada: ${motivos.join('; e ')}. ` +
+    `Reescreva em até ${paragrafos} e até ${maxTotal} caracteres no total ` +
+    `(cada parágrafo com até ${maxChars} caracteres, separados por uma linha em branco), ` +
+    'numa chamada só de send_message, só com o essencial e sem mudar nenhum link.'
+  );
+}
 
 /** O erro de ensino: quanto passou e o que fazer. */
 export function renderVetoDeTextoLongo(bolhas: number, restantes: number, maxChars: number): string {
