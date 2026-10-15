@@ -1733,3 +1733,52 @@ describe("-c01.15: `seguir` com `enviar_antes` e a resposta do modelo no mesmo t
     expect(await passouAoHumano()).toBe(false);
   });
 });
+
+describe("-c01.15: a escolta da preparação não conta o `enviar_antes` como resposta", () => {
+  it("`seguir` com `enviar_antes` [cronograma] e `statement_timeout` na preparação, na última tentativa: caso, frase de espera e passagem", async () => {
+    const CRONOGRAMA = "Este é o cronograma da sua formação: https://exemplo.com.br/cronograma";
+    respostaDoGancho = async () => json({ acao: "seguir", enviar_antes: [{ tipo: "texto", texto: CRONOGRAMA }] });
+    const jobId = await enfileira(MSG, 1);
+    // Depois do gancho, a leitura do ledger que o turno faz antes do modelo cai por
+    // `statement_timeout` (uma vez; a escolta relê o ledger e consegue).
+    let caiu = false;
+    const poolQueCai = new Proxy(pool, {
+      get(alvo, prop) {
+        if (prop === "query") {
+          return (sql: unknown, ...resto: unknown[]) => {
+            const texto = typeof sql === "string" ? sql : ((sql as { text?: string })?.text ?? "");
+            if (
+              !caiu &&
+              pedidosAoGancho.length > 0 &&
+              texto.startsWith("select seq,status from send_ledger where organization_id=$1 and job_id=$2")
+            ) {
+              caiu = true;
+              return Promise.reject(
+                Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }),
+              );
+            }
+            return (alvo.query as (...a: unknown[]) => unknown)(sql, ...resto);
+          };
+        }
+        const valor = Reflect.get(alvo, prop) as unknown;
+        return typeof valor === "function" ? (valor as (...a: unknown[]) => unknown).bind(alvo) : valor;
+      },
+    });
+    const mod = modelo();
+    const erro = await executa(montaHandler(mod.doGenerate, true), jobId, poolQueCai);
+
+    expect(caiu).toBe(true);
+    expect(erro?.message).toContain("statement timeout");
+    expect(mod.estado.etapas).toBe(0);
+    // O cronograma saiu e a dúvida ficou sem resposta: a escolta abre o caso, manda a
+    // frase de espera depois dele e passa a conversa.
+    expect(corpos()).toHaveLength(2);
+    expect(corpos()[0]).toBe(CRONOGRAMA);
+    expect(await casosAbertos()).toBe(1);
+    expect(await passouAoHumano()).toBe(true);
+    expect(linhasDoLog.some((l) => l.includes("o lead já tem resposta deste job — sem passagem"))).toBe(false);
+    // O ledger continua separando as faixas: o `enviar_antes` reconciliado, fora de `doGancho`.
+    const estado = await m.ledger.estadoInicialDoJob(pool, { tenantId: ORG, jobId });
+    expect(estado.doGancho).toBeUndefined();
+  });
+});

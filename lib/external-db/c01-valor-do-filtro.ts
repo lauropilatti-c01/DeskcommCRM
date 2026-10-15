@@ -28,6 +28,11 @@ const FALSOS = new Set(["nao", "n", "falso", "false", "0"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INTEIRO = /^[+-]?\d+$/;
 const DECIMAL = /^[+-]?(\d+([.,]\d+)?|[.,]\d+)$/;
+/**
+ * Milhar com ponto, como se escreve no Brasil ("1.500", "12.000"): o decimal acima o
+ * leria como 1,5 e 12. Ambíguo, então volta `valor_invalido` pedindo o número sem ponto.
+ */
+const MILHAR_COM_PONTO = /^[+-]?\d{1,3}(\.\d{3})+$/;
 
 /** Quanto do valor recusado volta ao modelo (o suficiente para ele reconhecer o que mandou). */
 const MAX_ECO = 60;
@@ -56,6 +61,7 @@ function paraNumero(valor: unknown, inteiro: boolean): Conversao {
   }
   if (typeof valor === "string") {
     const termo = valor.trim();
+    if (MILHAR_COM_PONTO.test(termo)) return { ok: false, espera: `${espera} sem ponto de milhar (1500, não 1.500)` };
     if (inteiro ? INTEIRO.test(termo) : DECIMAL.test(termo)) {
       // String vai como string (o Postgres converte "12.5" sem perder precisão); só a vírgula decimal vira ponto.
       return { ok: true, valor: termo.replace(",", ".") };

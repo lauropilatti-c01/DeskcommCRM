@@ -114,7 +114,7 @@ import { isoLocalComOffset } from '@/lib/tempo/agora';
 import type { ChannelAdapter, ChannelSendResult } from '../channel-adapter';
 import { chaveEDadoPessoal, lerCardDoContato, type CardDoContato } from '../edge/crm/card-do-contato';
 import { MARCA_DE_PROCESSADO, type LeadContextMessage } from '../edge/crm/get-lead-context';
-import { conteudoRegistradoNoJob } from '../edge/crm/send-ledger';
+import { conteudoRegistradoNoJob, SEQ_DO_ENVIAR_ANTES } from '../edge/crm/send-ledger';
 import { scheduleCronJob } from '../cron/scheduler';
 import { runBeforeSend } from '../guardrails/before-send';
 import type { DesfechoDoAviso } from './aviso-de-escalacao';
@@ -1331,11 +1331,10 @@ export const ORIGEM_DO_GANCHO = 'pre_turn_hook';
 // ─── (C01, -c01.15) `seguir` com `enviar_antes` ───────────────────────────────────
 
 /**
- * Posições do ledger do `enviar_antes`: -101 a -105. Negativas, como as do `enviar`
- * (`doGancho` do ledger, fora da conta e do teto do modelo), mas em outra faixa: a
- * re-execução com a pergunta refeita pode trocar `seguir` por `segurar` no mesmo job.
+ * Posições do ledger do `enviar_antes`: -101 a -105 (a constante mora no ledger, que
+ * separa a faixa do `enviar`: o `enviar_antes` não conta como resposta em `doGancho`).
  */
-export const SEQ_DO_ENVIAR_ANTES = -100;
+export { SEQ_DO_ENVIAR_ANTES };
 
 /** Uma mensagem do `enviar_antes` que saiu: o texto da linha da conversa e o instante. */
 export interface EnviadaAntes {

@@ -52,6 +52,11 @@ function dubleDoModelo(pedido: string): { isPromise: boolean; suspectPhrase: str
     if (m === null) continue;
     const aprovado = regraVeio && padrao.test(normal(lista));
     if (!aprovado) return { isPromise: true, suspectPhrase: m[0] ?? nome };
+    // A regra do número trocado: número da mensagem que o texto aprovado não tem.
+    if (pedido.includes("Trocar número, valor ou prazo do texto aprovado")) {
+      const trocado = (candidata.match(/\d+/g) ?? []).find((n) => !new RegExp(`\\b${n}\\b`).test(lista));
+      if (trocado !== undefined) return { isPromise: true, suspectPhrase: trocado };
+    }
   }
   return { isPromise: false, suspectPhrase: null };
 }
@@ -86,6 +91,7 @@ describe("o classificador recebe a lista dos textos aprovados do turno, com a re
     expect(pedido).toContain(JSON.stringify(GARANTIA));
     expect(pedido).toContain("Reescrever com outras palavras um benefício desta lista NÃO é promessa");
     expect(pedido).toContain("que NÃO está na lista continua sendo promessa");
+    expect(pedido).toContain("Trocar número, valor ou prazo do texto aprovado");
     expect(pedido.indexOf(REGRA_DOS_TEXTOS_APROVADOS)).toBeLessThan(pedido.indexOf(PROMISE_SEMANTIC_INSTRUCTION));
   });
 
@@ -117,6 +123,12 @@ describe("a trava de promessa com a paráfrase de benefício aprovado", () => {
       const v = await trava(body, [ACESSO, GARANTIA]);
       expect(v.pass, body).toBe(true);
     }
+  });
+
+  it("trocar o número, o valor ou o prazo do texto aprovado é promessa (7 dias que viram 30)", async () => {
+    expect((await trava("Se em 7 dias você desistir, tem o dinheiro de volta.", [GARANTIA])).pass).toBe(true);
+    const v = await trava("Se em 30 dias você desistir, tem o dinheiro de volta.", [GARANTIA]);
+    expect(v.pass).toBe(false);
   });
 
   it("benefício inventado continua barrado, sozinho ou ao lado da paráfrase de um aprovado", async () => {

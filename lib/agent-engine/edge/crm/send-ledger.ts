@@ -422,7 +422,12 @@ export async function reconcileAcceptedSend(
  *   cresceu, o job voltou à fila e o gancho mandou seguir) não trata como resposta à
  *   mensagem nova o que o gancho mandou antes (o fail-safe do lead sem resposta
  *   continua armado, o teto do turno não encolhe), e nunca reaproveita a posição -1 de
- *   um envio do gancho que falhou.
+ *   um envio do gancho que falhou. (C01, -c01.15) As posições do `enviar_antes`
+ *   (`SEQ_DO_ENVIAR_ANTES` para baixo) são reconciliadas igual, mas ficam FORA de
+ *   `doGancho`: saem antes do modelo e não respondem à mensagem do lead (o cronograma
+ *   não responde a dúvida). A escolta da preparação lê `doGancho` como "o lead já tem
+ *   resposta"; contadas ali, a falha da preparação depois do `enviar_antes` matava o job
+ *   sem caso, sem frase de espera e sem passagem (revisão da -c01.15).
  *
  * `{ posicao: 0, enviadas: 0, pendentes: [], falhadas: [] }` em job sem recibo.
  */
@@ -450,6 +455,12 @@ export async function estadoInicialDoJob(
     const seq = Number(row.seq);
     // (C01, -c01.5) Posição negativa é do gancho antes do turno: contador próprio.
     if (seq < 0) {
+      // (C01, -c01.15) O `enviar_antes` (`SEQ_DO_ENVIAR_ANTES` para baixo): reconciliado
+      // como os outros, mas fora de `doGancho` (não é resposta à mensagem do lead).
+      if (seq <= SEQ_DO_ENVIAR_ANTES) {
+        await saiuPeloGancho(store, input, seq, row.status);
+        continue;
+      }
       if (await saiuPeloGancho(store, input, seq, row.status)) doGancho += 1;
       continue;
     }
@@ -488,6 +499,14 @@ export async function estadoInicialDoJob(
   }
   return { posicao, enviadas, pendentes, falhadas, ...(doGancho > 0 ? { doGancho } : {}) };
 }
+/**
+ * (C01, -c01.15) Posições do ledger do `enviar_antes` do gancho: -101 a -105. Negativas,
+ * como as do `enviar` (-1 em diante, fora da conta e do teto do modelo), mas em outra
+ * faixa: a re-execução com a pergunta refeita pode trocar `seguir` por `segurar` no
+ * mesmo job. Mora aqui porque o ledger separa as duas faixas (`estadoInicialDoJob`);
+ * `gancho-antes-do-turno.ts` a reexporta.
+ */
+export const SEQ_DO_ENVIAR_ANTES = -100;
 /**
  * (C01, -c01.5) O envio do gancho nesta posição negativa saiu ou está com o canal? A
  * mesma reconciliação dos recibos do modelo (mensagem entregue → 'accepted'; mensagem

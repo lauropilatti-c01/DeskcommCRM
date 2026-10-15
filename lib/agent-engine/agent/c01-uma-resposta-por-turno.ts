@@ -52,16 +52,25 @@ export function respostaSaiu(resultado: unknown): boolean {
 
 /**
  * Envolve a ferramenta `send_message` do turno. Estado só nesta chamada: criar o
- * envoltório por turno é o que o zera entre turnos.
+ * envoltório por turno é o que o zera entre turnos. `aoRecusar` recebe, a cada recusa,
+ * quantas já houve no turno (o turno grava no log, para medir no laboratório).
  */
-export function umaRespostaPorTurno<T extends { execute?: unknown }>(ferramenta: T): T {
+export function umaRespostaPorTurno<T extends { execute?: unknown }>(
+  ferramenta: T,
+  aoRecusar?: (recusadas: number) => void,
+): T {
   const executar = ferramenta.execute;
   if (typeof executar !== 'function') return ferramenta;
   let respondeu = false;
+  let recusadas = 0;
   let fila: Promise<unknown> = Promise.resolve();
   const execute: Execute = (entrada, opcoes) => {
     const vez = fila.then(async () => {
-      if (respondeu) return recusaPorRespostaJaEnviada();
+      if (respondeu) {
+        recusadas += 1;
+        aoRecusar?.(recusadas);
+        return recusaPorRespostaJaEnviada();
+      }
       const resultado = await (executar as Execute).call(ferramenta, entrada, opcoes);
       if (respostaSaiu(resultado)) respondeu = true;
       return resultado;

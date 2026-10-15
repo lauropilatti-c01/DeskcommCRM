@@ -166,6 +166,27 @@ describe("outros tipos", () => {
     expect(filtrosLidos()[0]!.valor).toBe("4500.50");
   });
 
+  it("milhar com ponto (\"1.500\") volta `valor_invalido` em coluna de número, sem virar 1,5", async () => {
+    for (const [coluna, valor, espera] of [
+      ["salario", "1.500", "salario é número sem ponto de milhar (1500, não 1.500); veio '1.500'"],
+      ["salario", "12.000.000", "salario é número sem ponto de milhar"],
+      ["vagas", "1.500", "vagas é número inteiro sem ponto de milhar"],
+    ] as const) {
+      vi.mocked(lerTabela).mockClear();
+      const r = await consultar([{ coluna, operador: "gt", valor }]);
+      expect(r.erro, valor).toBe("valor_invalido");
+      expect(String(r.mensagem)).toContain(espera);
+      expect(lerTabela).not.toHaveBeenCalled();
+    }
+    // O decimal com três casas depois da vírgula, ou com ponto e menos de três, segue.
+    for (const [valor, vai] of [["1,500", "1.500"], ["1.50", "1.50"], ["1500", "1500"]] as const) {
+      vi.mocked(lerTabela).mockClear();
+      const r = await consultar([{ coluna: "salario", operador: "gt", valor }]);
+      expect(r.erro, valor).toBeUndefined();
+      expect(filtrosLidos()[0]!.valor).toBe(vai);
+    }
+  });
+
   it("uuid malformado volta `valor_invalido`", async () => {
     const r = await consultar([{ coluna: "id", operador: "eq", valor: "123" }]);
     expect(r.erro).toBe("valor_invalido");
