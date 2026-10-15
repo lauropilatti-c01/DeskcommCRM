@@ -260,12 +260,10 @@ const CAMINHO_DO_ENVOLTORIO = "@/lib/agent-engine/agent/c01-uma-resposta-por-tur
 
 type Resultado = { ok: boolean; error?: { code: string; message: string } };
 
-async function envoltorio(): Promise<
-  <T extends { execute?: unknown }>(ferramenta: T) => T
-> {
-  const m = (await import(/* @vite-ignore */ CAMINHO_DO_ENVOLTORIO)) as {
-    umaRespostaPorTurno: <T extends { execute?: unknown }>(ferramenta: T) => T;
-  };
+type Envoltorio = <T extends { execute?: unknown }>(ferramenta: T, aoRecusar?: (recusadas: number) => void) => T;
+
+async function envoltorio(): Promise<Envoltorio> {
+  const m = (await import(/* @vite-ignore */ CAMINHO_DO_ENVOLTORIO)) as { umaRespostaPorTurno: Envoltorio };
   return m.umaRespostaPorTurno;
 }
 
@@ -295,6 +293,23 @@ describe("(b) uma resposta por turno", () => {
     expect(segunda.error?.message).toMatch(/numa única chamada de send_message/);
     expect(segunda.error?.message).toMatch(/encerre o turno agora/);
     expect(f.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("cada recusa chama `aoRecusar` com a contagem do turno (para o log)", async () => {
+    const umaResposta = await envoltorio();
+    const contagens: number[] = [];
+    const t = umaResposta(ferramenta([{ ok: true }]).tool, (n) => contagens.push(n));
+    await exec(t, "Resposta.");
+    expect(contagens).toEqual([]);
+    await exec(t, "Segunda.");
+    await exec(t, "Terceira.");
+    expect(contagens).toEqual([1, 2]);
+    // Um envoltório novo (outro turno) começa do zero.
+    const outro: number[] = [];
+    const t2 = umaResposta(ferramenta([{ ok: true }]).tool, (n) => outro.push(n));
+    await exec(t2, "Resposta.");
+    await exec(t2, "Segunda.");
+    expect(outro).toEqual([1]);
   });
 
   it("o envio que não saiu (veto, teto, falha) não conta: a nova tentativa segue", async () => {
@@ -371,7 +386,10 @@ describe("(C01, -c01.15) a ligação no turno, pelo código", () => {
   });
 
   it("com o divisor ligado, o `send_message` do turno é envolvido logo depois de montado, antes da prévia e do breaker", () => {
-    const envolve = TURNO.indexOf("rawTools.send_message = umaRespostaPorTurno(rawTools.send_message);");
+    const envolve = TURNO.indexOf("rawTools.send_message = umaRespostaPorTurno(rawTools.send_message, (recusadas) =>");
+    expect(TURNO.slice(envolve)).toMatch(
+      /^rawTools\.send_message = umaRespostaPorTurno\(rawTools\.send_message, \(recusadas\) =>\s*runLog\.warn\('uma resposta por turno: send_message recusado', \{ recusadas \}\),/,
+    );
     expect(envolve).toBeGreaterThan(TURNO.indexOf("const rawTools: ToolSet = {"));
     expect(envolve).toBeGreaterThan(TURNO.indexOf("request_human_handoff: tool({"));
     expect(envolve).toBeLessThan(TURNO.indexOf("const tools = wrapToolsWithBreaker(previewTools"));

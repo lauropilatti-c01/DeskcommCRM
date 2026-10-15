@@ -1486,7 +1486,8 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
     const estado = await estadoInicialDoJob(pool, { tenantId, jobId: job.id });
     // (C01, -c01.5) O que o gancho antes do turno enviou neste job (posições negativas,
     // `doGancho`) também é resposta: o formulário já saiu, e a frase de espera com a
-    // passagem por cima dele calaria a resposta que o lead mandar.
+    // passagem por cima dele calaria a resposta que o lead mandar. O `enviar_antes`
+    // (-c01.15) fica fora de `doGancho`: não responde à mensagem, o turno passa.
     if (estado.enviadas + (estado.doGancho ?? 0) > 0) {
       log.info('falha na preparação na última tentativa: o lead já tem resposta deste job — sem passagem', {
         erro,
@@ -5645,7 +5646,9 @@ async function executarTurnoDoAgente(
   // (C01, -c01.15) Com o divisor de bolhas, uma resposta por turno: depois de um
   // `send_message` que saiu, o seguinte é recusado (`c01-uma-resposta-por-turno.ts`).
   if ((agentConfig?.splitMessages ?? false) && rawTools.send_message !== undefined) {
-    rawTools.send_message = umaRespostaPorTurno(rawTools.send_message);
+    rawTools.send_message = umaRespostaPorTurno(rawTools.send_message, (recusadas) =>
+      runLog.warn('uma resposta por turno: send_message recusado', { recusadas }),
+    );
   }
 
   // F3-02: a tool nativa só entra com janela configurada e callback habilitado
