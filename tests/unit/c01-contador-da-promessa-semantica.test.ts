@@ -80,13 +80,20 @@ describe("(C01) a ligação no `send_message`, pelo código", () => {
     expect(bloco).toMatch(
       /const vetos = \(vetosDeConteudo\.get\(chain\.code\) \?\? 0\) \+ 1;\s*vetosDeConteudo\.set\(chain\.code, vetos\);\s*if \(vetos < MAX_VETOS_DE_CONTEUDO\) \{\s*const ultima = vetos === MAX_VETOS_DE_CONTEUDO - 1;/,
     );
-    expect(bloco).toMatch(/message: ultima \? `\$\{chain\.message\} \$\{AVISO_DE_ULTIMA_TENTATIVA\}` : chain\.message,/);
+    // (-c01.15) Pelos avisos do turno: com a passagem ligada, os de sempre.
+    expect(bloco).toMatch(/message: ultima \? `\$\{chain\.message\} \$\{avisoDeUltimaTentativa\}` : chain\.message,/);
+    expect(FONTE).toMatch(
+      /const avisoDeUltimaTentativa = semPassagem \? AVISO_DE_ULTIMA_TENTATIVA_SEM_PASSAGEM : AVISO_DE_ULTIMA_TENTATIVA;/,
+    );
     expect(bloco).toMatch(
       /desfecho = await passarAoHumanoSemResposta\(\{\s*motivo: 'veto_de_conteudo',\s*trava: chain\.code,\s*vetos,\s*texto: body,\s*\}\);/,
     );
     // O modelo é avisado de que nada saiu e de como ficou a frase; e para.
     expect(bloco).toMatch(/code: `\$\{chain\.code\}_handoff`,/);
-    expect(bloco).toMatch(/AVISO_AO_MODELO_POR_DESFECHO\[desfecho\]/);
+    expect(bloco).toMatch(/avisoAoModeloDoFailSafe\[desfecho\]/);
+    expect(FONTE).toMatch(
+      /const avisoAoModeloDoFailSafe = semPassagem \? AVISO_AO_MODELO_SEM_PASSAGEM : AVISO_AO_MODELO_POR_DESFECHO;/,
+    );
     expect(bloco).toMatch(/NÃO escreva mais nada neste turno — encerre agora\./);
     // Falha do caminho comum (sem caso): o erro não some e nada sai.
     expect(bloco).toMatch(/\} catch \(err\) \{\s*[\s\S]*?noteRunError\(/);

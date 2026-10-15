@@ -248,7 +248,11 @@ describe("fiação do gate — armado no agente, desarmado onde o veto seria sil
     expect(corpo).toMatch(/internalVocabularyVetoCount \+= 1/);
     expect(corpo).toMatch(/internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO/);
     expect(corpo).not.toMatch(/enforceInternalVocabulary: false/);
-    expect(corpo).toMatch(/runBeforeSend\(\{[\s\S]*?body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO/);
+    // (-c01.15) A frase dos fail-safes é `fraseDoFailSafe`: com a passagem ligada, a de espera.
+    expect(corpo).toMatch(/runBeforeSend\(\{[\s\S]*?body: fraseDoFailSafe/);
+    expect(FONTE_INBOUND).toMatch(
+      /const fraseDoFailSafe = semPassagem \? FRASE_DE_VERIFICACAO : \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\);/,
+    );
     expect(corpo).toMatch(/source: 'guardrail_autofallback'/);
   });
 

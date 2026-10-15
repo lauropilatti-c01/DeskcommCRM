@@ -236,6 +236,26 @@ import { loadPromiseTable } from '../guardrails/promise/table';
 import { classifyPromise } from '../guardrails/promise/semantic';
 import { expectativaDeAtendimento } from '@/lib/escalacao/disponibilidade';
 import {
+  abrirCasoDoPedidoDePessoa,
+  AVISO_AO_MODELO_SEM_PASSAGEM,
+  AVISO_DE_ULTIMA_TENTATIVA_SEM_PASSAGEM,
+  BLOCO_DO_PEDIDO_DE_PESSOA_SEM_PASSAGEM,
+  BLOQUEIO_DO_CASO_POR_ORCAMENTO,
+  CASES_SYSTEM_BLOCK_SEM_PASSAGEM,
+  CONSULTA_ANTES_DE_ENVIAR,
+  estiloViraConteudo,
+  fimDoBloqueioSemPassagem,
+  FRASE_DE_VERIFICACAO,
+  NOME_DA_CONSULTA_ANTES_DE_ENVIAR,
+  passagemDesligada,
+  RECUSA_DEPOIS_DA_VERIFICACAO,
+  RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM,
+  RETORNO_DO_CASO_SEM_PASSAGEM,
+  TITULO_DO_CASO_POR_ORCAMENTO,
+  TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM,
+} from '@/lib/c01/passagem-desligada';
+import { passagemDesligadaNaConversa } from '@/lib/c01/passagem-da-conversa';
+import {
   montarBriefingDaPassagem,
   type BriefingDaPassagem,
 } from '@/lib/escalacao/briefing-da-passagem';
@@ -892,7 +912,44 @@ const fimDoBloqueio = (oQue: string): string =>
  * tokens mantém os da rodada 8, palavra por palavra (o invariante
  * `c01-corte-antes-do-primeiro-envio` os lê no banco).
  */
-export function textosDoFimSemResposta(fim: FimSemResposta): TextosDoFimSemResposta {
+export function textosDoFimSemResposta(
+  fim: FimSemResposta,
+  opcoes?: { semPassagem?: boolean },
+): TextosDoFimSemResposta {
+  const textos = textosDoFimComPassagem(fim);
+  if (opcoes?.semPassagem !== true) return textos;
+  // (C01, -c01.15) Com a passagem desligada só o bloqueio muda: no lugar da frase de espera
+  // e da passagem, a frase de verificação, e a IA continua na conversa.
+  return { ...textos, bloqueio: fimDoBloqueioSemPassagem(oQueDoFim(fim)) };
+}
+
+/** (C01, -c01.15) O "o que houve" do bloqueio, por fim, para o texto sem passagem. */
+function oQueDoFim(fim: FimSemResposta): string {
+  switch (fim.motivo) {
+    case 'corte_por_teto_de_tokens':
+      return `a resposta da IA foi cortada por tamanho (teto de tokens da versão) antes de sair, ${NENHUMA_AO_CLIENTE}`;
+    case 'limite_de_etapas':
+      return `a IA chegou ao limite de etapas da versão sem responder, ${NENHUMA_AO_CLIENTE}`;
+    case 'teto_de_saida':
+      return `a resposta da IA passou do tamanho máximo por etapa e não saiu, ${NENHUMA_AO_CLIENTE}`;
+    case 'veto_de_conteudo':
+      return (
+        `a IA tentou ${fim.vetos} vezes responder e a revisão automática travou a mensagem ` +
+        `(${nomeDaTravaDeConteudo(fim.trava)}); ela não saiu e está no resumo deste caso`
+      );
+    case 'falha_na_ultima_tentativa':
+      return `a IA falhou em todas as tentativas de responder, ${NENHUMA_AO_CLIENTE}`;
+  }
+}
+
+/** O nome legível da trava de conteúdo (a "consulte antes", sem passagem, também conta). */
+function nomeDaTravaDeConteudo(trava: string): string {
+  if (Object.hasOwn(TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE, trava)) return TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE[trava]!;
+  if (estiloViraConteudo(trava, true)) return NOME_DA_CONSULTA_ANTES_DE_ENVIAR;
+  return 'revisão automática';
+}
+
+function textosDoFimComPassagem(fim: FimSemResposta): TextosDoFimSemResposta {
   switch (fim.motivo) {
     case 'corte_por_teto_de_tokens':
       return {
@@ -933,9 +990,7 @@ export function textosDoFimSemResposta(fim: FimSemResposta): TextosDoFimSemRespo
         tituloDaPassagem: TITULO_DA_PASSAGEM_POR_TETO_DE_SAIDA,
       };
     case 'veto_de_conteudo': {
-      const nome = Object.hasOwn(TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE, fim.trava)
-        ? TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE[fim.trava]!
-        : 'revisão automática';
+      const nome = nomeDaTravaDeConteudo(fim.trava);
       const titulo = `Resposta travada pela revisão automática (${nome})`;
       return {
         tituloDoCaso: titulo,
@@ -1190,7 +1245,12 @@ export async function comHandoffSeOrcamentoAcabar<T>(
      * então não gasta um token — o que aqui não é detalhe, é o único jeito de
      * ele existir: o motivo do desvio é justamente não haver mais orçamento.
      */
-    avisarLead: () => Promise<DesfechoDoAviso>;
+    avisarLead: (corpo?: string) => Promise<DesfechoDoAviso>;
+    /**
+     * (C01, -c01.15, P3) O agente da conversa tem a passagem desligada? Resolvido só no
+     * caminho de erro. Ausente: a passagem de hoje.
+     */
+    passagemDesligada?: () => Promise<boolean>;
     log: Logger;
   },
   chamada: () => Promise<T>,
@@ -1200,6 +1260,42 @@ export async function comHandoffSeOrcamentoAcabar<T>(
   } catch (err) {
     if (!(err instanceof LlmBudgetExceededError)) throw err;
     const doCheckpoint = await ctx.briefingDoCheckpoint();
+    // (C01, -c01.15, P3) Passagem desligada: a IA para do mesmo jeito (o erro sobe), mas a
+    // conversa não cala. Abre um caso para a equipe e, só quando o caso é novo, manda a
+    // frase de verificação pela cadeia de envio (janela de 24 h, bloqueio e opt-out valem;
+    // se não puder sair, não sai). Sem `performHumanHandoff`: sem `force_human` e sem
+    // silêncio. Erro ao abrir o caso sobe e o job re-tenta, como o da passagem.
+    if (ctx.passagemDesligada !== undefined && (await ctx.passagemDesligada())) {
+      const caso = await abrirCasoDoPedidoDePessoa(
+        ctx.pool,
+        { tenantId: ctx.tenantId, leadId: ctx.leadId, conversationId: ctx.conversationId, agentId: null },
+        {
+          pendentes: [],
+          titulo: TITULO_DO_CASO_POR_ORCAMENTO,
+          resumo: (doCheckpoint.body.trim() !== '' ? doCheckpoint.body : TITULO_DO_CASO_POR_ORCAMENTO).slice(0, 4_000),
+          bloqueio: BLOQUEIO_DO_CASO_POR_ORCAMENTO,
+          motivoDaEtapa: 'orcamento_sem_passagem',
+          origem: 'guardrail_autofallback',
+          log: ctx.log,
+        },
+      );
+      let avisado = false;
+      if (!caso.jaHavia) {
+        try {
+          avisado = (await ctx.avisarLead(FRASE_DE_VERIFICACAO)).avisado;
+        } catch (erroDoAviso) {
+          ctx.log.warn('frase de verificação falhou depois do caso por orçamento', {
+            error:
+              erroDoAviso instanceof Error ? erroDoAviso.message.slice(0, 200) : 'erro desconhecido',
+          });
+        }
+      }
+      ctx.log.warn('turno interrompido pelo teto de gasto — passagem desligada: caso aberto, conversa sem silêncio', {
+        caso_ja_aberto: caso.jaHavia,
+        lead_avisado: avisado,
+      });
+      throw err;
+    }
     // AVISA antes de silenciar — ver a nota de ORDEM no gatilho determinístico:
     // `performHumanHandoff` arma a trava que o gate de envio lê, então a única
     // janela em que o aviso passa é ANTES dela.
@@ -1294,6 +1390,11 @@ export interface MarcaDaPreparacao {
    * operação (como nos outros envios do turno).
    */
   agentOperation: AgentOperationContext | null;
+  /**
+   * (C01, -c01.15) O agente resolvido tem a passagem desligada: a escolta abre o caso e
+   * manda a frase de verificação, sem gravar passagem (`passagemDesligada`).
+   */
+  passagemDesligada?: boolean;
 }
 
 export const marcaDaPreparacaoNova = (): MarcaDaPreparacao => ({
@@ -1405,12 +1506,16 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
     });
     return;
   }
-  const textos = textosDoFimSemResposta({
-    motivo: 'falha_na_ultima_tentativa',
-    erro,
-    tentativa: job.attempts,
-    tentativas: job.max_attempts,
-  });
+  const semPassagem = marca.passagemDesligada === true;
+  const textos = textosDoFimSemResposta(
+    {
+      motivo: 'falha_na_ultima_tentativa',
+      erro,
+      tentativa: job.attempts,
+      tentativas: job.max_attempts,
+    },
+    { semPassagem },
+  );
   log.warn('fail-safe da falha na preparação do turno: caso aberto, frase de espera e passagem', {
     erro,
     tentativa: job.attempts,
@@ -1458,7 +1563,8 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
           },
           {
             motivo: 'outro',
-            corpo: ctx.fraseDeEspera,
+            // (C01, -c01.15) Sem passagem, a frase de verificação: ninguém assume a conversa.
+            corpo: semPassagem ? FRASE_DE_VERIFICACAO : ctx.fraseDeEspera,
             channel: ctx.canal(marca.agentId),
             now: ctx.now(),
             log,
@@ -1470,6 +1576,12 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
           },
         )
       : { avisado: false, porque: 'suspeita_de_opt_out_ou_mensagens_nao_lidas' };
+    if (semPassagem) {
+      log.info('fail-safe da falha na preparação do turno: passagem desligada — caso aberto e frase de verificação, sem silêncio', {
+        lead_avisado: aviso.avisado,
+      });
+      return;
+    }
     let checkpoint: Awaited<ReturnType<typeof latestCheckpoint>> = null;
     try {
       checkpoint = await latestCheckpoint(pool, tenantId, leadId);
@@ -2494,13 +2606,24 @@ export async function deteccoesDeterministicasDoAssistido(
     'motivo' | 'optedOutThisTurn' | 'lgpd'
   > => resto;
 
-  if (
-    inboundsPendentes.some(
-      (texto) =>
-        detectHumanHandoffRequest(texto) ||
-        matchesHandoffKeyword(texto, agent.handoffKeywords),
-    )
-  ) {
+  const pediuPessoa = inboundsPendentes.some(
+    (texto) =>
+      detectHumanHandoffRequest(texto) ||
+      matchesHandoffKeyword(texto, agent.handoffKeywords),
+  );
+  if (pediuPessoa && passagemDesligada(agent)) {
+    // (C01, -c01.15, P1) Passagem desligada: o pedido abre o caso (e move o card) e o
+    // rascunho segue — sem aviso, sem silêncio. O STOP ambíguo, logo abaixo, não muda.
+    const caso = await abrirCasoDoPedidoDePessoa(
+      pool,
+      { tenantId, leadId, conversationId, agentId: agent.agentId },
+      { pendentes: inboundsPendentes, log },
+    );
+    log.info('pedido de uma pessoa com a passagem desligada (modo assistido): caso aberto e o rascunho segue', {
+      kind: job.kind,
+      caso_ja_aberto: caso.jaHavia,
+    });
+  } else if (pediuPessoa) {
     const briefing = montarBriefingDaPassagem({
       checkpoint: await latestCheckpoint(pool, tenantId, leadId),
       pendentesDoCliente: inboundsPendentes,
@@ -2626,7 +2749,7 @@ export async function runAgentTurn(
       // pagar por um adapter que só o caminho de erro usa. Sem `agentActorId` de
       // propósito — quando o teto estoura antes da primeira chamada, não houve
       // agente resolvido para creditar.
-      avisarLead: () =>
+      avisarLead: (corpo) =>
         avisarLeadLendoOContato(
           pool,
           {
@@ -2647,8 +2770,25 @@ export async function runAgentTurn(
               ? { disclosureMode: deps.knobs.disclosureMode }
               : {}),
             ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
+            // (C01, -c01.15, P3) Com a passagem desligada, a frase de verificação no lugar
+            // do aviso de que uma pessoa vai assumir.
+            ...(corpo !== undefined ? { corpo } : {}),
           },
         ),
+      // (C01, -c01.15, P3) A marca diz se o turno chegou a ler o agente; antes disso, a
+      // versão publicada do agente da conversa (nunca lança: erro → passagem de hoje).
+      passagemDesligada: async () => {
+        if (marca.passagemDesligada !== undefined) return marca.passagemDesligada;
+        try {
+          return await passagemDesligadaNaConversa(
+            createAdminClient(),
+            job.organization_id,
+            input.conversationId,
+          );
+        } catch {
+          return false;
+        }
+      },
       log: logDaEscolta,
     },
     () => executarTurnoDoAgente(deps, job, pool, ctx, input),
@@ -2980,6 +3120,7 @@ async function executarTurnoDoAgente(
   // nova do cliente, e a frase de espera chegaria a quem não escreveu nada.
   marca.agenteFala = preview !== undefined || !eReconsultaDoGancho(liveJob().payload);
   marca.agentId = agentConfig?.agentId ?? null;
+  marca.passagemDesligada = passagemDesligada(agentConfig);
   const agentOperation =
     !preview && agentConfig?.operationRevision
       ? {
@@ -3137,8 +3278,18 @@ async function executarTurnoDoAgente(
   // Agenda segue o mesmo padrão, condicionado a `crm_book_appointment` estar entre as
   // tools publicadas — ver comentário de `agendaSystemBlock`. `TRANSPARENCIA_SYSTEM_BLOCK`
   // não depende de nenhuma feature — todo agente publicado o recebe.
-  const blocosResidentes = [systemWithMemory, TRANSPARENCIA_SYSTEM_BLOCK];
-  if (agentConfig !== null && agentConfig.casesEnabled) blocosResidentes.push(CASES_SYSTEM_BLOCK);
+  // (C01, -c01.15) Com a passagem desligada (`passagemDesligada`), os dois blocos mandam
+  // "vou verificar e já te retorno" e proíbem "ficou registrado"; ligada, os de sempre.
+  const semPassagem = passagemDesligada(agentConfig);
+  // (C01, -c01.15) A frase dos fail-safes: sem passagem, a de verificação (a conversa não
+  // passa a ninguém, e a de espera diz que "uma pessoa continua a conversa").
+  const fraseDoFailSafe = semPassagem ? FRASE_DE_VERIFICACAO : (deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO);
+  const blocosResidentes = [
+    systemWithMemory,
+    semPassagem ? TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM : TRANSPARENCIA_SYSTEM_BLOCK,
+  ];
+  if (agentConfig !== null && agentConfig.casesEnabled)
+    blocosResidentes.push(semPassagem ? CASES_SYSTEM_BLOCK_SEM_PASSAGEM : CASES_SYSTEM_BLOCK);
   // Spec 15 §5.2 / doutrina da Agenda: a régua é o que o agente TEM — ver
   // `blocosDeAgendaResidentes`, que decidiu isto num lugar só para poder ser
   // testada (o bloco da cadeia nomeia `crm_list_event_types`, e nomear
@@ -3259,14 +3410,28 @@ async function executarTurnoDoAgente(
     currentInboundText ?? latestInboundSignal(openingContext.context.messages);
   // (C01, -c01.5) Sem as respostas de formulário (`semRespostasDeFormulario`).
   const inboundsPendentes = inboundsNaoRespondidos(semRespostasDeFormulario(openingContext.context.messages));
-  if (
+  // (C01, -c01.15) Com a passagem desligada, o pedido de uma pessoa não silencia: o caso
+  // abre aqui, antes do modelo, e o turno segue com este bloco no contexto.
+  let blocoDoPedidoDePessoa = '';
+  const pediuPessoa =
     !preview &&
     inboundsPendentes.some(
       (texto) =>
         detectHumanHandoffRequest(texto) ||
         (agentConfig !== null && matchesHandoffKeyword(texto, agentConfig.handoffKeywords)),
-    )
-  ) {
+    );
+  if (pediuPessoa && semPassagem) {
+    const caso = await abrirCasoDoPedidoDePessoa(
+      pool,
+      { tenantId, leadId, conversationId: input.conversationId, agentId: agentConfig?.agentId ?? null },
+      { pendentes: inboundsPendentes, log: runLog },
+    );
+    blocoDoPedidoDePessoa = BLOCO_DO_PEDIDO_DE_PESSOA_SEM_PASSAGEM;
+    runLog.info('pedido de uma pessoa com a passagem desligada: caso aberto e o turno segue com a IA', {
+      kind: liveJob().kind,
+      caso_ja_aberto: caso.jaHavia,
+    });
+  } else if (pediuPessoa) {
     const aviso = await avisarLeadDaEscalacao(pool, avisoDaEscalacao().ids, {
       ...avisoDaEscalacao().base,
       motivo: 'pediu_humano',
@@ -3362,6 +3527,8 @@ async function executarTurnoDoAgente(
       etiquetasDoContato: openingContext.context.contact.tags,
       channel: liveChannel(),
       optedOutThisTurn,
+      // (C01, -c01.15) `passar_a_equipe` com a passagem desligada abre caso e não silencia.
+      ...(semPassagem ? { passagemDesligada: true } : {}),
       ...(lgpd !== undefined ? { lgpd } : {}),
       ...(deps.knobs.disclosureMode !== undefined ? { disclosureMode: deps.knobs.disclosureMode } : {}),
       now: clock,
@@ -3685,13 +3852,16 @@ async function executarTurnoDoAgente(
   // do modelo para ao fim da etapa (`pararQuando`, na chamada do modelo): ele não
   // ganha outra etapa para tentar outra ferramenta (achado 2 da revisão adversarial).
   let passadoAoHumano = false;
+  // (C01, -c01.15) Sem passagem, a trava é a mesma (nada mais sai no turno depois da frase),
+  // mas a conversa não passou a ninguém: o ensino diz o que houve.
   const recusaPorPassagemAoHumano = () => ({
     ok: false as const,
     error: {
       code: 'turno_passado_ao_humano' as const,
-      message:
-        'A conversa já passou a uma pessoa da equipe neste turno e o cliente já recebeu a frase de espera. ' +
-        'NÃO envie mais nada — encerre o turno agora.',
+      message: semPassagem
+        ? RECUSA_DEPOIS_DA_VERIFICACAO
+        : 'A conversa já passou a uma pessoa da equipe neste turno e o cliente já recebeu a frase de espera. ' +
+          'NÃO envie mais nada — encerre o turno agora.',
     },
   });
   // (C01) O único caminho ao canal. `posicao` é a dica de posição do recibo (o
@@ -4004,7 +4174,7 @@ async function executarTurnoDoAgente(
         ...identidadeDoEnvio(
           finalBody,
           finalBody,
-          comoACadeiaComeca(deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO),
+          comoACadeiaComeca(fraseDoFailSafe),
         ),
       },
       { fraseDeEspera: true },
@@ -4114,7 +4284,8 @@ async function executarTurnoDoAgente(
   let outOfTablePromiseAttempted = false;
   // Spec 15 (Wave 4 lê este flag): true quando open_human_case abriu um caso NESTE
   // turno — aqui só declara e seta; o consumo (ex.: guardrail de promessa) é da Wave 4.
-  let openedCaseThisTurn = false;
+  // (C01, -c01.15) O pedido de uma pessoa com a passagem desligada já abriu o caso.
+  let openedCaseThisTurn = blocoDoPedidoDePessoa !== '';
   // Wave 4 — contador do fail-safe do guardrail anti-alucinação (case_promise_without_case):
   // 1º veto no turno é erro-de-ensino (o modelo re-tenta); persistir uma 2ª vez aciona o
   // auto-abre-caso (ver send_message.execute). Por turno (closure), nunca cross-turno.
@@ -4189,6 +4360,21 @@ async function executarTurnoDoAgente(
   const noteRunError = (err: Error): void => {
     runError ??= err;
   };
+  // (C01, -c01.15) O desfecho da frase dos fail-safes. Sem passagem, o veto da cadeia
+  // (janela de 24 h fechada, bloqueio, LGPD, ritmo) não é erro do turno: a frase não
+  // pode sair e não sai, e o caso aberto antes dela é o registro para a equipe (com o
+  // erro, o job re-tentaria o turno inteiro, modelo incluso). Com passagem, o de sempre.
+  const desfechoDoFailSafe = (espera: BeforeSendResult): DesfechoDaFraseDeEspera => {
+    if (semPassagem && espera.status === 'vetoed') {
+      runLog.warn('frase de verificação vetada pela cadeia — não sai; o caso aberto é o registro', {
+        code: espera.code,
+      });
+      return 'pendente';
+    }
+    return desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+  };
+  const avisoAoModeloDoFailSafe = semPassagem ? AVISO_AO_MODELO_SEM_PASSAGEM : AVISO_AO_MODELO_POR_DESFECHO;
+  const avisoDeUltimaTentativa = semPassagem ? AVISO_DE_ULTIMA_TENTATIVA_SEM_PASSAGEM : AVISO_DE_ULTIMA_TENTATIVA;
 
   // Guideline-matching if-then (F3-09): o SINAL do turno (última mensagem inbound) decide
   // quais skills disparam. Corpos casados vão no SUFIXO da abertura (situacional, por-lead —
@@ -4620,7 +4806,7 @@ async function executarTurnoDoAgente(
         // de espera do fail-safe (o mesmo valor do `body:` dela, abaixo): é dele que a
         // identidade no ledger parte (`identidadeDoEnvio`).
         const corpoDaCadeia = (): string =>
-          enviandoFraseDeEspera ? (deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO) : body;
+          enviandoFraseDeEspera ? fraseDoFailSafe : body;
         // (C01, rodada 7) O `send` da frase de espera é `enviarFraseDeEspera`, no escopo
         // do turno (rodada 8): só a frase, nunca o plano da retomada deste envio.
         if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
@@ -4905,6 +5091,9 @@ async function executarTurnoDoAgente(
           // no 2º a trava se desarma no turno e a cadeia roda de novo — a mensagem sai como
           // sairia sem ela. Depois do caso, para valer também no re-run do fail-safe dele.
           while (chain.status === 'vetoed' && Object.hasOwn(TRAVAS_DE_ESTILO, chain.code)) {
+            // (C01, -c01.15) Sem passagem, a "consulte antes de enviar" é de conteúdo: segue
+            // para o contador e o fail-safe das travas de conteúdo, abaixo.
+            if (estiloViraConteudo(chain.code, semPassagem)) break;
             const vetos = (vetosDeEstilo.get(chain.code) ?? 0) + 1;
             vetosDeEstilo.set(chain.code, vetos);
             if (vetos < MAX_VETOS_DE_ESTILO) {
@@ -4947,7 +5136,7 @@ async function executarTurnoDoAgente(
                 ok: false,
                 error: {
                   code: chain.code,
-                  message: ultima ? `${chain.message} ${AVISO_DE_ULTIMA_TENTATIVA}` : chain.message,
+                  message: ultima ? `${chain.message} ${avisoDeUltimaTentativa}` : chain.message,
                 },
               };
             }
@@ -4970,10 +5159,14 @@ async function executarTurnoDoAgente(
                 // (C01) O caso é aberto ANTES da frase de espera (sem pessoa acionada a frase
                 // não sai), então este texto não pode afirmar que o cliente a recebeu: o
                 // desfecho vem depois (`desfechoDaFraseDeEspera`) e pode ser pendente.
-                blocker:
-                  `Aberto automaticamente: a IA tentou ${internalVocabularyVetoCount} vezes responder com ` +
-                  'vocabulário interno do sistema e a mensagem não saiu. O sistema manda uma frase de espera ' +
-                  'ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
+                blocker: semPassagem
+                  ? fimDoBloqueioSemPassagem(
+                      `a IA tentou ${internalVocabularyVetoCount} vezes responder com vocabulário interno do ` +
+                        'sistema e a mensagem não saiu',
+                    )
+                  : `Aberto automaticamente: a IA tentou ${internalVocabularyVetoCount} vezes responder com ` +
+                    'vocabulário interno do sistema e a mensagem não saiu. O sistema manda uma frase de espera ' +
+                    'ao cliente (a entrega aparece na conversa); uma pessoa precisa responder.',
                 source: 'guardrail_autofallback',
                 contextSnapshot: buildCaseContextSnapshot(),
               },
@@ -5004,7 +5197,7 @@ async function executarTurnoDoAgente(
             enviandoFraseDeEspera = true;
             const espera = await runBeforeSend({
               ...beforeSendArgs,
-              body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+              body: fraseDoFailSafe,
               hasOpenCase: true,
               openedCaseThisTurn: true,
               enforceSpinning: false,
@@ -5014,7 +5207,7 @@ async function executarTurnoDoAgente(
             // (C01) Desfecho por desfecho: só `sent`/`already_sent` é cliente avisado;
             // `unavailable` registra o erro (achado 3 da revisão adversarial). Ver
             // `desfechoDaFraseDeEspera`.
-            const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+            const desfecho = desfechoDoFailSafe(espera);
             // (C01) A PASSAGEM FICA GRAVADA (achado 2 da quarta revisão adversarial). Até
             // aqui o fail-safe abria o caso, movia a etapa em best-effort e ligava
             // `passadoAoHumano` — só na closure. `openCase` não grava `force_human` nem
@@ -5042,7 +5235,9 @@ async function executarTurnoDoAgente(
             // Por isso uma nova tentativa imediata aqui; falhando de novo, o erro não
             // some (`noteRunError`) e o caso aberto acima é o registro. Ver
             // `gravarPassagemComNovaTentativa` (achado 2 da quinta revisão adversarial).
-            await gravarPassagemComNovaTentativa(
+            // (C01, -c01.15) Sem passagem, nada é gravado: o caso aberto acima é o registro,
+            // e o próximo turno é da IA de novo.
+            if (!semPassagem) await gravarPassagemComNovaTentativa(
               () =>
                 performHumanHandoff(
                   pool,
@@ -5063,12 +5258,16 @@ async function executarTurnoDoAgente(
                 code: 'internal_vocabulary_leak_handoff',
                 message:
                   `Sua mensagem NÃO foi enviada: depois de ${internalVocabularyVetoCount} tentativas ela ainda levava ` +
-                  `vocabulário interno do sistema. ${AVISO_AO_MODELO_POR_DESFECHO[desfecho]} ` +
+                  `vocabulário interno do sistema. ${avisoAoModeloDoFailSafe[desfecho]} ` +
                   'NÃO escreva mais nada neste turno — encerre agora.',
               },
             };
           }
-          if (chain.status === 'vetoed' && Object.hasOwn(TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE, chain.code)) {
+          if (
+            chain.status === 'vetoed' &&
+            (Object.hasOwn(TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE, chain.code) ||
+              estiloViraConteudo(chain.code, semPassagem))
+          ) {
             // (C01, -c01.3, item 1d) As travas de conteúdo com contador e fail-safe, pela
             // régua da de vocabulário interno (acima): 1º veto ensina; 2º ensina e avisa
             // que é a última tentativa; 3º: o texto vetado não sai e o turno passa à
@@ -5083,7 +5282,7 @@ async function executarTurnoDoAgente(
                 ok: false,
                 error: {
                   code: chain.code,
-                  message: ultima ? `${chain.message} ${AVISO_DE_ULTIMA_TENTATIVA}` : chain.message,
+                  message: ultima ? `${chain.message} ${avisoDeUltimaTentativa}` : chain.message,
                 },
               };
             }
@@ -5113,7 +5312,7 @@ async function executarTurnoDoAgente(
                 code: `${chain.code}_handoff`,
                 message:
                   `Sua mensagem NÃO foi enviada: depois de ${vetos} tentativas a revisão automática ainda a ` +
-                  `travava. ${AVISO_AO_MODELO_POR_DESFECHO[desfecho]} ` +
+                  `travava. ${avisoAoModeloDoFailSafe[desfecho]} ` +
                   'NÃO escreva mais nada neste turno — encerre agora.',
               },
             };
@@ -5566,9 +5765,17 @@ async function executarTurnoDoAgente(
             { tenantId, conversationId: input.conversationId, agentId: agentConfig.agentId },
             { ...parsed.data, contextSnapshot: buildCaseContextSnapshot() },
           );
+          // (C01, -c01.15) Com a passagem desligada, o caso já aberto (o pedido de uma
+          // pessoa abre um antes do modelo) é o mesmo desfecho: o pedido está com a equipe.
+          if (!res.ok && semPassagem && res.error.code === 'case_already_open') {
+            return { ok: true, message: RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM };
+          }
           if (!res.ok) return res;
           openedCaseThisTurn = true;
           moverParaHandoffBestEffort('open_human_case');
+          // (C01, -c01.15) Sem passagem, ninguém assume a conversa: a expectativa da equipe
+          // ("ficou registrado", a disponibilidade) não vai ao modelo; vai o "vou verificar".
+          if (semPassagem) return { ok: true, case_id: res.caseId, message: RETORNO_DO_CASO_SEM_PASSAGEM };
           // ACH-03: a expectativa vai junto com a confirmação. Medido num turno
           // real: o agente abria o caso e prometia ao cliente que "alguém entra
           // em contato" sem nunca ter olhado se havia alguém — a capacidade de
@@ -5665,7 +5872,9 @@ async function executarTurnoDoAgente(
    * com o lead).
    */
   const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {
-    const textos = textosDoFimSemResposta(fim);
+    // (C01, -c01.15) Sem passagem: o caso (com o texto retido, no veto de conteúdo), a
+    // frase de verificação pela cadeia e NADA gravado — sem `force_human`, sem silêncio.
+    const textos = textosDoFimSemResposta(fim, { semPassagem });
     // O texto vetado (`veto_de_conteudo`) vai ao caso, nunca ao log.
     runLog.warn(
       'fail-safe do turno sem resposta: a resposta não sai — caso aberto e frase de espera',
@@ -5703,7 +5912,7 @@ async function executarTurnoDoAgente(
       leadId,
       jobId: liveJob().id,
       channelSessionId: input.channelSessionId,
-      body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO,
+      body: fraseDoFailSafe,
       optedOutThisTurn,
       resposta: eTurnoDeResposta(liveJob()),
       crmDailyLimit: null,
@@ -5720,7 +5929,14 @@ async function executarTurnoDoAgente(
     // Desfecho por desfecho (`desfechoDaFraseDeEspera`) e a passagem GRAVADA depois da
     // frase, com uma nova tentativa — as mesmas peças do fail-safe de vocabulário
     // interno, pelas mesmas razões (achados 2 e 3 das revisões anteriores).
-    const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });
+    const desfecho = desfechoDoFailSafe(espera);
+    if (semPassagem) {
+      runLog.info('fail-safe do turno sem resposta: passagem desligada — caso aberto e frase de verificação, sem silêncio', {
+        motivo: fim.motivo,
+        desfecho_da_frase: desfecho,
+      });
+      return desfecho;
+    }
     await gravarPassagemComNovaTentativa(
       () =>
         performHumanHandoff(
@@ -6113,6 +6329,7 @@ async function executarTurnoDoAgente(
       stageHintBlock,
       splitHint,
       caseAwaitingLeadBlock,
+      blocoDoPedidoDePessoa,
       roteiro?.bloco ?? '',
       preview?.feedback ? '## Revisão humana deste atendimento\n' + preview.feedback : '',
     ].filter((b) => b !== '');
@@ -6257,14 +6474,35 @@ async function executarTurnoDoAgente(
       const { trava, entrada } = envioVetadoPorEstilo;
       envioVetadoPorEstilo = null;
       for (const codigo of Object.keys(TRAVAS_DE_ESTILO)) vetosDeEstilo.set(codigo, MAX_VETOS_DE_ESTILO);
+      // (C01, -c01.15) Sem passagem, a "consulte antes de enviar" é de conteúdo: continua armada.
+      if (semPassagem) vetosDeEstilo.delete(CONSULTA_ANTES_DE_ENVIAR);
       runLog.info('trava de estilo sem etapa para reescrever: desarmada no turno, a mensagem sai sem ela', {
         trava,
       });
-      await rawTools.send_message?.execute?.(entrada, {
+      const solta: unknown = await rawTools.send_message?.execute?.(entrada, {
         toolCallId: 'c01-estilo-sem-etapa',
         messages: [],
         context: undefined,
       });
+      // (C01, -c01.15) Sem passagem, se uma trava de conteúdo (a consulta inclusive) vetou a
+      // solta e nada saiu, o fail-safe sem silêncio: caso aberto com o texto retido e a frase
+      // de verificação pela cadeia. Com a passagem ligada, o de hoje.
+      if (
+        semPassagem &&
+        corposEnviados.length === 0 &&
+        !leadTemResposta &&
+        runError === null &&
+        !outcomes.some((o) => o.kind === 'failed') &&
+        !passadoAoHumano
+      ) {
+        const codigoDaSolta = (solta as { error?: { code?: unknown } } | null | undefined)?.error?.code;
+        await passarAoHumanoSemResposta({
+          motivo: 'veto_de_conteudo',
+          trava: typeof codigoDaSolta === 'string' ? codigoDaSolta : trava,
+          vetos: 1,
+          texto: entrada.body,
+        });
+      }
     }
 
     // ═══ (C01, rodada 8) O LAÇO FOI CORTADO POR NOSSO TETO ANTES DE QUALQUER MENSAGEM AO LEAD ═══

@@ -12,6 +12,15 @@ import { serviceFromMessage } from "@/lib/atendimento/origem-mensagem";
 import type { EventHandler, HandlerResult } from "@/lib/event-log/dispatcher";
 import { CHAVES_DO_CLIMA } from "@/lib/ai/decisao/metadados-do-clima";
 import { triggerHandoff } from "@/lib/ai/handoff/orchestrator";
+import { decidirElegibilidadeDaConversaViaSupabase } from "@/lib/ai/elegibilidade/consulta-supabase";
+import { ttlDaAutorizacaoMs } from "@/lib/ai/elegibilidade/gate";
+import {
+  abrirCasoSemPassagem,
+  BLOQUEIO_DO_CASO_POR_SENTIMENTO,
+  passagemDesligadaNaConversa,
+  resumoDoCasoPorSentimento,
+  TITULO_DO_CASO_POR_SENTIMENTO,
+} from "@/lib/c01/passagem-da-conversa";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logger } from "@/lib/logger";
 
@@ -62,6 +71,66 @@ export const aiHandoffFromSentimentHandler: EventHandler = {
         .limit(1)
         .maybeSingle();
       if (lead) leadId = (lead as { id: string }).id;
+    }
+
+    // (C01, -c01.15, P3) Passagem desligada no agente da conversa: o sentimento baixo
+    // abre um caso para a equipe e a IA continua atendendo — sem `triggerHandoff`,
+    // que silenciaria a conversa para sempre. A mesma régua de elegibilidade dele:
+    // conversa que a IA não está atendendo (calada, com dono humano, fora da lista)
+    // não ganha caso; leitura que falha não abre nada, e o evento não re-tenta à toa.
+    if (await passagemDesligadaNaConversa(admin, row.organization_id, conversationId)) {
+      try {
+        const elegib = await decidirElegibilidadeDaConversaViaSupabase(admin, {
+          organizationId: row.organization_id,
+          conversationId,
+          agora: new Date(),
+          ttlMs: ttlDaAutorizacaoMs(process.env),
+        });
+        if (elegib !== null && !elegib.permite) {
+          return {
+            consumer_key: AI_HANDOFF_FROM_SENTIMENT_KEY,
+            status: "skipped",
+            detail: `nao_elegivel:${elegib.motivo}`,
+          };
+        }
+      } catch (err) {
+        logger.warn("[ai-handoff-from-sentiment] elegibilidade indeterminada — caso não aberto", {
+          conversation_id: conversationId,
+          detail: err instanceof Error ? err.message.slice(0, 160) : "erro",
+        });
+        return {
+          consumer_key: AI_HANDOFF_FROM_SENTIMENT_KEY,
+          status: "skipped",
+          detail: "elegibilidade_indeterminada",
+        };
+      }
+      try {
+        const caso = await abrirCasoSemPassagem(admin, {
+          organizationId: row.organization_id,
+          conversationId,
+          serviceBoundary: boundary,
+          title: TITULO_DO_CASO_POR_SENTIMENTO,
+          summary: resumoDoCasoPorSentimento(sentimentScore, sentimentEngine),
+          blocker: BLOQUEIO_DO_CASO_POR_SENTIMENTO,
+        });
+        // Caso já aberto conta como feito: a equipe já tem a conversa na fila, e um
+        // `skipped` aqui só diria "não fiz nada" sobre um alerta que foi atendido.
+        return {
+          consumer_key: AI_HANDOFF_FROM_SENTIMENT_KEY,
+          status: "ok",
+          detail: caso.aberto ? "caso_aberto_sem_passagem" : "caso_ja_aberto_sem_passagem",
+        };
+      } catch (err) {
+        logger.warn("[ai-handoff-from-sentiment] caso sem passagem não aberto — o evento re-tenta", {
+          conversation_id: conversationId,
+          detail: err instanceof Error ? err.message.slice(0, 160) : "erro",
+        });
+        return {
+          consumer_key: AI_HANDOFF_FROM_SENTIMENT_KEY,
+          status: "error",
+          detail: "caso_sem_passagem_falhou",
+        };
+      }
     }
 
     const result = await triggerHandoff({

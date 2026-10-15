@@ -148,13 +148,17 @@ describe("(C01) a ligação no send_message.execute", () => {
   it("1º e 2º vetos devolvem erro de ensino; o 2º leva o aviso de última tentativa", () => {
     expect(failSafe).toMatch(/internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO/);
     expect(failSafe).toMatch(/internalVocabularyVetoCount === MAX_VETOS_DE_VOCABULARIO_INTERNO - 1/);
-    expect(failSafe).toMatch(/\$\{chain\.message\} \$\{AVISO_DE_ULTIMA_TENTATIVA\}/);
+    // (-c01.15) Pelo aviso do turno: o de sempre com a passagem ligada.
+    expect(failSafe).toMatch(/\$\{chain\.message\} \$\{avisoDeUltimaTentativa\}/);
+    expect(FONTE).toMatch(
+      /const avisoDeUltimaTentativa = semPassagem \? AVISO_DE_ULTIMA_TENTATIVA_SEM_PASSAGEM : AVISO_DE_ULTIMA_TENTATIVA;/,
+    );
   });
 
   it("no último veto: caso ANTES da frase, frase pela cadeia com caso aberto, lead à etapa de passagem, turno encerrado", () => {
     const caso = failSafe.indexOf("await openCase(");
     const passagem = failSafe.indexOf("moverParaHandoffBestEffort('vocabulario_interno_autofallback')");
-    const frase = failSafe.indexOf("body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO");
+    const frase = failSafe.indexOf("body: fraseDoFailSafe");
     expect(caso).toBeGreaterThan(-1);
     expect(passagem).toBeGreaterThan(caso);
     expect(frase).toBeGreaterThan(passagem);
@@ -166,7 +170,7 @@ describe("(C01) a ligação no send_message.execute", () => {
     // A frase vai pela cadeia INTEIRA com o caso declarado (é o que o casePromiseGate
     // exige para uma promessa de pessoa) e sem spinning (texto fixo, como o aviso de escalação).
     // (Rodada 7) …e por um `send` só dela, que manda o `finalBody` validado e nada do corpo do modelo.
-    expect(failSafe).toMatch(/runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,\s*hasOpenCase: true,\s*openedCaseThisTurn: true,\s*enforceSpinning: false,\s*(?:\/\/[^\n]*\n\s*)?send: enviarFraseDeEspera,\s*\}\)/);
+    expect(failSafe).toMatch(/runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: fraseDoFailSafe,\s*hasOpenCase: true,\s*openedCaseThisTurn: true,\s*enforceSpinning: false,\s*(?:\/\/[^\n]*\n\s*)?send: enviarFraseDeEspera,\s*\}\)/);
     // Depois dela, o turno encerra: erro ao modelo e trava para qualquer outro envio.
     expect(failSafe).toMatch(/passadoAoHumano = true;/);
     expect(failSafe).toMatch(/code: 'internal_vocabulary_leak_handoff'/);

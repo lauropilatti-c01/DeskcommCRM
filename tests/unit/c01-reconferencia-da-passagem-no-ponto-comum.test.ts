@@ -92,11 +92,12 @@ describe("(C01) a reconferência no ponto comum e a tradução em veto", () => {
     expect(FONTE.match(/^\s*const espera = await runBeforeSend\(\{/gm)).toHaveLength(2);
     // (-c01.3) A do corte mora em `passarAoHumanoSemResposta`, que o bloco do corte e o
     // `catch` da última tentativa chamam.
-    const corte = corpo("const passarAoHumanoSemResposta = async", "const desfecho = desfechoDaFraseDeEspera(");
+    // (-c01.15) O desfecho passa por `desfechoDoFailSafe` (o de sempre com a passagem ligada).
+    const corte = corpo("const passarAoHumanoSemResposta = async", "const desfecho = desfechoDoFailSafe(");
     expect(corte).toMatch(
       /passadoAoHumano = true;[\s\S]*const espera = await runBeforeSend\(\{[\s\S]*send: enviarFraseDeEspera,/,
     );
-    const failSafe = corpo("fotosDoProduto = [];", "const desfecho = desfechoDaFraseDeEspera(");
+    const failSafe = corpo("fotosDoProduto = [];", "const desfecho = desfechoDoFailSafe(");
     expect(failSafe).toMatch(
       /enviandoFraseDeEspera = true;\s*const espera = await runBeforeSend\(\{/,
     );

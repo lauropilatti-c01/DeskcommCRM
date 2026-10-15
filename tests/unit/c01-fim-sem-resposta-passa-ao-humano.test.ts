@@ -247,10 +247,14 @@ describe("(C01) a ligação no turno, pelo código", () => {
     expect(caso).toBeGreaterThan(-1);
     expect(frase).toBeGreaterThan(caso);
     expect(passagem).toBeGreaterThan(frase);
-    expect(corpo).toMatch(/const textos = textosDoFimSemResposta\(fim\);/);
+    // (-c01.15) Os textos e a frase do turno: com a passagem ligada, os de sempre.
+    expect(corpo).toMatch(/const textos = textosDoFimSemResposta\(fim, \{ semPassagem \}\);/);
     expect(corpo).toMatch(/passadoAoHumano = true;/);
-    // Nenhuma frase nova: a de espera de sempre.
-    expect(corpo).toMatch(/body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,/);
+    // Nenhuma frase nova com a passagem ligada: a de espera de sempre.
+    expect(corpo).toMatch(/body: fraseDoFailSafe,/);
+    expect(TURNO).toMatch(
+      /const fraseDoFailSafe = semPassagem \? FRASE_DE_VERIFICACAO : \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\);/,
+    );
   });
 
   it("(i) o `catch` do corpo do turno: última tentativa + zero mensagens + sem passagem → a sequência comum, e o erro ORIGINAL sobe", () => {
@@ -328,7 +332,8 @@ describe("(C01) a ligação no turno, pelo código", () => {
     const ledger = escolta.indexOf("await estadoInicialDoJob(pool, { tenantId, jobId: job.id })");
     const handoff = escolta.indexOf("await isLeadInHandoff(pool, tenantId, leadId)");
     const caso = escolta.indexOf("source: 'guardrail_autofallback'");
-    const frase = escolta.indexOf("corpo: ctx.fraseDeEspera");
+    // (-c01.15) Com a passagem ligada, a frase de espera de sempre.
+    const frase = escolta.indexOf("corpo: semPassagem ? FRASE_DE_VERIFICACAO : ctx.fraseDeEspera,");
     const passagem = escolta.indexOf("await gravarPassagemComNovaTentativa(");
     expect(ledger).toBeGreaterThan(-1);
     expect(handoff).toBeGreaterThan(ledger);
