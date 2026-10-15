@@ -131,6 +131,7 @@ import {
 import { buildOpeningMessage, ritualBlocks } from "./abertura/ritual";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
 import {
+  acrescentarEnviadasAntesNoContexto,
   eReconsultaDoGancho,
   rodarGanchoAntesDoTurno,
   trocarResumoNoContexto,
@@ -3367,6 +3368,9 @@ async function executarTurnoDoAgente(
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     });
     if (desfechoDoGancho.fim) return; // o gancho respondeu o cliente: sem modelo e sem fail-safe
+    // (C01, -c01.15) `seguir` com `enviar_antes`: o que saiu entra no histórico que o modelo lê.
+    if (desfechoDoGancho.enviadasAntes !== undefined)
+      acrescentarEnviadasAntesNoContexto(openingContext.context.messages, desfechoDoGancho.enviadasAntes, fusoDaOrg);
     if (desfechoDoGancho.camposDoCard !== undefined) {
       const campos = camposCompactosDoCard(desfechoDoGancho.camposDoCard);
       if (Object.keys(campos).length > 0) openingContext.context.campos_do_card = campos;
