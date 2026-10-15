@@ -349,10 +349,16 @@ describe("(C01, P8) #zerar do celular de teste", () => {
     expect(escritas).toContainEqual({ tabela: "contacts", payload: { force_human: false } });
   });
 
-  it("a constante da etiqueta é a mesma do gancho antes do turno", async () => {
+  it("a constante da etiqueta é a mesma do gancho antes do turno (uma só, em `lib/c01/celular-de-teste.ts`)", async () => {
     const { ETIQUETA_DO_CELULAR_DE_TESTE } = await import("@/lib/c01/zerar-celular-de-teste");
+    const regua = await import("@/lib/c01/celular-de-teste");
+    expect(ETIQUETA_DO_CELULAR_DE_TESTE).toBe("celular-de-teste");
+    expect(ETIQUETA_DO_CELULAR_DE_TESTE).toBe(regua.ETIQUETA_DO_CELULAR_DE_TESTE);
+    // O gancho reexporta a da régua, sem cópia própria.
     const gancho = readFileSync("lib/agent-engine/agent/gancho-antes-do-turno.ts", "utf8");
-    expect(gancho).toContain(`export const ETIQUETA_DO_CELULAR_DE_TESTE = '${ETIQUETA_DO_CELULAR_DE_TESTE}';`);
+    expect(gancho).toMatch(/import \{\s*ETIQUETA_DO_CELULAR_DE_TESTE,[^}]*\} from '@\/lib\/c01\/celular-de-teste';/);
+    expect(gancho).toContain("export { ETIQUETA_DO_CELULAR_DE_TESTE };");
+    expect(gancho).not.toMatch(/export const ETIQUETA_DO_CELULAR_DE_TESTE/);
   });
 });
 

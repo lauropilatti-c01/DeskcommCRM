@@ -19,7 +19,8 @@
  * O pedido leva a conversa (canal, pessoa atendendo, última entrada), o card do funil
  * (etapa, campos, etiquetas), as últimas 12 mensagens (com o `status` de cada uma e,
  * na que falhou, o código do `erro`) e o `formulario`: a resposta de formulário mais
- * nova dessas 12, enquanto o gancho ainda não a processou. Nunca telefone, e-mail ou
+ * nova dessas 12, enquanto o gancho ainda não a processou. (-c01.15) E sempre o
+ * `celular_de_teste` (verdadeiro/falso, `lerCelularDeTeste`). Nunca telefone, e-mail ou
  * nome do contato: campo do card com nome de dado pessoal (`chaveEDadoPessoal`) fica
  * de fora.
  *
@@ -108,7 +109,6 @@ import { z } from 'zod';
 import type { AgentOperationContext } from '@/lib/ai/agents/operation';
 import { JobLeasePerdidoError, PrazoDaExecucaoVencidoError, StaleServiceBoundaryError } from '@/lib/atendimento/fronteira';
 import { guardServiceEffect } from '@/lib/atendimento/fronteira-server';
-import { lerNumerosDeTeste, numeroPodeTestar } from '@/lib/ai/elegibilidade/pre-go-live';
 import { canalEnviaInterativo, TEXTO_DA_RESPOSTA_DE_FORMULARIO, tipoDoCanalParaIntegracao } from '@/lib/channels/interativo';
 import { normalizarTags } from '@/lib/contacts/tag-normalizada';
 import { logger } from '@/lib/logger';
@@ -123,6 +123,11 @@ import { runBeforeSend } from '../guardrails/before-send';
 import type { DesfechoDoAviso } from './aviso-de-escalacao';
 import { performHumanHandoff } from './human-handoff';
 import { abrirCasoDoPedidoDePessoa } from '@/lib/c01/passagem-desligada';
+import {
+  ETIQUETA_DO_CELULAR_DE_TESTE,
+  passaNaConferenciaDoCelularDeTeste,
+  telefoneNaListaDeTeste,
+} from '@/lib/c01/celular-de-teste';
 import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
 import type { Logger } from '../obs/logger';
 import { claimOfJob } from '../queue/claim';
@@ -198,6 +203,15 @@ export interface PedidoDoGancho {
   organizacao_id: string;
   agente_id: string | null;
   conversa: { id: string; canal: string; pessoa_atendendo: boolean; ultima_entrada_em: string | null };
+  /**
+   * (C01, -c01.15) O contato é celular de teste: telefone na lista de teste do canal do
+   * job E a etiqueta, no contato ou num card dele (`lerCelularDeTeste`, a régua de
+   * `lib/c01/celular-de-teste.ts`). Lido no servidor a cada pedido, antes da chamada:
+   * etiqueta gravada pela resposta não muda o valor deste turno. `false` em qualquer erro
+   * de leitura. Sempre presente; o telefone em si nunca vai no pedido. O porteiro o
+   * exige para o `#zerar` e o `apagar_memoria`.
+   */
+  celular_de_teste: boolean;
   lead: { id: string | null; etapa: string | null; campos: Record<string, unknown>; etiquetas: string[] };
   mensagens: MensagemDoPedido[];
   formulario?: FormularioDoPedido;
@@ -292,6 +306,41 @@ export async function formularioDoTurno(
 /** A etapa como o serviço a lê: `won`/`lost` quando o negócio fechou, senão o slug da etapa. */
 const etapaDoCard = (card: CardDoContato): string | null => (card.status !== 'open' ? card.status : card.etapa);
 
+/**
+ * (C01, -c01.15) O contato é celular de teste? Lê, na organização do job, o telefone do
+ * contato, a lista de teste do canal do job e as etiquetas do contato e dos cards dele, e
+ * aplica `passaNaConferenciaDoCelularDeTeste` (a régua do `#zerar`). Qualquer erro de
+ * leitura, contato ou canal que não se acha: `false`, nunca `true` por falta de dado.
+ */
+export async function lerCelularDeTeste(
+  db: Queryable,
+  organizationId: string,
+  contactId: string,
+  channelSessionId: string,
+): Promise<boolean> {
+  try {
+    const { rows } = await db.query<{ phone_number: string | null; metadata: unknown; etiquetas: unknown[] | null }>(
+      `select ct.phone_number,
+              (select s.metadata from channel_sessions s where s.organization_id = $1 and s.id = $3) as metadata,
+              coalesce(ct.tags, '{}'::text[])
+                || coalesce((select array_agg(t.tag) from crm_leads l, unnest(l.tags) as t(tag)
+                              where l.organization_id = $1 and l.contact_id = $2), '{}'::text[]) as etiquetas
+         from contacts ct
+        where ct.organization_id = $1 and ct.id = $2`,
+      [organizationId, contactId, channelSessionId],
+    );
+    const lido = rows[0];
+    if (lido === undefined) return false;
+    return passaNaConferenciaDoCelularDeTeste({
+      telefone: lido.phone_number,
+      metadataDoCanal: lido.metadata,
+      etiquetas: Array.isArray(lido.etiquetas) ? lido.etiquetas : [],
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function montarPedidoDoGancho(
   db: Queryable,
   alvo: {
@@ -346,6 +395,8 @@ export async function montarPedidoDoGancho(
   // (C01, -c01.6) A reconsulta não atende formulário: a resposta que chegar enquanto
   // ela espera é do turno da própria mensagem (marcá-la aqui a tiraria dele).
   const formulario = alvo.reconsulta === true ? null : await formularioDoTurno(db, alvo);
+  // (C01, -c01.15) Antes da chamada: o `gravar` desta resposta não muda o valor do turno.
+  const celularDeTeste = await lerCelularDeTeste(db, alvo.organizationId, alvo.contactId, alvo.channelSessionId);
 
   const pedido: PedidoDoGancho = {
     versao: 1,
@@ -360,6 +411,7 @@ export async function montarPedidoDoGancho(
         (conversa?.assignee_kind == null && conversa?.assigned_to_user_id != null),
       ultima_entrada_em: iso(conversa?.last_inbound_at),
     },
+    celular_de_teste: celularDeTeste,
     lead: {
       id: card?.id ?? null,
       etapa: card ? etapaDoCard(card) : null,
@@ -1115,8 +1167,9 @@ async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho, 
  * (C01, -c01.7) A etiqueta que autoriza `apagar_memoria`: o contato, ou um card dele, a
  * tem (comparada já normalizada, como o banco guarda). Constante genérica, sem nada de
  * uma organização: quem usa o `#zerar` no celular de teste põe essa etiqueta nele.
+ * (-c01.15) Vem de `lib/c01/celular-de-teste.ts`, a régua única do celular de teste.
  */
-export const ETIQUETA_DO_CELULAR_DE_TESTE = 'celular-de-teste';
+export { ETIQUETA_DO_CELULAR_DE_TESTE };
 
 /**
  * (C01, -c01.7) Apaga a memória do contato (`lead_notes`) só se o contato ou um card
@@ -1125,12 +1178,10 @@ export const ETIQUETA_DO_CELULAR_DE_TESTE = 'celular-de-teste';
  * são da própria linha e saem com ela. Só lê `contacts.tags` e `crm_leads.tags`; só
  * apaga `lead_notes` daquele contato naquela organização.
  *
- * (C01, -c01.15, revisão) A etiqueta sozinha NÃO autoriza: um vigia da produção a põe em
- * todo contato novo. Antes, o telefone do contato tem de estar na lista de teste do canal
- * (`channel_sessions.metadata.ai_test_phone_numbers`, a de pré-lançamento, lida por
- * `lerNumerosDeTeste` e comparada por `numeroPodeTestar`, qualquer que seja o modo do
- * canal), a mesma checagem do `#zerar` na entrada (`lib/c01/zerar-celular-de-teste.ts`).
- * Fora da lista, nada é apagado e a etiqueta nem é consultada.
+ * (C01, -c01.15, revisão) A etiqueta sozinha NÃO autoriza. Antes, o telefone do contato
+ * tem de estar na lista de teste do canal (`telefoneNaListaDeTeste`, de
+ * `lib/c01/celular-de-teste.ts`, a mesma régua do `#zerar` na entrada). Fora da lista,
+ * nada é apagado e a etiqueta nem é consultada.
  */
 export async function apagarMemoriaDoContato(
   db: Queryable,
@@ -1146,7 +1197,7 @@ export async function apagarMemoriaDoContato(
     [organizationId, contactId, channelSessionId],
   );
   const lido = lidos[0];
-  if (lido === undefined || !numeroPodeTestar(lido.phone_number, lerNumerosDeTeste(lido.metadata))) {
+  if (lido === undefined || !telefoneNaListaDeTeste(lido.phone_number, lido.metadata)) {
     return { autorizado: false, apagadas: 0, porque: 'fora_da_lista_de_teste' };
   }
   const { rows } = await db.query<{ autorizado: boolean; apagadas: number }>(

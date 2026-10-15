@@ -1456,6 +1456,25 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     expect(linhaDoLog("memória do contato apagada")).toBeUndefined();
   });
 
+  it("(-c01.15) o pedido leva `celular_de_teste`: verdadeiro só com a lista e a etiqueta, e nunca o telefone", async () => {
+    respostaDoGancho = async () => json({ acao: "seguir" });
+    const handler = montaHandler(modelo().doGenerate, true);
+    const pedido = async () => {
+      expect(await executa(handler, await enfileira(await novaEntrada("Oi")))).toBeNull();
+      const corpo = pedidosAoGancho.at(-1)!.corpo;
+      expect(corpo).not.toContain(TELEFONE.slice(1));
+      return (JSON.parse(corpo) as { celular_de_teste?: unknown }).celular_de_teste;
+    };
+    // Na lista, sem a etiqueta.
+    expect(await pedido()).toBe(false);
+    // Na lista e com a etiqueta no card.
+    await etiquetaNoCard();
+    expect(await pedido()).toBe(true);
+    // Com a etiqueta, fora da lista do canal.
+    await listaDeTeste(["+5511900000882"]);
+    expect(await pedido()).toBe(false);
+  });
+
   it("a própria resposta pondo a etiqueta não se autoriza, nem na re-execução do job", async () => {
     respostaDoGancho = async () => json({ ...ZERAR, gravar: { ...ZERAR.gravar, etiquetas_mais: ["celular-de-teste"] } });
     const handler = montaHandler(modelo().doGenerate, true);
