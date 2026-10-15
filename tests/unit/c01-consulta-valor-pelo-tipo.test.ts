@@ -275,7 +275,7 @@ describe("as três situações chegam distintas ao modelo", () => {
 
 describe("colunasDaTabela traz o tipo de cada coluna na mesma leitura do catálogo", () => {
   it("`tipos` mapeia nome → data_type, com uma consulta só", async () => {
-    const real = (await vi.importActual("@/lib/external-db/introspeccao")) as typeof import("@/lib/external-db/introspeccao");
+    const real = await vi.importActual<{ colunasDaTabela: typeof colunasDaTabela }>("@/lib/external-db/introspeccao");
     const selects: string[] = [];
     const linha = (coluna: string, tipo_dado: string, posicao: number) => ({
       schema: "public", nome: "cargos", tipo: "BASE TABLE", coluna, tipo_dado, nulavel: "YES", posicao,
