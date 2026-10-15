@@ -5,9 +5,12 @@
  * turno nunca chega com a conversa calada (passagem ao humano) ou o contato
  * bloqueado (opt-out). Agora a ingestão destrava o celular de teste antes do
  * despacho: tira o bloqueio de opt-out e devolve as conversas à IA pela regra do
- * botão da tela (`devolverAtendimentoAoAgente`). Sem a etiqueta, nada muda.
+ * botão da tela (`devolverAtendimentoAoAgente`). Exige as DUAS coisas: o telefone na
+ * lista de teste do canal (a autorização do administrador) e a etiqueta (um vigia da
+ * produção põe a etiqueta em todo contato novo, então ela sozinha não autoriza).
+ * Faltou uma: nada muda.
  *
- * O banco é um fake em memória (três tabelas e as RPCs); a devolução é a de
+ * O banco é um fake em memória (quatro tabelas e as RPCs); a devolução é a de
  * `lib/escalacao/retomada.ts`, substituída por um dublê que aplica o efeito que ela
  * promete (dono humano solto, silêncio nulo, `force_human` falso), porque o que se
  * prova aqui é QUEM a chama e QUANDO, não a devolução em si.
@@ -105,6 +108,9 @@ const admin = {
 const ORG = "org-1";
 const CONTATO = "contato-1";
 const CONVERSA = "conversa-1";
+/** Telefones fictícios: o da lista de teste do canal e um de fora dela. */
+const NUMERO_DE_TESTE = "+5511900000001";
+const NUMERO_COMUM = "5511900000002";
 
 const ENTRADA: EntradaDeMensagem = {
   organizationId: ORG,
@@ -123,10 +129,21 @@ function contato(over: Linha = {}): Linha {
     organization_id: ORG,
     id: CONTATO,
     tags: ["celular-de-teste"],
+    phone_number: "5511900000001",
     force_human: true,
     is_blocked: true,
     blocked_reason: "stop_keyword",
     blocked_at: "2026-10-15T12:00:00Z",
+    ...over,
+  };
+}
+
+/** O canal da mensagem, com a lista de teste que o administrador preenche na tela. */
+function canal(over: Linha = {}, numeros: string[] = [NUMERO_DE_TESTE]): Linha {
+  return {
+    organization_id: ORG,
+    id: "sessao-1",
+    metadata: { ai_gate: "allowlist", ai_gate_mode: "pre_go_live", ai_test_phone_numbers: numeros },
     ...over,
   };
 }
@@ -157,7 +174,7 @@ async function posEntrada(over: Partial<EntradaDeMensagem> = {}) {
 }
 
 beforeEach(() => {
-  tabelas = { contacts: [contato()], crm_leads: [], conversations: [conversa()] };
+  tabelas = { contacts: [contato()], crm_leads: [], conversations: [conversa()], channel_sessions: [canal()] };
   sequencia = [];
   escritas = [];
   audit.mockClear();
@@ -234,6 +251,51 @@ describe("(C01, P8) #zerar do celular de teste", () => {
 
     expect((await zerar()).aplicado).toBe(false);
     expect(escritas).toEqual([]);
+  });
+
+  it("etiqueta SEM o número na lista de teste do canal: nada muda e nada mais é consultado", async () => {
+    tabelas.contacts = [contato({ phone_number: NUMERO_COMUM })];
+
+    const r = await zerar();
+
+    expect(r).toEqual({
+      aplicado: false,
+      motivo: "fora_da_lista_de_teste",
+      conversasDevolvidas: 0,
+      desbloqueado: false,
+    });
+    expect(sequencia).toEqual(["select:contacts", "select:channel_sessions"]);
+    expect(escritas).toEqual([]);
+    expect(devolver).not.toHaveBeenCalled();
+    expect(audit).not.toHaveBeenCalled();
+    expect(oContato()).toMatchObject({ is_blocked: true, force_human: true });
+  });
+
+  it("a lista de OUTRO canal não vale: conta só a do canal da mensagem", async () => {
+    tabelas.channel_sessions = [canal({}, []), canal({ id: "sessao-2" })];
+
+    expect((await zerar()).motivo).toBe("fora_da_lista_de_teste");
+    expect(escritas).toEqual([]);
+  });
+
+  it("canal sem lista (ou lista de outra organização) não autoriza", async () => {
+    tabelas.channel_sessions = [canal({ metadata: {} })];
+    expect((await zerar()).motivo).toBe("fora_da_lista_de_teste");
+
+    tabelas.channel_sessions = [canal({ organization_id: "org-2" })];
+    expect((await zerar()).motivo).toBe("fora_da_lista_de_teste");
+    expect(escritas).toEqual([]);
+  });
+
+  it("a lista vale qualquer que seja o modo do canal (já aberto ao público, também)", async () => {
+    tabelas.channel_sessions = [
+      canal({ metadata: { ai_gate: "open", ai_test_phone_numbers: [NUMERO_DE_TESTE] } }),
+    ];
+
+    const r = await zerar();
+
+    expect(r).toMatchObject({ aplicado: true, desbloqueado: true });
+    expect(oContato()).toMatchObject({ is_blocked: false, force_human: false });
   });
 
   it("só o comando exato age: maiúsculas e espaços nas pontas valem, texto a mais não", async () => {
@@ -313,6 +375,27 @@ describe("(C01, P8) na ingestão (pos-entrada)", () => {
     tabelas.contacts = [contato({ is_blocked: false, blocked_reason: null, force_human: false })];
 
     await posEntrada({ texto: "PARAR" });
+
+    expect(oContato()).toMatchObject({ is_blocked: true, blocked_reason: "stop_keyword" });
+    expect(devolver).not.toHaveBeenCalled();
+  });
+
+  it("#zerar de número com a etiqueta e fora da lista de teste: segue bloqueado e calado", async () => {
+    tabelas.contacts = [contato({ phone_number: NUMERO_COMUM })];
+
+    await posEntrada();
+
+    expect(oContato()).toMatchObject({ is_blocked: true, force_human: true });
+    expect(aConversa().bot_silenced_until).toBe("infinity");
+    expect(devolver).not.toHaveBeenCalled();
+  });
+
+  it("'parar' de número comum (etiquetado pelo vigia, fora da lista) continua bloqueando", async () => {
+    tabelas.contacts = [
+      contato({ phone_number: NUMERO_COMUM, is_blocked: false, blocked_reason: null, force_human: false }),
+    ];
+
+    await posEntrada({ texto: "parar" });
 
     expect(oContato()).toMatchObject({ is_blocked: true, blocked_reason: "stop_keyword" });
     expect(devolver).not.toHaveBeenCalled();

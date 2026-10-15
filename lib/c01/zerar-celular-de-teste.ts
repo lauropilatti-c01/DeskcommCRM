@@ -20,16 +20,22 @@
  * ─── O que esta função faz ──────────────────────────────────────────────────
  *
  * Na ingestão, ANTES do despacho: se o texto é exatamente `#zerar` (sem espaços
- * nas pontas, sem diferença de maiúsculas) e o contato, ou um card dele, tem a
- * etiqueta do celular de teste, ela tira o bloqueio de opt-out (só o de
- * opt-out, `stop_keyword`) e devolve as conversas do contato à IA pela MESMA
- * regra do botão da tela (`devolverAtendimentoAoAgente`: dono humano, silêncio,
+ * nas pontas, sem diferença de maiúsculas), o telefone do contato está na lista
+ * de teste do canal da mensagem E o contato, ou um card dele, tem a etiqueta do
+ * celular de teste, ela tira o bloqueio de opt-out (só o de opt-out,
+ * `stop_keyword`) e devolve as conversas do contato à IA pela MESMA regra do
+ * botão da tela (`devolverAtendimentoAoAgente`: dono humano, silêncio,
  * `force_human`). O turno segue normal, e o gancho faz a limpeza do card.
  *
- * Número sem a etiqueta: nada muda, nem uma consulta a mais quando o texto não é
- * o comando. Nunca lança: a mensagem do cliente já está gravada (ver o cabeçalho
- * de `lib/channels/pos-entrada.ts`).
+ * A etiqueta sozinha NÃO autoriza: um vigia da produção a põe em todo contato
+ * novo. Quem autoriza é o administrador, pela lista de teste do canal
+ * (`channel_sessions.metadata.ai_test_phone_numbers`, a de pré-lançamento, lida
+ * por `lerNumerosDeTeste` e comparada por `numeroPodeTestar`, qualquer que seja o
+ * modo do canal). Faltou uma das duas: nada muda e nada mais é consultado. Texto
+ * que não é o comando: nem uma consulta. Nunca lança: a mensagem do cliente já
+ * está gravada (ver o cabeçalho de `lib/channels/pos-entrada.ts`).
  */
+import { lerNumerosDeTeste, numeroPodeTestar } from "@/lib/ai/elegibilidade/pre-go-live";
 import { audit } from "@/lib/audit";
 import { devolverAtendimentoAoAgente } from "@/lib/escalacao/retomada";
 import { logger } from "@/lib/logger";
@@ -62,13 +68,14 @@ export interface EntradaDoZerar {
 
 export interface DesfechoDoZerar {
   aplicado: boolean;
-  motivo?: "nao_e_zerar" | "sem_etiqueta" | "erro";
+  motivo?: "nao_e_zerar" | "fora_da_lista_de_teste" | "sem_etiqueta" | "erro";
   conversasDevolvidas: number;
   desbloqueado: boolean;
 }
 
 interface ContatoDoZerar {
   tags: string[] | null;
+  phone_number: string | null;
   force_human: boolean | null;
   is_blocked: boolean | null;
   blocked_reason: string | null;
@@ -104,13 +111,27 @@ export async function zerarCelularDeTesteSePedido(
   try {
     const { data, error } = await admin
       .from("contacts")
-      .select("tags, force_human, is_blocked, blocked_reason")
+      .select("tags, phone_number, force_human, is_blocked, blocked_reason")
       .eq("organization_id", organizationId)
       .eq("id", contactId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     contato = (data ?? null) as ContatoDoZerar | null;
-    etiquetada = temEtiquetaDeTeste(contato?.tags);
+    if (contato === null) return { aplicado: false, motivo: "fora_da_lista_de_teste", ...nada };
+    // (a) O número na lista de teste do canal da mensagem: a autorização do administrador.
+    const { data: canal, error: erroDoCanal } = await admin
+      .from("channel_sessions")
+      .select("metadata")
+      .eq("organization_id", organizationId)
+      .eq("id", entrada.channelSessionId)
+      .maybeSingle();
+    if (erroDoCanal) throw new Error(erroDoCanal.message);
+    const lista = lerNumerosDeTeste((canal as { metadata: unknown } | null)?.metadata);
+    if (!numeroPodeTestar(contato.phone_number, lista)) {
+      return { aplicado: false, motivo: "fora_da_lista_de_teste", ...nada };
+    }
+    // (b) A etiqueta, no contato ou num card dele.
+    etiquetada = temEtiquetaDeTeste(contato.tags);
     if (!etiquetada) {
       const { data: cards, error: erroDosCards } = await admin
         .from("crm_leads")
@@ -124,14 +145,14 @@ export async function zerarCelularDeTesteSePedido(
     }
   } catch (err) {
     // Na dúvida, não age: destravar um contato que não é de teste é o pior erro daqui.
-    logger.warn("[zerar] etiqueta do celular de teste não lida — nada destravado", {
+    logger.warn("[zerar] lista de teste ou etiqueta não lida — nada destravado", {
       organization_id: organizationId,
       origem: entrada.origem,
       detail: detalhe(err),
     });
     return { aplicado: false, motivo: "erro", ...nada };
   }
-  if (contato === null || !etiquetada) return { aplicado: false, motivo: "sem_etiqueta", ...nada };
+  if (!etiquetada) return { aplicado: false, motivo: "sem_etiqueta", ...nada };
 
   // (1) O bloqueio de opt-out, e só ele: outro motivo de bloqueio foi decisão de alguém.
   let desbloqueado = false;

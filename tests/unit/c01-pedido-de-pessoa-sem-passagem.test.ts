@@ -256,6 +256,38 @@ describe('(C01, -c01.15, P1) modo assistido com a passagem desligada', () => {
     expect(mocks.draft, 'o rascunho segue para a aprovação humana').toHaveBeenCalledTimes(1);
   });
 
+  it('o modo é respeitado: depois do caso, o resultado é RASCUNHO para o atendente aprovar — nada sai ao cliente, nem o modelo do automático roda', async () => {
+    mocks.leadContext.mockResolvedValue(
+      contexto([{ direction: 'inbound', body: 'quero falar com um atendente' }]),
+    );
+    const enviado = vi.fn(async () => ({ kind: 'sent' }));
+    const p = pool(assistido(false));
+    await createInboundTurnHandler({ ...deps, channel: () => ({ send: enviado }) } as unknown as InboundTurnDeps)(
+      inbound as never,
+      p as never,
+      { workerId: 'w' },
+    );
+
+    expect(casosAbertos(p)).toHaveLength(1);
+    // O rascunho, com o agente assistido: é ele que vai para a fila de aprovação.
+    expect(mocks.draft).toHaveBeenCalledTimes(1);
+    expect(mocks.draft).toHaveBeenCalledWith(
+      p,
+      expect.anything(),
+      expect.objectContaining({
+        organizationId: ids.org,
+        conversationId: ids.conversation,
+        agent: expect.objectContaining({ operationMode: 'assisted' }),
+      }),
+    );
+    // Nada sai ao cliente sem aprovação: nem pelo canal, nem por aviso, nem pelo ledger de envio.
+    expect(enviado).not.toHaveBeenCalled();
+    expect(mocks.aviso).not.toHaveBeenCalled();
+    expect(mocks.avisoLendo).not.toHaveBeenCalled();
+    const sqls = p.query.mock.calls.map(([sql]) => String(sql));
+    expect(sqls.filter((sql) => /send_ledger|insert into messages/i.test(sql))).toEqual([]);
+  });
+
   it('palavra-chave configurada → o mesmo caminho: caso aberto e rascunho, sem passagem', async () => {
     mocks.leadContext.mockResolvedValue(
       contexto([{ direction: 'inbound', body: 'abre um chamado no suporte pra mim' }]),
