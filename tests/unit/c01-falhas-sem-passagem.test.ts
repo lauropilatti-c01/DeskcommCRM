@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+  AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM,
   estiloViraConteudo,
   FRASE_DE_VERIFICACAO,
   passagemDesligada,
@@ -134,11 +135,83 @@ describe("(C01, -c01.15, P3) a \"consulte antes de enviar\" vira trava de conte�
     );
   });
 
-  it("na solta da mensagem de estilo depois do laço, ela não se desarma; vetada a solta, o fail-safe sem silêncio", () => {
-    const solta = trecho("const { trava, entrada } = envioVetadoPorEstilo;", "O LAÇO FOI CORTADO POR NOSSO TETO");
+  it("na solta da mensagem de estilo depois do laço, ela não se desarma, e a solta não abre caso por conta própria", () => {
+    const solta = trecho("const { trava, entrada } = envioVetadoPorEstilo;", "SEM PASSAGEM, O VETO DE CONTEÚDO SEM NOVA TENTATIVA");
     expect(solta).toMatch(/if \(semPassagem\) vetosDeEstilo\.delete\(CONSULTA_ANTES_DE_ENVIAR\);/);
-    expect(solta).toMatch(/if \(\s*semPassagem &&\s*corposEnviados\.length === 0 &&/);
-    expect(solta).toMatch(/await passarAoHumanoSemResposta\(\{\s*motivo: 'veto_de_conteudo',/);
+    // (revisão) A solta vetada por pacing (cap diário, warm-up) reagenda o job: abrir caso
+    // e mandar a frase ali era caso falso e frase seguida da resposta.
+    expect(solta).not.toMatch(/passarAoHumanoSemResposta/);
+  });
+});
+
+describe("(C01, -c01.15, revisão) o veto de conteúdo sem nova tentativa, sem passagem", () => {
+  const depois = () => trecho("SEM PASSAGEM, O VETO DE CONTEÚDO SEM NOVA TENTATIVA", "O LAÇO FOI CORTADO POR NOSSO TETO");
+
+  it("cada veto de conteúdo antes do limite guarda o texto vetado (as de conteúdo, a consulta sem passagem e o vocabulário interno)", () => {
+    const envio = trecho("send_message: tool({", "update_lead_state: tool({");
+    expect(envio).toMatch(
+      /if \(vetos < MAX_VETOS_DE_CONTEUDO\) \{\s*ultimoVetoDeConteudo = \{ trava: chain\.code, vetos, texto: body \};/,
+    );
+    expect(envio).toMatch(
+      /if \(internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO\) \{\s*ultimoVetoDeConteudo = \{ trava: chain\.code, vetos: internalVocabularyVetoCount, texto: body \};/,
+    );
+    // Só ali: o veto de estilo e o de pacing não guardam.
+    expect(FONTE.match(/ultimoVetoDeConteudo = \{/g)).toHaveLength(2);
+  });
+
+  it("depois do laço: sem passagem, com veto de conteúdo guardado, sem veto de pacing e nada no lead → caso e frase", () => {
+    const bloco = depois();
+    for (const guarda of [
+      "semPassagem &&",
+      "!preview &&",
+      "ultimoVetoDeConteudo !== null &&",
+      "semVetoDePacing &&",
+      "!leadTemResposta &&",
+      "corposEnviados.length === 0 &&",
+      "runError === null &&",
+      "!outcomes.some((o) => o.kind === 'failed') &&",
+      "!passadoAoHumano &&",
+      "!turnoDescartado &&",
+      "turnoVaiFalarComOLead(liveJob())",
+    ]) {
+      expect(bloco, guarda).toContain(guarda);
+    }
+    expect(bloco).toMatch(/const semVetoDePacing = pacingCapVeto === null;/);
+    expect(bloco).toMatch(/await passarAoHumanoSemResposta\(\{ motivo: 'veto_de_conteudo', \.\.\.ultimoVetoDeConteudo \}\);/);
+    // Antes do corte: o corte não abre um segundo caso (`passadoAoHumano`).
+    expect(FONTE.indexOf("SEM PASSAGEM, O VETO DE CONTEÚDO SEM NOVA TENTATIVA")).toBeLessThan(
+      FONTE.indexOf("O LAÇO FOI CORTADO POR NOSSO TETO"),
+    );
+  });
+});
+
+describe("(C01, -c01.15, revisão) com mensagem do turno já no lead, o fail-safe sem passagem só abre o caso", () => {
+  it("o aviso ao modelo diz que o caso abriu e que nada mais sai, sem a frase", () => {
+    expect(AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM).toMatch(/caso foi aberto/);
+    expect(AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM).toMatch(/já recebeu mensagem deste turno/);
+    expect(AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM).not.toContain(FRASE_DE_VERIFICACAO);
+  });
+
+  it("o turno sem resposta (a trava de conteúdo no limite): o caso, e volta ANTES da frase quando algo já saiu", () => {
+    const fim = trecho(
+      "const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera | 'sem_frase'> => {",
+      "return desfecho;\n  };",
+    );
+    const caso = fim.indexOf("await openCase(");
+    const semFrase = fim.indexOf("if (semPassagem && (leadTemResposta || corposEnviados.length > 0)) {");
+    const frase = fim.indexOf("body: fraseDoFailSafe,");
+    expect(caso).toBeGreaterThan(-1);
+    expect(semFrase).toBeGreaterThan(caso);
+    expect(frase).toBeGreaterThan(semFrase);
+    expect(fim.slice(semFrase, frase)).toMatch(/return 'sem_frase';/);
+    expect(FONTE).toMatch(
+      /desfecho === 'sem_frase' \? AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM : avisoAoModeloDoFailSafe\[desfecho\]/,
+    );
+  });
+
+  it("o vocabulário interno no limite: o caso, e volta ANTES da frase quando algo já saiu", () => {
+    const vocab = trecho("moverParaHandoffBestEffort('vocabulario_interno_autofallback');", "body: fraseDoFailSafe,");
+    expect(vocab).toMatch(/if \(semPassagem && \(leadTemResposta \|\| corposEnviados\.length > 0\)\) \{[\s\S]*?AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM[\s\S]*?\}/);
   });
 });
 
@@ -153,7 +226,7 @@ describe("(C01, -c01.15, P3) os fail-safes sem passagem não gravam a passagem",
 
   it("o turno sem resposta (travas de conteúdo no limite, cortes): caso e frase, e volta ANTES de `performHumanHandoff`", () => {
     const fim = trecho(
-      "const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera> => {",
+      "const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera | 'sem_frase'> => {",
       "return desfecho;\n  };",
     );
     expect(fim).toMatch(/textosDoFimSemResposta\(fim, \{ semPassagem \}\)/);

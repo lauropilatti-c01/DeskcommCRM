@@ -78,7 +78,7 @@ describe("(C01) a ligação no `send_message`, pelo código", () => {
   it("1º e 2º vetos ensinam (o 2º com o aviso de última tentativa); no 3º, o caminho comum com o texto vetado", () => {
     const bloco = blocoDeConteudo();
     expect(bloco).toMatch(
-      /const vetos = \(vetosDeConteudo\.get\(chain\.code\) \?\? 0\) \+ 1;\s*vetosDeConteudo\.set\(chain\.code, vetos\);\s*if \(vetos < MAX_VETOS_DE_CONTEUDO\) \{\s*const ultima = vetos === MAX_VETOS_DE_CONTEUDO - 1;/,
+      /const vetos = \(vetosDeConteudo\.get\(chain\.code\) \?\? 0\) \+ 1;\s*vetosDeConteudo\.set\(chain\.code, vetos\);\s*if \(vetos < MAX_VETOS_DE_CONTEUDO\) \{\s*ultimoVetoDeConteudo = \{ trava: chain\.code, vetos, texto: body \};\s*const ultima = vetos === MAX_VETOS_DE_CONTEUDO - 1;/,
     );
     // (-c01.15) Pelos avisos do turno: com a passagem ligada, os de sempre.
     expect(bloco).toMatch(/message: ultima \? `\$\{chain\.message\} \$\{avisoDeUltimaTentativa\}` : chain\.message,/);
@@ -113,7 +113,8 @@ describe("(C01) a ligação no `send_message`, pelo código", () => {
 
   it("o caminho comum devolve o desfecho da frase, para o aviso ao modelo", () => {
     expect(FONTE).toMatch(
-      /const passarAoHumanoSemResposta = async \(fim: FimSemResposta\): Promise<DesfechoDaFraseDeEspera> => \{/,
+      // (-c01.15, revisão) `'sem_frase'`: sem passagem, com mensagem do turno já no lead, só o caso.
+      /const passarAoHumanoSemResposta = async \(fim: FimSemResposta\): Promise<DesfechoDaFraseDeEspera \| 'sem_frase'> => \{/,
     );
     const ini = FONTE.indexOf("const passarAoHumanoSemResposta = async (");
     const corpo = FONTE.slice(ini, FONTE.indexOf("\n  };\n", ini));

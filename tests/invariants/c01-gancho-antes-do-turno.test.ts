@@ -1343,6 +1343,13 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     apagar_memoria: true,
   };
 
+  /** (-c01.15, revisão) A lista de teste do canal: a etiqueta sozinha não autoriza. */
+  const listaDeTeste = (numeros: string[]) =>
+    pool.query(
+      "update channel_sessions set metadata = jsonb_build_object('ai_test_phone_numbers', $3::jsonb) where organization_id = $1 and id = $2",
+      [ORG, SESSION, JSON.stringify(numeros)],
+    );
+
   beforeAll(async () => {
     await pool.query(
       `insert into contacts (id, organization_id, name, phone_number, tags)
@@ -1351,7 +1358,12 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     );
   });
 
+  afterAll(async () => {
+    await pool.query("update channel_sessions set metadata = '{}'::jsonb where organization_id = $1 and id = $2", [ORG, SESSION]);
+  });
+
   beforeEach(async () => {
+    await listaDeTeste([TELEFONE]);
     await pool.query("delete from lead_notes where organization_id = $1", [ORG]);
     await pool.query("update contacts set tags = '{}'::text[] where organization_id = $1 and id = $2", [ORG, CONTACT]);
     for (const [contato, headline] of [
@@ -1430,6 +1442,18 @@ describe("-c01.7: `apagar_memoria` apaga a memória só do celular de teste", ()
     expect(linhaDoLog("memória do contato apagada")).toBeUndefined();
     const recusa = JSON.stringify(linhaDoLog("contato sem a etiqueta de teste"));
     for (const pessoal of [NOME, TELEFONE, EMAIL, NOTA_ANTIGA]) expect(recusa).not.toContain(pessoal);
+  });
+
+  it("(-c01.15) etiqueta sem o telefone na lista de teste do canal: nada é apagado e o log diz por quê", async () => {
+    await etiquetaNoCard();
+    await listaDeTeste(["+5511900000882"]);
+    respostaDoGancho = async () => json(ZERAR);
+    expect(await executa(montaHandler(modelo().doGenerate, true), await enfileira(await novaEntrada("#zerar")))).toBeNull();
+
+    expect(await notas(CONTACT)).toHaveLength(2);
+    expect(corpos()).toEqual([CONFIRMACAO]);
+    expect(linhaDoLog("fora da lista de teste do canal")).toMatchObject({ porque: "fora_da_lista_de_teste" });
+    expect(linhaDoLog("memória do contato apagada")).toBeUndefined();
   });
 
   it("a própria resposta pondo a etiqueta não se autoriza, nem na re-execução do job", async () => {

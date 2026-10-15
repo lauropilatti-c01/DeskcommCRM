@@ -44,9 +44,11 @@
  * contato (`lead_notes`: as notas, o índice que o turno monta delas e o embedding de
  * cada uma) junto com o `gravar` e nas mesmas condições dele. Só para o celular de
  * teste: o contato ou um card dele tem de ter a etiqueta `ETIQUETA_DO_CELULAR_DE_TESTE`,
- * conferida no banco na mesma instrução que apaga. Sem a etiqueta, com a etiqueta posta
- * pela própria resposta ou com erro na leitura: nada é apagado, fica no log e o turno
- * segue. Não mexe em mensagens, casos, campos, card nem no checkpoint do contato.
+ * conferida no banco na mesma instrução que apaga. (-c01.15) E, antes, o telefone na
+ * lista de teste do canal: a etiqueta sozinha não autoriza. Fora da lista, sem a
+ * etiqueta, com a etiqueta posta pela própria resposta ou com erro na leitura: nada é
+ * apagado, fica no log e o turno segue. Não mexe em mensagens, casos, campos, card nem
+ * no checkpoint do contato.
  *
  * ## Falha nunca cala o cliente
  *
@@ -106,6 +108,7 @@ import { z } from 'zod';
 import type { AgentOperationContext } from '@/lib/ai/agents/operation';
 import { JobLeasePerdidoError, PrazoDaExecucaoVencidoError, StaleServiceBoundaryError } from '@/lib/atendimento/fronteira';
 import { guardServiceEffect } from '@/lib/atendimento/fronteira-server';
+import { lerNumerosDeTeste, numeroPodeTestar } from '@/lib/ai/elegibilidade/pre-go-live';
 import { canalEnviaInterativo, TEXTO_DA_RESPOSTA_DE_FORMULARIO, tipoDoCanalParaIntegracao } from '@/lib/channels/interativo';
 import { normalizarTags } from '@/lib/contacts/tag-normalizada';
 import { logger } from '@/lib/logger';
@@ -1121,12 +1124,31 @@ export const ETIQUETA_DO_CELULAR_DE_TESTE = 'celular-de-teste';
  * janela entre a etiqueta lida e as notas apagadas. O índice da memória e o embedding
  * são da própria linha e saem com ela. Só lê `contacts.tags` e `crm_leads.tags`; só
  * apaga `lead_notes` daquele contato naquela organização.
+ *
+ * (C01, -c01.15, revisão) A etiqueta sozinha NÃO autoriza: um vigia da produção a põe em
+ * todo contato novo. Antes, o telefone do contato tem de estar na lista de teste do canal
+ * (`channel_sessions.metadata.ai_test_phone_numbers`, a de pré-lançamento, lida por
+ * `lerNumerosDeTeste` e comparada por `numeroPodeTestar`, qualquer que seja o modo do
+ * canal), a mesma checagem do `#zerar` na entrada (`lib/c01/zerar-celular-de-teste.ts`).
+ * Fora da lista, nada é apagado e a etiqueta nem é consultada.
  */
 export async function apagarMemoriaDoContato(
   db: Queryable,
   organizationId: string,
   contactId: string,
-): Promise<{ autorizado: boolean; apagadas: number }> {
+  channelSessionId: string,
+): Promise<{ autorizado: boolean; apagadas: number; porque?: 'fora_da_lista_de_teste' | 'sem_etiqueta' }> {
+  const { rows: lidos } = await db.query<{ phone_number: string | null; metadata: unknown }>(
+    `select ct.phone_number, s.metadata
+       from contacts ct
+       left join channel_sessions s on s.organization_id = ct.organization_id and s.id = $3
+      where ct.organization_id = $1 and ct.id = $2`,
+    [organizationId, contactId, channelSessionId],
+  );
+  const lido = lidos[0];
+  if (lido === undefined || !numeroPodeTestar(lido.phone_number, lerNumerosDeTeste(lido.metadata))) {
+    return { autorizado: false, apagadas: 0, porque: 'fora_da_lista_de_teste' };
+  }
   const { rows } = await db.query<{ autorizado: boolean; apagadas: number }>(
     `with autorizado as (
        select (
@@ -1144,12 +1166,18 @@ export async function apagarMemoriaDoContato(
      select (select ok from autorizado) as autorizado, (select count(*) from apagadas)::int as apagadas`,
     [organizationId, contactId, ETIQUETA_DO_CELULAR_DE_TESTE],
   );
-  return { autorizado: rows[0]?.autorizado === true, apagadas: Number(rows[0]?.apagadas ?? 0) };
+  const autorizado = rows[0]?.autorizado === true;
+  return {
+    autorizado,
+    apagadas: Number(rows[0]?.apagadas ?? 0),
+    ...(autorizado ? {} : { porque: 'sem_etiqueta' as const }),
+  };
 }
 
 /**
  * (C01, -c01.7) `apagar_memoria`. Recusa, sem apagar nada e com o motivo no log: o
- * contato sem a etiqueta de teste; a própria resposta pondo a etiqueta
+ * telefone fora da lista de teste do canal (-c01.15); o contato sem a etiqueta de teste;
+ * a própria resposta pondo a etiqueta
  * (`gravar.etiquetas_mais`, que valeria na re-execução); erro na leitura. Um erro do
  * gancho nunca apaga a memória de quem não é celular de teste. Falhar aqui não cala o
  * cliente: o turno segue.
@@ -1164,11 +1192,19 @@ async function apagarMemoriaSePedida(ctx: ContextoDoGancho, resposta: RespostaDo
   }
   try {
     await guardServiceEffect();
-    const { autorizado, apagadas } = await apagarMemoriaDoContato(ctx.pool, ctx.tenantId, ctx.contactId);
+    const { autorizado, apagadas, porque } = await apagarMemoriaDoContato(
+      ctx.pool,
+      ctx.tenantId,
+      ctx.contactId,
+      ctx.channelSessionId,
+    );
     if (!autorizado) {
-      ctx.log.warn('gancho antes do turno: memória não apagada — contato sem a etiqueta de teste', {
-        porque: 'sem_etiqueta',
-      });
+      ctx.log.warn(
+        porque === 'fora_da_lista_de_teste'
+          ? 'gancho antes do turno: memória não apagada — telefone fora da lista de teste do canal'
+          : 'gancho antes do turno: memória não apagada — contato sem a etiqueta de teste',
+        { porque: porque ?? 'sem_etiqueta' },
+      );
       return;
     }
     ctx.log.info('gancho antes do turno: memória do contato apagada (celular de teste)', { notas: apagadas });
