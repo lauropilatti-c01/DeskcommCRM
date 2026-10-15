@@ -170,11 +170,10 @@ describe("(C01) os textos param de prometer um reenvio que a passagem gravada im
 
 describe("(C01) a ligação no fail-safe, pelo código", () => {
   const FONTE = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
-  const frase = FONTE.indexOf("body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO");
-  const desfecho = FONTE.indexOf(
-    "const desfecho = desfechoDaFraseDeEspera(espera, { outcomes, noteRunError, log: runLog });",
-    frase,
-  );
+  const frase = FONTE.indexOf("body: fraseDoFailSafe");
+  // (-c01.15) O desfecho passa por `desfechoDoFailSafe`: com a passagem ligada, é
+  // `desfechoDaFraseDeEspera` como antes (conferido abaixo).
+  const desfecho = FONTE.indexOf("const desfecho = desfechoDoFailSafe(espera);", frase);
   const retorno = FONTE.indexOf("code: 'internal_vocabulary_leak_handoff'", desfecho);
   const passagem = FONTE.slice(desfecho, retorno);
 
@@ -210,6 +209,13 @@ describe("(C01) a ligação no fail-safe, pelo código", () => {
     );
     expect(passagem).toMatch(/\{ log: runLog, noteRunError \},\s*\);/);
     expect(passagem).not.toMatch(/try \{\s*await performHumanHandoff\(/);
+  });
+
+  it("(-c01.15) com a passagem ligada, o desfecho é o de sempre; a passagem só não é gravada com ela desligada", () => {
+    expect(FONTE).toMatch(
+      /const desfechoDoFailSafe = \(espera: BeforeSendResult\): DesfechoDaFraseDeEspera => \{[\s\S]*?return desfechoDaFraseDeEspera\(espera, \{ outcomes, noteRunError, log: runLog \}\);\s*\};/,
+    );
+    expect(passagem).toMatch(/if \(!semPassagem\) await gravarPassagemComNovaTentativa\(/);
   });
 
   it("o que já havia continua: caso aberto antes, etapa de passagem em best-effort, `passadoAoHumano` na closure", () => {

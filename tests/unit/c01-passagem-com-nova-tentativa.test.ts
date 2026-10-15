@@ -112,7 +112,8 @@ describe("(C01) a ligação no fail-safe e os fatos do autor que fazem a nova te
   const PASSAGEM = readFileSync("lib/agent-engine/agent/human-handoff.ts", "utf8");
 
   it("o fail-safe grava a passagem por `gravarPassagemComNovaTentativa`, com o `runLog` e o `noteRunError` do turno — sem `try` solto em volta de `performHumanHandoff`", () => {
-    const frase = TURNO.indexOf("body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO");
+    // (-c01.15) A frase dos fail-safes é `fraseDoFailSafe`: com a passagem ligada, a de espera.
+    const frase = TURNO.indexOf("body: fraseDoFailSafe");
     const retorno = TURNO.indexOf("code: 'internal_vocabulary_leak_handoff'", frase);
     expect(frase).toBeGreaterThan(-1);
     expect(retorno).toBeGreaterThan(frase);
@@ -122,6 +123,11 @@ describe("(C01) a ligação no fail-safe e os fatos do autor que fazem a nova te
     );
     expect(bloco).toMatch(/\{ log: runLog, noteRunError \},\s*\);/);
     expect(bloco).not.toMatch(/try \{\s*await performHumanHandoff\(/);
+    // (-c01.15) Só com a passagem desligada ela não é gravada; com ela ligada, como antes.
+    expect(bloco).toMatch(/if \(!semPassagem\) await gravarPassagemComNovaTentativa\(/);
+    expect(TURNO).toMatch(
+      /const fraseDoFailSafe = semPassagem \? FRASE_DE_VERIFICACAO : \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\);/,
+    );
     // O texto antigo, que afirmava o que não acontece, saiu.
     expect(TURNO).not.toMatch(/o retry refaz tudo/);
     expect(TURNO).not.toMatch(/a passagem ao humano não foi gravada — job re-tentado/);
@@ -158,7 +164,8 @@ describe("(C01) a ligação no fail-safe e os fatos do autor que fazem a nova te
     const turno = TURNO.indexOf("async function executarTurnoDoAgente(");
     expect(turno).toBeGreaterThan(-1);
     const caso = TURNO.indexOf("source: 'guardrail_autofallback'", turno);
-    const frase = TURNO.indexOf("body: deps.knobs.fraseDeEspera ?? FRASE_DE_ESPERA_PADRAO", turno);
+    // (-c01.15) A frase dos fail-safes é `fraseDoFailSafe` (a de espera com a passagem ligada).
+    const frase = TURNO.indexOf("body: fraseDoFailSafe", turno);
     const passagem = TURNO.indexOf("await gravarPassagemComNovaTentativa(", turno);
     expect(caso).toBeGreaterThan(-1);
     expect(frase).toBeGreaterThan(caso);

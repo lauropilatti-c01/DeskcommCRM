@@ -61,7 +61,7 @@ describe("(C01) o `send` exclusivo da frase de espera", () => {
   it("manda SÓ o `finalBody` validado, pelo ponto comum, com a marca da frase fixa — e a identidade do envio como a de qualquer mensagem (a partir da frase configurada)", () => {
     expect(callback()).toMatch(/corposEnviados\.push\(finalBody\);/);
     expect(callback()).toMatch(
-      /return enviarPeloCanal\(\s*\{\s*tenantId,\s*leadId,\s*jobId: liveJob\(\)\.id,\s*jobClaim: claimOfJob\(liveJob\(\)\),\s*agentOperation,\s*conversationId: input\.conversationId,\s*body: finalBody,\s*\.\.\.identidadeDoEnvio\(\s*finalBody,\s*finalBody,\s*comoACadeiaComeca\(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\),\s*\),\s*\},\s*\{ fraseDeEspera: true \},\s*\);/,
+      /return enviarPeloCanal\(\s*\{\s*tenantId,\s*leadId,\s*jobId: liveJob\(\)\.id,\s*jobClaim: claimOfJob\(liveJob\(\)\),\s*agentOperation,\s*conversationId: input\.conversationId,\s*body: finalBody,\s*\.\.\.identidadeDoEnvio\(\s*finalBody,\s*finalBody,\s*comoACadeiaComeca\(fraseDoFailSafe\),\s*\),\s*\},\s*\{ fraseDeEspera: true \},\s*\);/,
     );
   });
 
@@ -82,10 +82,10 @@ describe("(C01) o `send` exclusivo da frase de espera", () => {
   it("a frase de espera passa pela cadeia com `send: enviarFraseDeEspera`, e é o único `send` do bloco do fail-safe", () => {
     const frase = trecho(
       "enviandoFraseDeEspera = true;",
-      "const desfecho = desfechoDaFraseDeEspera(",
+      "const desfecho = desfechoDoFailSafe(",
     );
     expect(frase).toMatch(
-      /const espera = await runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,[\s\S]*?send: enviarFraseDeEspera,\s*\}\);/,
+      /const espera = await runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: fraseDoFailSafe,[\s\S]*?send: enviarFraseDeEspera,\s*\}\);/,
     );
     expect(frase.match(/\bsend:/g)).toHaveLength(1);
   });
@@ -106,7 +106,7 @@ describe("(C01) o `send` exclusivo da frase de espera", () => {
 
   it("`corpoDaCadeia()` é a frase enquanto ela sai: a identidade no ledger parte dela, e a marca é ligada antes de a cadeia rodar", () => {
     expect(sendMessage).toMatch(
-      /const corpoDaCadeia = \(\): string =>\s*enviandoFraseDeEspera \? \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\) : body;/,
+      /const corpoDaCadeia = \(\): string =>\s*enviandoFraseDeEspera \? fraseDoFailSafe : body;/,
     );
     const antes = trecho("fotosDoProduto = [];", "const espera = await runBeforeSend({");
     expect(antes).toMatch(/enviandoFraseDeEspera = true;/);

@@ -593,12 +593,16 @@ describe("(C01) a ligação no código", () => {
   });
 
   it("`send_message`: cada mensagem física declara a identidade a partir do corpo entregue à cadeia (o do modelo, ou a frase de espera); a sonda das bolhas usa a mesma", () => {
+    // (-c01.15) A frase dos fail-safes é `fraseDoFailSafe`: com a passagem ligada, a de espera.
     expect(TURNO).toMatch(
-      /const corpoDaCadeia = \(\): string =>\s*enviandoFraseDeEspera \? \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\) : body;/,
+      /const corpoDaCadeia = \(\): string =>\s*enviandoFraseDeEspera \? fraseDoFailSafe : body;/,
+    );
+    expect(TURNO).toMatch(
+      /const fraseDoFailSafe = semPassagem \? FRASE_DE_VERIFICACAO : \(deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO\);/,
     );
     // A frase de espera é marcada imediatamente antes de sair, e o `body:` dela é o mesmo valor.
     expect(TURNO).toMatch(
-      /enviandoFraseDeEspera = true;\s*const espera = await runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: deps\.knobs\.fraseDeEspera \?\? FRASE_DE_ESPERA_PADRAO,/,
+      /enviandoFraseDeEspera = true;\s*const espera = await runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*body: fraseDoFailSafe,/,
     );
     expect(TURNO).toMatch(
       /body: corpo,\s*\.\.\.\(media \? \{ media \} : \{\}\),\s*\.\.\.identidadeDoEnvio\(corpo, finalBody, comoACadeiaComeca\(corpoDaCadeia\(\)\)\),/,

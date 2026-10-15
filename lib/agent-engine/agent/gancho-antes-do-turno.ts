@@ -119,6 +119,7 @@ import { scheduleCronJob } from '../cron/scheduler';
 import { runBeforeSend } from '../guardrails/before-send';
 import type { DesfechoDoAviso } from './aviso-de-escalacao';
 import { performHumanHandoff } from './human-handoff';
+import { abrirCasoDoPedidoDePessoa } from '@/lib/c01/passagem-desligada';
 import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
 import type { Logger } from '../obs/logger';
 import { claimOfJob } from '../queue/claim';
@@ -702,6 +703,12 @@ export interface ContextoDoGancho {
   etiquetasDoContato: readonly string[];
   channel: ChannelAdapter;
   optedOutThisTurn: boolean;
+  /**
+   * (C01, -c01.15) A versão publicada do agente tem a passagem desligada
+   * (`handoff_tool_enabled === false`): `passar_a_equipe` abre um caso com o motivo do
+   * gancho e NÃO silencia a conversa (`abrirCasoPeloGancho`). Ausente = a passagem de hoje.
+   */
+  passagemDesligada?: boolean;
   lgpd?: LgpdInput;
   disclosureMode?: 'inject' | 'veto';
   now: () => Date;
@@ -949,7 +956,9 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
       });
     }
   }
-  if (resposta.passar_a_equipe === true) {
+  if (resposta.passar_a_equipe === true && ctx.passagemDesligada === true) {
+    await abrirCasoPeloGancho(ctx, resposta);
+  } else if (resposta.passar_a_equipe === true) {
     await passarAEquipe(ctx, resposta, enviadas);
   } else {
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
@@ -1023,6 +1032,47 @@ async function agendarReconsulta(ctx: ContextoDoGancho, segundos: number | null 
 export const MOTIVO_DA_PASSAGEM_PELO_GANCHO =
   'O atendimento de entrada passou a conversa para uma pessoa antes de a IA responder';
 export const TITULO_DA_PASSAGEM_PELO_GANCHO = 'Passado à equipe na entrada — assumir a conversa';
+
+/** (C01, -c01.15) O título do caso aberto pelo `passar_a_equipe` com a passagem desligada. */
+export const TITULO_DO_CASO_PELO_GANCHO = 'O atendimento de entrada pediu uma pessoa';
+
+/**
+ * (C01, -c01.15) `passar_a_equipe` com a passagem desligada: os itens fixos já saíram
+ * (como sempre), e no lugar da passagem abre um caso para a equipe, com o motivo do
+ * gancho no bloqueio e o resumo dele no caso. Sem `force_human`, sem silêncio: o próximo
+ * turno é da IA de novo. `case_already_open` é sucesso. Erro sobe como na passagem: o job
+ * tenta de novo, e os envios voltam `already_sent` pelo ledger.
+ */
+async function abrirCasoPeloGancho(ctx: ContextoDoGancho, resposta: RespostaDoGancho): Promise<void> {
+  const motivo = (resposta.motivo ?? '').trim().slice(0, 60);
+  try {
+    await guardServiceEffect();
+    await abrirCasoDoPedidoDePessoa(
+      ctx.pool,
+      { tenantId: ctx.tenantId, leadId: ctx.contactId, conversationId: ctx.conversationId, agentId: ctx.agentId },
+      {
+        pendentes: [],
+        titulo: TITULO_DO_CASO_PELO_GANCHO,
+        resumo: resposta.resumo ?? MOTIVO_DA_PASSAGEM_PELO_GANCHO,
+        bloqueio:
+          `Aberto automaticamente: o atendimento de entrada pediu uma pessoa${motivo !== '' ? ` (motivo: ${motivo})` : ''}. ` +
+          'A passagem de atendimento está desligada neste agente: a conversa continua com a IA; uma pessoa ' +
+          'precisa verificar e responder.',
+        motivoDaEtapa: 'gancho_sem_passagem',
+        log: ctx.log,
+      },
+    );
+    ctx.log.info('gancho antes do turno: passagem desligada — caso aberto, a conversa segue com a IA', { motivo });
+  } catch (err) {
+    if (!eDeFronteira(err)) {
+      ctx.log.error('gancho antes do turno: caso da passagem desligada não aberto — o job tenta de novo', {
+        erro: err instanceof Error ? err.name : 'desconhecido',
+        motivo,
+      });
+    }
+    throw err;
+  }
+}
 
 async function passarAEquipe(ctx: ContextoDoGancho, resposta: RespostaDoGancho, enviadas: number): Promise<void> {
   const motivo = (resposta.motivo ?? '').trim().slice(0, 60);
