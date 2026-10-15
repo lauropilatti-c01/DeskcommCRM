@@ -77,6 +77,8 @@ import {
   type TravasArmadas,
 } from '../guardrails/travas-de-envio';
 import { lerLinksJaEnviados, lerTextosJaEnviados, linksNoTexto, normalizarLink } from '../guardrails/link-permitido';
+// (C01, -c01.14) Consulte antes de enviar: o que o modelo leu e o que o contato já teve.
+import { consultaJaFeitaComOContato, leuConsultaDaTabela } from '../guardrails/consulta-antes-de-enviar';
 import {
   linksEValoresDosTextos,
   resultadoComErro,
@@ -546,6 +548,8 @@ export const TRAVAS_DE_CONTEUDO_COM_FAIL_SAFE: Readonly<Record<string, string>> 
   valor_em_dinheiro: 'valor em dinheiro na conversa',
   // (C01, -c01.7) Ver `link-e-valor-de-ferramenta.ts`.
   link_ou_valor_sem_consulta: 'link ou valor que não veio de consulta',
+  // (C01, -c01.14) Ver `marcador-entre-colchetes.ts`.
+  marcador_entre_colchetes: 'marcador entre colchetes no lugar do conteúdo',
 };
 
 /** (C01, -c01.3) O limite das travas de conteúdo: o mesmo da de vocabulário interno. */
@@ -561,6 +565,8 @@ export const TRAVAS_DE_ESTILO: Readonly<Record<string, keyof TravasArmadas>> = {
   texto_longo: 'textoLongo',
   // (C01, -c01.3, item 3c) Ver `uma-pergunta.ts`.
   uma_pergunta: 'umaPergunta',
+  // (C01, -c01.14) Ver `consulta-antes-de-enviar.ts`.
+  consulta_antes_de_enviar: 'consultaAntesDeEnviar',
 };
 
 /** (C01, -c01.3) O limite das travas de estilo: no 2º veto a trava se desarma. */
@@ -3798,6 +3804,35 @@ async function executarTurnoDoAgente(
   if (travasDaOrg.leituraFalhou) {
     runLog.warn('travas de envio: leitura de organizations.settings falhou ou JSON inválido — todas desligadas');
   }
+  // (C01, -c01.14) Consulte antes de enviar: só no agente ligado. As tabelas cobradas neste
+  // turno: as de `todo_turno`, e as de `uma_vez_por_contato` que o contato ainda não teve
+  // num turno anterior (lido UMA vez, aqui, antes de qualquer ferramenta deste turno).
+  // Leitura que falha = aquela tabela fica sem cobrança no turno, com o aviso: a trava é de
+  // estilo, e a resposta não pode esperar por ela.
+  const consultaAntes = travasDaOrg.travas.consultaAntesDeEnviar;
+  const tabelasCobradas: string[] = [];
+  if (consultaAntes !== null && agentConfig !== null && leadId && consultaAntes.agentes.includes(agentConfig.agentId)) {
+    for (const { tabela, cobrar } of consultaAntes.tabelas) {
+      if (cobrar === 'todo_turno') {
+        tabelasCobradas.push(tabela);
+        continue;
+      }
+      try {
+        const feita = await consultaJaFeitaComOContato(pool, {
+          organizationId: tenantId,
+          contactId: leadId,
+          jobIdAtual: liveJob().id,
+          tabela,
+        });
+        if (!feita) tabelasCobradas.push(tabela);
+      } catch (err) {
+        runLog.warn('trava consulta_antes_de_enviar: leitura das consultas do contato falhou — tabela sem cobrança no turno', {
+          tabela,
+          error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+        });
+      }
+    }
+  }
   // (C01, -c01.3, item 3a) Os links já mandados nesta conversa, lidos uma vez, só com a
   // trava de link ligada. Leitura que falha (`null`) desarma a trava no turno, com aviso.
   const linksJaEnviados = travasDaOrg.travas.linkPermitido
@@ -3852,9 +3887,15 @@ async function executarTurnoDoAgente(
   /**
    * (C01, -c01.3) O que o `send_message` arma em cada tentativa: as travas ligadas na
    * organização, com o que cada uma precisa saber do turno AGORA (quantas mensagens
-   * ainda cabem), menos as de estilo já desarmadas no turno.
+   * ainda cabem), menos as de estilo já desarmadas no turno. (C01, -c01.14) `leitura`: as
+   * tabelas cobradas cujo resultado NÃO estava no que o modelo leu ao escrever a mensagem
+   * desta tentativa (sem ela, nada falta).
    */
-  const travasArmadas = (): TravasArmadas => ({
+  const travasArmadas = (leitura?: { consultasFaltando: readonly string[] }): TravasArmadas => ({
+    ...(tabelasCobradas.length > 0 && !estiloDesarmado('consulta_antes_de_enviar')
+      ? { consultaAntesDeEnviar: { faltando: leitura?.consultasFaltando ?? [] } }
+      : {}),
+    ...(travasDaOrg.travas.marcadorEntreColchetes ? { marcadorEntreColchetes: true as const } : {}),
     ...(travasDaOrg.travas.linkEValorDeFerramenta ? { linkEValorDeFerramenta: linkEValorLiberado() } : {}),
     ...(travasDaOrg.travas.linkPermitido && linksJaEnviados !== null
       ? {
@@ -4458,9 +4499,13 @@ async function executarTurnoDoAgente(
     }),
     send_message: tool({
       ...AGENT_TOOL_DEFS.send_message,
-      execute: async ({ body, produto_codigo }) => {
+      execute: async ({ body, produto_codigo }, opcoes) => {
         // (C01, -c01.8) Uma tentativa nova substitui a que o estilo vetou.
         envioVetadoPorEstilo = null;
+        // (C01, -c01.14) As tabelas cobradas cujo resultado NÃO estava no que o modelo leu
+        // ao escrever ESTA mensagem. (`opcoes.messages` abre o passo, sem o passo desta
+        // chamada: a consulta pedida junto com o envio não conta.)
+        const consultasFaltando = tabelasCobradas.filter((tabela) => !leuConsultaDaTabela(opcoes?.messages, tabela));
         // CORPO VAZIO NÃO SAI. Medido ao vivo (2026-09-19): o `gpt-4o-mini`
         // chamou `send_message` várias vezes com corpo que virou vazio e o
         // WhatsApp do cliente recebeu bolhas em branco. O schema garante
@@ -4653,7 +4698,7 @@ async function executarTurnoDoAgente(
             // (C01, -c01.3) As travas novas ligadas na organização (só aqui: texto do
             // modelo), lidas a cada execução da cadeia. A frase de espera do fail-safe
             // abaixo herda estes args, mas é texto do sistema: sai sem elas.
-            travasDeEnvio: (): TravasArmadas => (enviandoFraseDeEspera ? {} : travasArmadas()),
+            travasDeEnvio: (): TravasArmadas => (enviandoFraseDeEspera ? {} : travasArmadas({ consultasFaltando })),
             // Mesmo padrão do vocabulário interno: só o `send_message` arma — é o único
             // corpo escrito pelo modelo. `active` é ter QUALQUER ferramenta de agenda:
             // um agente que só CONSULTA promete "vou verificar" igual, e enquanto a

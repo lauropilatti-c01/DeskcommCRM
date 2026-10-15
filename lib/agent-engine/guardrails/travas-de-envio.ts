@@ -50,10 +50,22 @@
  * - `valor_em_dinheiro.texto_afirmavel`: as colunas da linha afirmável da base externa e
  *   os assuntos que liberam valor, uma lista de PERMITIDOS (ver `texto-afirmavel.ts`);
  *   cada chave ausente vale o padrão `COLUNAS_PADRAO_DO_TEXTO_AFIRMAVEL`.
+ *
+ * (C01, -c01.14, CRM-097 da C01) Duas travas novas:
+ *
+ *   { "travas_de_envio": {
+ *       "consulta_antes_de_enviar": { "agentes": ["<id do agente>"],
+ *         "tabelas": [{ "tabela": "<tabela>", "cobrar": "todo_turno" | "uma_vez_por_contato" }] },
+ *       "marcador_entre_colchetes": { "ligada": true } } }
+ *
+ * - `consulta_antes_de_enviar`: liga POR AGENTE (ver `consulta-antes-de-enviar.ts`). Valor
+ *   com a forma errada desliga só ela, com o aviso de leitura: as outras seguem valendo.
+ * - `marcador_entre_colchetes`: ver `marcador-entre-colchetes.ts`.
  */
 import { z } from 'zod';
 
 import type { Queryable } from '../queue/queue';
+import { interpretarConsultaAntesDeEnviar, type ConsultaAntesDeEnviarDaOrg } from './consulta-antes-de-enviar';
 import { chaveDoInterruptor } from './interruptores-de-trava';
 import { INTERRUPTOR_DA_TRAVA, type LinkEValorArmado } from './link-e-valor-de-ferramenta';
 import { normalizarDominio, normalizarLink, type LinkPermitidoArmado } from './link-permitido';
@@ -85,6 +97,9 @@ const travasDeEnvioSchema = z
       })
       .optional(),
     uma_pergunta: travaSimples.optional(),
+    // (C01, -c01.14) A `consulta_antes_de_enviar` fica fora do schema: é lida à parte, e o
+    // valor errado dela não desliga as outras (`interpretarConsultaAntesDeEnviar`).
+    marcador_entre_colchetes: travaSimples.optional(),
     // (C01, -c01.7) Só as URLs fixas: o interruptor fica em `org_guardrail_layers`.
     link_e_valor_de_ferramenta: z.object({ urls: z.array(z.string()).optional() }).passthrough().optional(),
   })
@@ -106,6 +121,10 @@ export interface TravasDeEnvioDaOrg {
   linkEValorDeFerramenta: boolean;
   /** As URLs que saem sempre com a trava de link e valor, já normalizadas. */
   urlsFixas: readonly string[];
+  /** (C01, -c01.14) Consulte antes de enviar: os agentes e a tabela; `null` = desligada. */
+  consultaAntesDeEnviar: ConsultaAntesDeEnviarDaOrg | null;
+  /** (C01, -c01.14) Nenhum marcador entre colchetes na mensagem. */
+  marcadorEntreColchetes: boolean;
 }
 
 export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
@@ -118,6 +137,8 @@ export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
   umaPergunta: false,
   linkEValorDeFerramenta: false,
   urlsFixas: [],
+  consultaAntesDeEnviar: null,
+  marcadorEntreColchetes: false,
 };
 
 /**
@@ -144,6 +165,14 @@ export interface TravasArmadas {
   umaPergunta?: true;
   /** (C01, -c01.7) Link e valor de ferramenta: os links e os valores liberados neste momento do turno. */
   linkEValorDeFerramenta?: LinkEValorArmado;
+  /**
+   * (C01, -c01.14) Consulte antes de enviar: as tabelas cobradas neste turno cujo resultado
+   * NÃO estava no que o modelo leu ao escrever ESTA mensagem (vazio = passa). Só arma no
+   * agente ligado (some no turno ao chegar no limite de vetos).
+   */
+  consultaAntesDeEnviar?: { faltando: readonly string[] };
+  /** (C01, -c01.14) Nenhum marcador entre colchetes: só liga ou desliga. */
+  marcadorEntreColchetes?: true;
 }
 
 /**
@@ -186,6 +215,7 @@ export function interpretarTravasDeEnvio(
   if (valor === null || valor === undefined) return { travas: { ...TRAVAS_DESLIGADAS, ...soATela }, invalida: false };
   const lido = travasDeEnvioSchema.safeParse(valor);
   if (!lido.success) return { travas: { ...TRAVAS_DESLIGADAS, ...soATela }, invalida: true };
+  const consulta = interpretarConsultaAntesDeEnviar((valor as Record<string, unknown>).consulta_antes_de_enviar);
   return {
     travas: {
       textoLongo: lido.data.texto_longo?.ligada ?? false,
@@ -201,8 +231,10 @@ export function interpretarTravasDeEnvio(
       urlsFixas: (lido.data.link_e_valor_de_ferramenta?.urls ?? [])
         .map((u) => normalizarLink(u.trim()))
         .filter((u) => u.length > 0),
+      consultaAntesDeEnviar: consulta.consulta,
+      marcadorEntreColchetes: lido.data.marcador_entre_colchetes?.ligada ?? false,
     },
-    invalida: false,
+    invalida: consulta.invalida,
   };
 }
 

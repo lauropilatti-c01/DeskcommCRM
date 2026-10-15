@@ -303,7 +303,8 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
   it("só o `send_message` arma, e a frase de espera (texto do sistema) sai sem as travas", () => {
     expect(TURNO.match(/travasDeEnvio:/g)).toHaveLength(1);
     expect(sendMessage).toMatch(
-      /travasDeEnvio: \(\): TravasArmadas => \(enviandoFraseDeEspera \? \{\} : travasArmadas\(\)\),/,
+      // (-c01.14) `travasArmadas` recebe as tabelas que o modelo ainda não leu ("consulte antes").
+      /travasDeEnvio: \(\): TravasArmadas => \(enviandoFraseDeEspera \? \{\} : travasArmadas\((?:\{ consultasFaltando \})?\)\),/,
     );
   });
 
