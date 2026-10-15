@@ -4094,6 +4094,9 @@ async function executarTurnoDoAgente(
               { tenantId, leadId: leadId || null, jobId: job?.id },
               {
                 candidate: texto,
+                // (C01, -c01.15) A lista dos textos aprovados lidos no turno: a paráfrase de
+                // um benefício dela não é promessa (`blocoDosTextosAprovados`).
+                aprovados: [...textosAfirmaveisDaPromessa],
                 ...argsAux(deps.knobs.promiseSemantic?.model),
               },
               { ...(deps.registry !== undefined ? { registry: deps.registry } : {}), log: runLog },
