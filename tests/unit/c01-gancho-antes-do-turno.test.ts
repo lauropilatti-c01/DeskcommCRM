@@ -56,6 +56,8 @@ const PEDIDO: PedidoDoGancho = {
   agente_id: null,
   conversa: { id: CONV, canal: "meta", pessoa_atendendo: false, ultima_entrada_em: null },
   celular_de_teste: false,
+  caso_aberto: false,
+  caso_aberto_lido: true,
   lead: { id: null, etapa: null, campos: {}, etiquetas: [] },
   mensagens: [],
 };
@@ -177,6 +179,7 @@ describe("o pedido não leva dado pessoal", () => {
             ],
           };
         if (sql.includes("from crm_pipelines")) return { rows: [{ id: "p1" }] };
+        if (sql.includes("from agent_cases")) return { rows: [{ aberto: true }] };
         if (sql.includes("as em") && sql.includes("limit $3"))
           return {
             rows: [
@@ -213,6 +216,8 @@ describe("o pedido não leva dado pessoal", () => {
       agente_id: "agente-1",
       conversa: { id: CONV, canal: "meta", pessoa_atendendo: true, ultima_entrada_em: "2026-07-30T14:55:00.000Z" },
       celular_de_teste: false,
+      caso_aberto: true,
+      caso_aberto_lido: true,
       lead: { id: "card-1", etapa: "novo", campos: { interesse: "plano-b" }, etiquetas: ["etiqueta-antiga", "cliente"] },
       mensagens: [
         { direcao: "entrada", texto: "[image]", em: "2026-07-30T14:55:00.000Z", interativo: null, status: "delivered" },
