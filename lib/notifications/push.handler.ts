@@ -7,6 +7,13 @@ import { vapidPronto } from "./vapid";
 import { pushDoAvisoDaCentral } from "./push-dos-avisos";
 import type { PushPayload } from "./push_payload";
 import { rotuloDoContato, SEM_NOME } from "@/lib/contacts/rotulo-do-contato";
+import {
+  casoEsperandoGente,
+  modoDoPushDeMensagem,
+  pushDoCasoAtribuido,
+  responsaveisDaConversa,
+  type AdminDoPush,
+} from "./destino-do-push";
 
 export const WEB_PUSH_INBOUND_KEY = "web-push-inbound.v1";
 
@@ -18,8 +25,32 @@ async function handleInbound(row: EventRow): Promise<HandlerResult> {
   const type = typeof row.payload.type === "string" ? row.payload.type : "text";
   const body = type === "text" ? preview : "Mídia";
 
-  const marca = await marcaDaSaida(row.organization_id);
   const contactId = typeof row.payload.contact_id === "string" ? row.payload.contact_id : null;
+
+  // (C01, -c01.16) Só quem responde pela conversa recebe; sem responsável, a IA
+  // está atendendo e ninguém é tocado. Ver `./destino-do-push.ts`.
+  let destinatarios: string[] | null = null;
+  if (modoDoPushDeMensagem() === "responsavel") {
+    destinatarios = await responsaveisDaConversa(
+      createAdminClient() as unknown as AdminDoPush,
+      row.organization_id,
+      conversationId,
+      contactId,
+    );
+    if (destinatarios === null) {
+      return {
+        consumer_key: WEB_PUSH_INBOUND_KEY,
+        status: "retry",
+        retry_at: new Date(Date.now() + 60_000).toISOString(),
+        detail: "responsavel_ilegivel",
+      };
+    }
+    if (destinatarios.length === 0) {
+      return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "skipped", detail: "sem_responsavel" };
+    }
+  }
+
+  const marca = await marcaDaSaida(row.organization_id);
   let contactName: string | null = null;
   let icon: string | null = null;
   if (contactId) {
@@ -64,6 +95,13 @@ async function handleInbound(row: EventRow): Promise<HandlerResult> {
     contactName,
     icon,
   });
+  if (destinatarios !== null) {
+    let enviados = 0;
+    for (const userId of destinatarios) {
+      enviados += (await enviarPushAoUsuario(row.organization_id, userId, payload)).sent;
+    }
+    return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "ok", detail: `sent:${enviados}` };
+  }
   const { sent } = await enviarPushDaOrg(row.organization_id, payload);
   return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "ok", detail: `sent:${sent}` };
 }
@@ -191,6 +229,16 @@ export const webPushInboundHandler: EventHandler = {
 
     if (row.event_type === "lead.assigned") {
       const toUserId = typeof row.payload.to_user_id === "string" ? row.payload.to_user_id : lead.ownerUserId;
+      // (C01, -c01.16) Negócio atribuído com um caso esperando gente: o push diz
+      // que é um caso e abre o caso. Leitura que falha cai no aviso de sempre.
+      if (toUserId) {
+        const caso = await casoEsperandoGente(
+          createAdminClient() as unknown as AdminDoPush,
+          row.organization_id,
+          leadId,
+        );
+        if (caso) return enviarParaUsuario(row.organization_id, toUserId, pushDoCasoAtribuido(caso));
+      }
       return enviarParaUsuario(row.organization_id, toUserId, {
         title: "Lead atribuído a você",
         body: truncar(lead.title),

@@ -1,0 +1,168 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PushPayload } from "./push_payload";
+
+// (C01, -c01.16) Quem recebe o push — `./destino-do-push.ts`.
+
+const estado = { vapidPronto: true, modo: "" };
+vi.mock("@/lib/notifications/vapid", () => ({ vapidPronto: () => estado.vapidPronto }));
+vi.mock("@/lib/env", () => ({
+  env: new Proxy({}, { get: (_t, k) => (k === "PUSH_DE_MENSAGEM" ? estado.modo : "") }),
+}));
+vi.mock("@/lib/branding/saida", () => ({ marcaDaSaida: async () => ({ nome: "Marca" }) }));
+
+const paraOrg = vi.fn(async (_org: string, _p: PushPayload) => ({ sent: 3, gone: 0 }));
+const paraUsuario = vi.fn(async (_org: string, _u: string, _p: PushPayload) => ({ sent: 1, gone: 0 }));
+vi.mock("./web_push", () => ({
+  enviarPushDaOrg: (o: string, p: PushPayload) => paraOrg(o, p),
+  enviarPushAoUsuario: (o: string, u: string, p: PushPayload) => paraUsuario(o, u, p),
+}));
+
+/** Banco falso: cada tabela devolve as linhas que o teste puser, filtradas pelos `eq`. */
+type Linha = Record<string, unknown>;
+const tabelas: Record<string, Linha[] | Error> = {};
+function consulta(tabela: string) {
+  const filtros: [string, unknown][] = [];
+  const emLista: [string, readonly unknown[]][] = [];
+  const resolver = () => {
+    const t = tabelas[tabela];
+    if (t instanceof Error) return { data: null, error: { message: t.message } };
+    const linhas = (t ?? []).filter(
+      (l) => filtros.every(([c, v]) => l[c] === v) && emLista.every(([c, vs]) => vs.includes(l[c])),
+    );
+    return { data: linhas, error: null };
+  };
+  const q = {
+    select: () => q,
+    eq: (c: string, v: unknown) => (filtros.push([c, v]), q),
+    in: (c: string, v: readonly unknown[]) => (emLista.push([c, v]), q),
+    order: () => q,
+    limit: () => q,
+    maybeSingle: async () => {
+      const r = resolver();
+      return { data: r.data ? r.data[0] ?? null : null, error: r.error };
+    },
+    then: (ok: (v: unknown) => unknown, erro?: (e: unknown) => unknown) => Promise.resolve(resolver()).then(ok, erro),
+  };
+  return q;
+}
+const admin = { from: (t: string) => consulta(t), storage: { from: () => ({ createSignedUrl: async () => ({ data: null }) }) } };
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => admin }));
+
+import { casoEsperandoGente, modoDoPushDeMensagem, responsaveisDaConversa } from "./destino-do-push";
+import { webPushInboundHandler } from "./push.handler";
+
+const ORG = "org1";
+function evento(event_type: string, payload: Record<string, unknown>) {
+  return { id: "e1", organization_id: ORG, event_type, entity_kind: "x", entity_id: null, payload, metadata: {}, consumed_by: [], attempts: 0 };
+}
+
+beforeEach(() => {
+  estado.vapidPronto = true;
+  estado.modo = "";
+  paraOrg.mockClear();
+  paraUsuario.mockClear();
+  for (const k of Object.keys(tabelas)) delete tabelas[k];
+});
+
+describe("modoDoPushDeMensagem", () => {
+  it("vazio, responsavel e valor desconhecido = só o responsável; equipe = todos", () => {
+    expect(modoDoPushDeMensagem("")).toBe("responsavel");
+    expect(modoDoPushDeMensagem(undefined)).toBe("responsavel");
+    expect(modoDoPushDeMensagem("responsavel")).toBe("responsavel");
+    expect(modoDoPushDeMensagem("qualquer")).toBe("responsavel");
+    expect(modoDoPushDeMensagem(" EQUIPE ")).toBe("equipe");
+  });
+});
+
+describe("responsaveisDaConversa", () => {
+  it("junta a pessoa da conversa e os donos humanos dos negócios abertos, sem repetir", async () => {
+    tabelas.conversations = [{ id: "c1", organization_id: ORG, assigned_to_user_id: "u1", contact_id: "k1" }];
+    tabelas.crm_leads = [
+      { organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "user", owner_user_id: "u2" },
+      { organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "user", owner_user_id: "u1" },
+      { organization_id: ORG, contact_id: "k1", status: "won", owner_kind: "user", owner_user_id: "u3" },
+      { organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "ai", owner_user_id: null },
+      { organization_id: "outra", contact_id: "k1", status: "open", owner_kind: "user", owner_user_id: "u9" },
+    ];
+    expect((await responsaveisDaConversa(admin, ORG, "c1", null))?.sort()).toEqual(["u1", "u2"]);
+  });
+  it("sem ninguém atribuído devolve lista vazia; leitura que falha devolve null", async () => {
+    tabelas.conversations = [{ id: "c1", organization_id: ORG, assigned_to_user_id: null, contact_id: "k1" }];
+    tabelas.crm_leads = [{ organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "ai", owner_user_id: null }];
+    expect(await responsaveisDaConversa(admin, ORG, "c1", "k1")).toEqual([]);
+    tabelas.crm_leads = new Error("caiu");
+    expect(await responsaveisDaConversa(admin, ORG, "c1", "k1")).toBeNull();
+  });
+});
+
+describe("casoEsperandoGente", () => {
+  it("acha o caso que espera gente; ignora o que espera o cliente; erro = undefined", async () => {
+    tabelas.agent_cases = [
+      { id: "caso-l", organization_id: ORG, lead_id: "L1", status: "awaiting_lead" },
+      { id: "caso-h", organization_id: ORG, lead_id: "L1", status: "awaiting_human" },
+    ];
+    expect(await casoEsperandoGente(admin, ORG, "L1")).toBe("caso-h");
+    expect(await casoEsperandoGente(admin, ORG, "L2")).toBeNull();
+    tabelas.agent_cases = new Error("caiu");
+    expect(await casoEsperandoGente(admin, ORG, "L1")).toBeUndefined();
+  });
+});
+
+describe("push de mensagem de cliente (message.received)", () => {
+  const msg = () => evento("message.received", { conversation_id: "c1", contact_id: "k1", body_preview: "oi", type: "text" });
+
+  it("IA atendendo, sem responsável: ninguém é tocado (antes: a equipe toda)", async () => {
+    tabelas.conversations = [{ id: "c1", organization_id: ORG, assigned_to_user_id: null, contact_id: "k1" }];
+    const r = await webPushInboundHandler.handle(msg());
+    expect(r).toMatchObject({ status: "skipped", detail: "sem_responsavel" });
+    expect(paraOrg).not.toHaveBeenCalled();
+    expect(paraUsuario).not.toHaveBeenCalled();
+  });
+
+  it("com responsável: só ela recebe, nunca a organização", async () => {
+    tabelas.conversations = [{ id: "c1", organization_id: ORG, assigned_to_user_id: null, contact_id: "k1" }];
+    tabelas.crm_leads = [{ organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "user", owner_user_id: "priscila" }];
+    const r = await webPushInboundHandler.handle(msg());
+    expect(r).toMatchObject({ status: "ok", detail: "sent:1" });
+    expect(paraUsuario).toHaveBeenCalledTimes(1);
+    expect(paraUsuario.mock.calls[0][1]).toBe("priscila");
+    expect(paraOrg).not.toHaveBeenCalled();
+  });
+
+  it("leitura do responsável falha: tenta de novo, não manda para todos", async () => {
+    tabelas.conversations = new Error("caiu");
+    const r = await webPushInboundHandler.handle(msg());
+    expect(r.status).toBe("retry");
+    expect(paraOrg).not.toHaveBeenCalled();
+  });
+
+  it("PUSH_DE_MENSAGEM=equipe devolve o comportamento do autor", async () => {
+    estado.modo = "equipe";
+    const r = await webPushInboundHandler.handle(msg());
+    expect(r.status).toBe("ok");
+    expect(paraOrg).toHaveBeenCalledTimes(1);
+    expect(paraUsuario).not.toHaveBeenCalled();
+  });
+});
+
+describe("negócio atribuído (lead.assigned)", () => {
+  const atribuido = () => evento("lead.assigned", { lead_id: "L1", to_user_id: "maria" });
+
+  it("com caso esperando gente: 'Caso para você', abrindo o caso", async () => {
+    tabelas.crm_leads = [{ id: "L1", organization_id: ORG, title: "Fulano", owner_user_id: "maria", pipeline_id: "p1" }];
+    tabelas.agent_cases = [{ id: "caso-1", organization_id: ORG, lead_id: "L1", status: "awaiting_human" }];
+    await webPushInboundHandler.handle(atribuido());
+    expect(paraUsuario).toHaveBeenCalledTimes(1);
+    const [, para, p] = paraUsuario.mock.calls[0];
+    expect(para).toBe("maria");
+    expect(p.title).toBe("Caso para você");
+    expect(p.href).toBe("/app/ai/cases?caso=caso-1");
+    expect(JSON.stringify(p)).not.toContain("Fulano");
+  });
+
+  it("sem caso: o aviso de sempre ('Lead atribuído a você')", async () => {
+    tabelas.crm_leads = [{ id: "L1", organization_id: ORG, title: "Fulano", owner_user_id: "maria", pipeline_id: "p1" }];
+    await webPushInboundHandler.handle(atribuido());
+    expect(paraUsuario.mock.calls[0][2].title).toBe("Lead atribuído a você");
+  });
+});
