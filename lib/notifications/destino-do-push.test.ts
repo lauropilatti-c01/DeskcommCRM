@@ -48,7 +48,7 @@ function consulta(tabela: string) {
 const admin = { from: (t: string) => consulta(t), storage: { from: () => ({ createSignedUrl: async () => ({ data: null }) }) } };
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => admin }));
 
-import { casoEsperandoGente, modoDoPushDeMensagem, responsaveisDaConversa } from "./destino-do-push";
+import { casoEsperandoGente, modoDoPushDeMensagem, responsaveisDaConversa, type AdminDoPush } from "./destino-do-push";
 import { webPushInboundHandler } from "./push.handler";
 
 const ORG = "org1";
@@ -84,14 +84,14 @@ describe("responsaveisDaConversa", () => {
       { organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "ai", owner_user_id: null },
       { organization_id: "outra", contact_id: "k1", status: "open", owner_kind: "user", owner_user_id: "u9" },
     ];
-    expect((await responsaveisDaConversa(admin, ORG, "c1", null))?.sort()).toEqual(["u1", "u2"]);
+    expect((await responsaveisDaConversa(admin as unknown as AdminDoPush, ORG, "c1", null))?.sort()).toEqual(["u1", "u2"]);
   });
   it("sem ninguém atribuído devolve lista vazia; leitura que falha devolve null", async () => {
     tabelas.conversations = [{ id: "c1", organization_id: ORG, assigned_to_user_id: null, contact_id: "k1" }];
     tabelas.crm_leads = [{ organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "ai", owner_user_id: null }];
-    expect(await responsaveisDaConversa(admin, ORG, "c1", "k1")).toEqual([]);
+    expect(await responsaveisDaConversa(admin as unknown as AdminDoPush, ORG, "c1", "k1")).toEqual([]);
     tabelas.crm_leads = new Error("caiu");
-    expect(await responsaveisDaConversa(admin, ORG, "c1", "k1")).toBeNull();
+    expect(await responsaveisDaConversa(admin as unknown as AdminDoPush, ORG, "c1", "k1")).toBeNull();
   });
 });
 
@@ -101,10 +101,10 @@ describe("casoEsperandoGente", () => {
       { id: "caso-l", organization_id: ORG, lead_id: "L1", status: "awaiting_lead" },
       { id: "caso-h", organization_id: ORG, lead_id: "L1", status: "awaiting_human" },
     ];
-    expect(await casoEsperandoGente(admin, ORG, "L1")).toBe("caso-h");
-    expect(await casoEsperandoGente(admin, ORG, "L2")).toBeNull();
+    expect(await casoEsperandoGente(admin as unknown as AdminDoPush, ORG, "L1")).toBe("caso-h");
+    expect(await casoEsperandoGente(admin as unknown as AdminDoPush, ORG, "L2")).toBeNull();
     tabelas.agent_cases = new Error("caiu");
-    expect(await casoEsperandoGente(admin, ORG, "L1")).toBeUndefined();
+    expect(await casoEsperandoGente(admin as unknown as AdminDoPush, ORG, "L1")).toBeUndefined();
   });
 });
 
@@ -125,7 +125,7 @@ describe("push de mensagem de cliente (message.received)", () => {
     const r = await webPushInboundHandler.handle(msg());
     expect(r).toMatchObject({ status: "ok", detail: "sent:1" });
     expect(paraUsuario).toHaveBeenCalledTimes(1);
-    expect(paraUsuario.mock.calls[0][1]).toBe("priscila");
+    expect(paraUsuario.mock.calls[0]![1]).toBe("priscila");
     expect(paraOrg).not.toHaveBeenCalled();
   });
 
@@ -153,7 +153,7 @@ describe("negócio atribuído (lead.assigned)", () => {
     tabelas.agent_cases = [{ id: "caso-1", organization_id: ORG, lead_id: "L1", status: "awaiting_human" }];
     await webPushInboundHandler.handle(atribuido());
     expect(paraUsuario).toHaveBeenCalledTimes(1);
-    const [, para, p] = paraUsuario.mock.calls[0];
+    const [, para, p] = paraUsuario.mock.calls[0]!;
     expect(para).toBe("maria");
     expect(p.title).toBe("Caso para você");
     expect(p.href).toBe("/app/ai/cases?caso=caso-1");
@@ -163,6 +163,6 @@ describe("negócio atribuído (lead.assigned)", () => {
   it("sem caso: o aviso de sempre ('Lead atribuído a você')", async () => {
     tabelas.crm_leads = [{ id: "L1", organization_id: ORG, title: "Fulano", owner_user_id: "maria", pipeline_id: "p1" }];
     await webPushInboundHandler.handle(atribuido());
-    expect(paraUsuario.mock.calls[0][2].title).toBe("Lead atribuído a você");
+    expect(paraUsuario.mock.calls[0]![2].title).toBe("Lead atribuído a você");
   });
 });

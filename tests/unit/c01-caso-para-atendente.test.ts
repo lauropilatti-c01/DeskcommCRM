@@ -13,14 +13,15 @@ vi.mock("@/lib/notifications/web_push", () => ({
 }));
 
 type Linha = Record<string, unknown>;
-let db: Record<string, Linha[]> = {};
+type Banco = { agent_cases: Linha[]; crm_leads: Linha[]; user_organizations: Linha[] };
+let db: Banco = { agent_cases: [], crm_leads: [], user_organizations: [] };
 function consulta(tabela: string) {
   const conds: ((l: Linha) => boolean)[] = [];
   let patch: Linha | null = null;
   let ordem: { col: string; asc: boolean } | null = null;
   let limite = Infinity;
   const linhas = () => {
-    let ls = (db[tabela] ?? []).filter((l) => conds.every((c) => c(l)));
+    let ls = ((db as Record<string, Linha[]>)[tabela] ?? []).filter((l) => conds.every((c) => c(l)));
     if (ordem) {
       const { col, asc } = ordem;
       ls = [...ls].sort((a, b) => (String(a[col]) < String(b[col]) ? (asc ? -1 : 1) : asc ? 1 : -1));
@@ -89,7 +90,7 @@ describe("casoParaAtendenteHandler", () => {
   it("negócio sem dono vai para uma atendente (nunca para o admin) e vira dono humano", async () => {
     const r = await casoParaAtendenteHandler.handle(evento());
     expect(r).toMatchObject({ status: "ok", detail: "atribuido" });
-    const l = db.crm_leads[0];
+    const l = db.crm_leads[0]!;
     expect(["maria", "priscila"]).toContain(l.owner_user_id);
     expect(l.owner_kind).toBe("user");
     expect(l.assigned_at).toBeTruthy();
@@ -98,48 +99,48 @@ describe("casoParaAtendenteHandler", () => {
 
   it("alterna: a segunda vai para a outra (a primeira já tem um caso esperando)", async () => {
     await casoParaAtendenteHandler.handle(evento());
-    const primeira = db.crm_leads[0].owner_user_id;
+    const primeira = db.crm_leads[0]!.owner_user_id;
     db.agent_cases.push({ id: "caso-2", organization_id: ORG, status: "awaiting_human", lead_id: "L2" });
     db.crm_leads.push({ id: "L2", organization_id: ORG, owner_user_id: null, owner_kind: null, assigned_at: null });
     await casoParaAtendenteHandler.handle({ ...evento("caso-2"), payload: { case_id: "caso-2", lead_id: "L2" } });
-    expect(db.crm_leads[1].owner_user_id).not.toBe(primeira);
+    expect(db.crm_leads[1]!.owner_user_id).not.toBe(primeira);
   });
 
   it("negócio que já tem uma pessoa: fica com ela e ela recebe 'Caso para você'", async () => {
-    db.crm_leads[0].owner_user_id = "maria";
-    db.crm_leads[0].owner_kind = "user";
+    db.crm_leads[0]!.owner_user_id = "maria";
+    db.crm_leads[0]!.owner_kind = "user";
     const r = await casoParaAtendenteHandler.handle(evento());
     expect(r.status).toBe("ok");
-    expect(db.crm_leads[0].owner_user_id).toBe("maria");
+    expect(db.crm_leads[0]!.owner_user_id).toBe("maria");
     expect(push).toHaveBeenCalledTimes(1);
-    expect(push.mock.calls[0][1]).toBe("maria");
-    expect(push.mock.calls[0][2].title).toBe("Caso para você");
-    expect(push.mock.calls[0][2].href).toBe("/app/ai/cases?caso=caso-1");
+    expect(push.mock.calls[0]![1]).toBe("maria");
+    expect(push.mock.calls[0]![2].title).toBe("Caso para você");
+    expect(push.mock.calls[0]![2].href).toBe("/app/ai/cases?caso=caso-1");
   });
 
   it("sem atendente (só admin, convite pendente ou revogada): nada muda", async () => {
     db.user_organizations = [membro("lauro", "admin"), membro("p", "agent", { accepted_at: null }), membro("m", "agent", { revoked_at: "2026-10-01" })];
     const r = await casoParaAtendenteHandler.handle(evento());
     expect(r).toMatchObject({ status: "skipped", detail: "sem_atendente" });
-    expect(db.crm_leads[0].owner_user_id).toBeNull();
+    expect(db.crm_leads[0]!.owner_user_id).toBeNull();
   });
 
   it("caso que espera o cliente, sem negócio ou desligado: não mexe", async () => {
-    db.agent_cases[0].status = "awaiting_lead";
+    db.agent_cases[0]!.status = "awaiting_lead";
     expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("caso_nao_espera_pessoa");
-    db.agent_cases[0].status = "awaiting_human";
-    db.agent_cases[0].lead_id = null;
+    db.agent_cases[0]!.status = "awaiting_human";
+    db.agent_cases[0]!.lead_id = null;
     expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("caso_sem_negocio");
-    db.agent_cases[0].lead_id = "L1";
+    db.agent_cases[0]!.lead_id = "L1";
     estado.ligado = "desligado";
     expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("desligado");
-    expect(db.crm_leads[0].owner_user_id).toBeNull();
+    expect(db.crm_leads[0]!.owner_user_id).toBeNull();
   });
 
   it("leitura que falha: tenta de novo, sem atribuir", async () => {
     estado.falhar = "user_organizations";
     const r = await casoParaAtendenteHandler.handle(evento());
     expect(r.status).toBe("retry");
-    expect(db.crm_leads[0].owner_user_id).toBeNull();
+    expect(db.crm_leads[0]!.owner_user_id).toBeNull();
   });
 });
