@@ -20,6 +20,7 @@ import { followupGatilhoEtapaHandler } from "@/lib/followup/gatilho-etapa.handle
 import { followupGatilhoLeadHandler } from "@/lib/followup/gatilho-lead.handler";
 import { followupGatilhoCasoHandler } from "@/lib/followup/gatilho-caso.handler";
 import { casoNaCentralHandler } from "@/lib/escalacao/caso-na-central.handler";
+import { casoParaAtendenteHandler } from "@/lib/escalacao/caso-para-atendente.handler";
 import { mediaPersistHandler } from "@/workers/media-persist-worker.handler";
 import { mediaDeriveHandler } from "@/workers/media-derive-worker.handler";
 import { webPushInboundHandler } from "@/lib/notifications/push.handler";
@@ -62,6 +63,9 @@ export function ensureHandlersRegistered(): void {
   // lado do outro consumidor de `ai.case_opened` que só escreve no banco, e
   // longe do aviso ao suporte, que sai por rede de terceiro.
   registerHandler(casoNaCentralHandler);
+  // (C01, -c01.16) O caso ganha uma responsável: escrita curta no banco (o dono
+  // do negócio) e, só quando ela já era a dona, um push.
+  registerHandler(casoParaAtendenteHandler);
   registerHandler(followupGatilhoPresencaHandler);
   registerHandler(mediaPersistHandler);
   registerHandler(mediaDeriveHandler);

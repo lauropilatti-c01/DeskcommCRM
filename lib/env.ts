@@ -581,6 +581,13 @@ const schema = z.object({
    * `lib/notifications/destino-do-push.ts`.
    */
   PUSH_DE_MENSAGEM: z.string().optional().default(""),
+
+  /**
+   * (C01, -c01.16) Caso aberto vai para a atendente da vez (papel `agent`) e
+   * ela recebe o push. Vazio = ligado; `desligado` = o do autor (só a Central).
+   * Regra em `lib/escalacao/caso-para-atendente.handler.ts`.
+   */
+  CASOS_PARA_ATENDENTES: z.string().optional().default(""),
 });
 
 let parsed = schema.safeParse(process.env);
