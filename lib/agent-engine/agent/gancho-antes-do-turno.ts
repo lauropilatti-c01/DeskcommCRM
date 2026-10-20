@@ -222,6 +222,11 @@ export interface PedidoDoGancho {
   caso_aberto: boolean;
   /** (C01, -c01.16) `false` = a leitura do caso falhou; `caso_aberto` não vale. */
   caso_aberto_lido: boolean;
+  /**
+   * (C01, -c01.16) O id interno do contato (uuid do CRM, não é dado pessoal): a identidade estável da pessoa para o
+   * sorteio dos experimentos da C01 (o card pode mudar; o contato fica). Telefone continua fora do pedido.
+   */
+  contato_id: string;
   lead: { id: string | null; etapa: string | null; campos: Record<string, unknown>; etiquetas: string[] };
   mensagens: MensagemDoPedido[];
   formulario?: FormularioDoPedido;
@@ -449,6 +454,7 @@ export async function montarPedidoDoGancho(
     celular_de_teste: celularDeTeste,
     caso_aberto: casoAberto === true,
     caso_aberto_lido: casoAberto !== null,
+    contato_id: alvo.contactId,
     lead: {
       id: card?.id ?? null,
       etapa: card ? etapaDoCard(card) : null,

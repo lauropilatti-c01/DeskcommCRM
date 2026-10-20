@@ -58,6 +58,7 @@ const PEDIDO: PedidoDoGancho = {
   celular_de_teste: false,
   caso_aberto: false,
   caso_aberto_lido: true,
+  contato_id: CONTATO,
   lead: { id: null, etapa: null, campos: {}, etiquetas: [] },
   mensagens: [],
 };
@@ -218,6 +219,7 @@ describe("o pedido não leva dado pessoal", () => {
       celular_de_teste: false,
       caso_aberto: true,
       caso_aberto_lido: true,
+      contato_id: CONTATO,
       lead: { id: "card-1", etapa: "novo", campos: { interesse: "plano-b" }, etiquetas: ["etiqueta-antiga", "cliente"] },
       mensagens: [
         { direcao: "entrada", texto: "[image]", em: "2026-07-30T14:55:00.000Z", interativo: null, status: "delivered" },

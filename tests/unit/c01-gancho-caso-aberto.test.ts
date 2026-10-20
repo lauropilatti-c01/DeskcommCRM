@@ -60,10 +60,11 @@ describe("montarPedidoDoGancho leva o caso", () => {
     agentId: null, inboundMessageId: null, etiquetasDoContato: [] as string[],
   };
 
-  it("caso aberto: true e lido", async () => {
+  it("caso aberto: true e lido; leva o id do contato (não o telefone)", async () => {
     const { pedido } = await montarPedidoDoGancho(banco(() => ({ rows: [{ aberto: true }] })).db as never, alvo);
     expect(pedido.caso_aberto).toBe(true);
     expect(pedido.caso_aberto_lido).toBe(true);
+    expect(pedido.contato_id).toBe(CONTATO);
   });
 
   it("sem caso: false e lido", async () => {
