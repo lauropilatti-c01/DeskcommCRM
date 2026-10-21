@@ -24,10 +24,11 @@
  * Sem `lead_id`, vale o negócio aberto do contato da conversa (`negocioDoCaso`).
  * A carga de cada atendente segue o mesmo caminho.
  *
- * A dona que já existia só recebe o push daqui se for da equipe agora, e se o
- * negócio não foi atribuído por este mesmo caso: o worker que atribuiu e caiu
- * antes de marcar o evento consumido volta aqui e acha a dona, mas o push dela
- * já saiu pelo `lead.assigned` da troca.
+ * A dona que já existia só recebe o push daqui se for da equipe agora, e se não
+ * houver prova de que o aviso já foi enfileirado (`avisoJaEnfileirado`): o
+ * worker que atribuiu e caiu antes de marcar o evento consumido volta aqui e
+ * acha a dona, mas o push dela já saiu pelo `lead.assigned` da troca. Sem
+ * prova, manda: aviso repetido é melhor que nenhum.
  */
 import { env } from "@/lib/env";
 import type { EventHandler, EventRow, HandlerResult } from "@/lib/event-log/dispatcher";
@@ -84,15 +85,57 @@ type Negocio = { id: string; owner_user_id: string | null; assigned_at: string |
 type Falha = { erro: string };
 const falhou = (v: unknown): v is Falha => typeof v === "object" && v !== null && "erro" in v;
 
+/** Negócio aberto de um contato, com o que a regra de escolha e a distribuição leem. */
+type NegocioAberto = Negocio & {
+  organization_id: string;
+  contact_id: string;
+  pipeline_id: string;
+  status: LeadStatus;
+  last_activity_at: string | null;
+  created_at: string;
+};
+const COLUNAS_DO_NEGOCIO =
+  "id, organization_id, contact_id, pipeline_id, status, last_activity_at, created_at, owner_user_id, assigned_at";
+
+/**
+ * Qual dos negócios abertos do contato é o do caso: a mesma regra com que o
+ * motor move o card (`resolveActiveLeadForContact`): o único aberto; senão o do
+ * funil padrão; senão o de atividade mais recente (`last_activity_at`, que só
+ * anda com interação; `updated_at` anda com qualquer escrita, inclusive de
+ * sistema, e `created_at` daria o negócio mais novo, não o que está em
+ * conversa); empate = nenhum. Assim o caso fica no mesmo card que a IA mexe.
+ */
+function negocioDoContato(abertos: readonly NegocioAberto[], funilPadrao: string | null): NegocioAberto | null {
+  if (abertos.length === 0) return null;
+  const candidatos: LeadCandidate[] = abertos.map((l) => ({
+    id: l.id,
+    organization_id: l.organization_id,
+    pipeline_id: l.pipeline_id,
+    status: l.status,
+    last_activity_at: l.last_activity_at,
+    created_at: l.created_at,
+  }));
+  const alvo = resolveActiveLeadForContact(candidatos, { defaultPipelineId: funilPadrao });
+  return alvo.routed ? (abertos.find((l) => l.id === alvo.leadId) ?? null) : null;
+}
+
+async function funilPadraoDa(admin: Admin, org: string): Promise<string | null | Falha> {
+  const { data, error } = await admin
+    .from("crm_pipelines")
+    .select("id")
+    .eq("organization_id", org)
+    .eq("is_default", true)
+    .eq("is_archived", false)
+    .limit(1)
+    .maybeSingle();
+  if (error) return { erro: `leitura do funil padrão falhou: ${error.message}` };
+  return (data as { id?: string } | null)?.id ?? null;
+}
+
 /**
  * O negócio do caso: o `lead_id`, se vier; senão, o negócio aberto do contato da
- * conversa, escolhido pela mesma regra com que o motor move o card
- * (`resolveActiveLeadForContact`): o único aberto; senão o do funil padrão;
- * senão o de atividade mais recente (`last_activity_at`, que só anda com
- * interação; `updated_at` anda com qualquer escrita, inclusive de sistema, e
- * `created_at` daria o negócio mais novo, não o que está em conversa); empate
- * = nenhum. Assim o caso fica no mesmo card que a IA está mexendo.
- * `null` = sem negócio (ou ambíguo); `{ erro }` = leitura que falhou.
+ * conversa (`negocioDoContato`). `null` = sem negócio (ou ambíguo); `{ erro }` =
+ * leitura que falhou.
  */
 async function negocioDoCaso(admin: Admin, org: string, caso: Caso): Promise<Negocio | null | Falha> {
   if (caso.lead_id) {
@@ -117,50 +160,28 @@ async function negocioDoCaso(admin: Admin, org: string, caso: Caso): Promise<Neg
   if (!contato) return null;
   const { data: abertos, error: erroDosNegocios } = await admin
     .from("crm_leads")
-    .select("id, organization_id, pipeline_id, status, last_activity_at, created_at, owner_user_id, assigned_at")
+    .select(COLUNAS_DO_NEGOCIO)
     .eq("organization_id", org)
     .eq("contact_id", contato)
     .eq("status", "open");
   if (erroDosNegocios) return { erro: `leitura dos negócios falhou: ${erroDosNegocios.message}` };
-  const linhas = (abertos ?? []) as (Negocio & {
-    organization_id: string;
-    pipeline_id: string;
-    status: LeadStatus;
-    last_activity_at: string | null;
-    created_at: string;
-  })[];
-  if (linhas.length === 0) return null;
+  const linhas = (abertos ?? []) as NegocioAberto[];
   let funilPadrao: string | null = null;
   if (linhas.length > 1) {
-    const { data: padrao, error: erroDoFunil } = await admin
-      .from("crm_pipelines")
-      .select("id")
-      .eq("organization_id", org)
-      .eq("is_default", true)
-      .eq("is_archived", false)
-      .limit(1)
-      .maybeSingle();
-    if (erroDoFunil) return { erro: `leitura do funil padrão falhou: ${erroDoFunil.message}` };
-    funilPadrao = (padrao as { id?: string } | null)?.id ?? null;
+    const f = await funilPadraoDa(admin, org);
+    if (falhou(f)) return f;
+    funilPadrao = f;
   }
-  const candidatos: LeadCandidate[] = linhas.map((l) => ({
-    id: l.id,
-    organization_id: l.organization_id,
-    pipeline_id: l.pipeline_id,
-    status: l.status,
-    last_activity_at: l.last_activity_at,
-    created_at: l.created_at,
-  }));
-  const alvo = resolveActiveLeadForContact(candidatos, { defaultPipelineId: funilPadrao });
-  if (!alvo.routed) return null;
-  const n = linhas.find((l) => l.id === alvo.leadId)!;
-  return { id: n.id, owner_user_id: n.owner_user_id ?? null, assigned_at: n.assigned_at ?? null };
+  const n = negocioDoContato(linhas, funilPadrao);
+  return n ? { id: n.id, owner_user_id: n.owner_user_id ?? null, assigned_at: n.assigned_at ?? null } : null;
 }
 
 /**
  * Casos esperando gente por atendente. O caso chega ao negócio pelo `lead_id`
- * ou, como na produção, pela conversa: conta para quem é dona de um negócio
- * aberto do contato. O caso que está sendo distribuído não conta.
+ * ou, como na produção, pela conversa: conta só para a dona do negócio que
+ * `negocioDoContato` escolhe (o mesmo que a distribuição usaria), e não para
+ * todas as donas de negócios abertos do contato. O caso que está sendo
+ * distribuído não conta.
  */
 async function cargas(
   admin: Admin,
@@ -192,7 +213,7 @@ async function cargas(
     for (const d of (donos ?? []) as { id: string; owner_user_id: string }[]) donoDoNegocio.set(d.id, d.owner_user_id);
   }
   const contatoDaConversa = new Map<string, string>();
-  const donasDoContato = new Map<string, Set<string>>();
+  const donaDoContato = new Map<string, string>();
   if (convIds.length > 0) {
     const { data: conversas, error: erroDasConversas } = await admin
       .from("conversations")
@@ -207,28 +228,68 @@ async function cargas(
     if (contatos.length > 0) {
       const { data: negocios, error: erroDosNegocios } = await admin
         .from("crm_leads")
-        .select("contact_id, owner_user_id")
+        .select(COLUNAS_DO_NEGOCIO)
         .eq("organization_id", org)
         .in("contact_id", contatos)
-        .eq("status", "open")
-        .in("owner_user_id", [...elegiveis]);
+        .eq("status", "open");
       if (erroDosNegocios) return { erro: `leitura das cargas falhou: ${erroDosNegocios.message}` };
-      for (const n of (negocios ?? []) as { contact_id: string; owner_user_id: string }[]) {
-        const donas = donasDoContato.get(n.contact_id) ?? new Set<string>();
-        donas.add(n.owner_user_id);
-        donasDoContato.set(n.contact_id, donas);
+      const porContato = new Map<string, NegocioAberto[]>();
+      for (const n of (negocios ?? []) as NegocioAberto[]) {
+        porContato.set(n.contact_id, [...(porContato.get(n.contact_id) ?? []), n]);
+      }
+      let funilPadrao: string | null = null;
+      if ([...porContato.values()].some((ls) => ls.length > 1)) {
+        const f = await funilPadraoDa(admin, org);
+        if (falhou(f)) return f;
+        funilPadrao = f;
+      }
+      for (const [contato, abertos] of porContato) {
+        const dona = negocioDoContato(abertos, funilPadrao)?.owner_user_id ?? null;
+        if (dona && elegiveis.includes(dona)) donaDoContato.set(contato, dona);
       }
     }
   }
 
   const abertos = new Map<string, number>();
   for (const c of casos) {
-    const donas = c.lead_id
-      ? new Set(donoDoNegocio.has(c.lead_id) ? [donoDoNegocio.get(c.lead_id)!] : [])
-      : (donasDoContato.get(contatoDaConversa.get(c.conversation_id ?? "") ?? "") ?? new Set<string>());
-    for (const d of donas) abertos.set(d, (abertos.get(d) ?? 0) + 1);
+    const dona = c.lead_id
+      ? donoDoNegocio.get(c.lead_id)
+      : donaDoContato.get(contatoDaConversa.get(c.conversation_id ?? "") ?? "");
+    if (dona) abertos.set(dona, (abertos.get(dona) ?? 0) + 1);
   }
   return abertos;
+}
+
+/**
+ * Prova de que o "Caso para você" desta dona já foi enfileirado: um
+ * `lead.assigned` do negócio, de ninguém para ela, emitido depois da abertura do
+ * caso. A troca que este consumidor faz (só pega negócio sem dono) gera
+ * exatamente esse evento, na mesma transação (`fn_emit_event_on_lead_change`), e
+ * o push desse evento sai como "Caso para você" porque o caso espera gente.
+ * Não serve a hora da atribuição (`assigned_at`): a API a renova quando um PATCH
+ * reenvia o mesmo dono, sem `lead.assigned` nenhum, e o único aviso seria calado.
+ */
+async function avisoJaEnfileirado(
+  admin: Admin,
+  org: string,
+  leadId: string,
+  dona: string,
+  abertoEm: string | null | undefined,
+): Promise<boolean | Falha> {
+  if (!abertoEm) return false;
+  const { data, error } = await admin
+    .from("event_log")
+    .select("id")
+    .eq("organization_id", org)
+    .eq("event_type", "lead.assigned")
+    .eq("entity_kind", "lead")
+    .eq("entity_id", leadId)
+    .eq("payload->>to_user_id", dona)
+    .is("payload->>from_user_id", null)
+    .gte("created_at", abertoEm)
+    .limit(1);
+  if (error) return { erro: `leitura dos eventos do negócio falhou: ${error.message}` };
+  return ((data ?? []) as unknown[]).length > 0;
 }
 
 async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
@@ -252,11 +313,9 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
 
   // Já tem uma pessoa: não há troca de dono (nem `lead.assigned`), então o push sai daqui.
   if (dona) {
-    // Atribuição posterior à abertura do caso: foi este caso que deu a dona (ou
-    // alguém a deu à mão depois), e o `lead.assigned` já levou o "Caso para você".
-    if (negocio.assigned_at && c.opened_at && Date.parse(negocio.assigned_at) >= Date.parse(c.opened_at)) {
-      return resultado("skipped", "atribuido_por_este_caso");
-    }
+    const jaAvisada = await avisoJaEnfileirado(admin, org, negocio.id, dona, c.opened_at);
+    if (falhou(jaAvisada)) return tentarDeNovo(jaAvisada.erro);
+    if (jaAvisada) return resultado("skipped", "atribuido_por_este_caso");
     const ativas = await membrosAtivos(admin as unknown as AdminDoPush, org, [dona]);
     if (ativas === null) return tentarDeNovo("leitura da equipe falhou");
     if (!ativas.has(dona)) return resultado("skipped", "ja_tinha_responsavel:fora_da_equipe");

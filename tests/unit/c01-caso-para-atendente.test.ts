@@ -13,8 +13,13 @@ vi.mock("@/lib/notifications/web_push", () => ({
 }));
 
 type Linha = Record<string, unknown>;
-type Banco = Record<"agent_cases" | "crm_leads" | "user_organizations" | "conversations" | "crm_pipelines", Linha[]>;
-let db: Banco = { agent_cases: [], crm_leads: [], user_organizations: [], conversations: [], crm_pipelines: [] };
+type Banco = Record<"agent_cases" | "crm_leads" | "user_organizations" | "conversations" | "crm_pipelines" | "event_log", Linha[]>;
+let db: Banco = { agent_cases: [], crm_leads: [], user_organizations: [], conversations: [], crm_pipelines: [], event_log: [] };
+/** `payload->>campo` lê dentro do jsonb, como o PostgREST. */
+const valor = (l: Linha, c: string) => {
+  const [col, campo] = c.split("->>");
+  return campo === undefined ? l[c] : ((l[col!] as Linha | undefined)?.[campo] ?? null);
+};
 function consulta(tabela: string) {
   const conds: ((l: Linha) => boolean)[] = [];
   let patch: Linha | null = null;
@@ -31,15 +36,28 @@ function consulta(tabela: string) {
   const executar = () => {
     if (estado.falhar === tabela) return { data: null, error: { message: "caiu" } };
     const ls = linhas();
-    if (patch) for (const l of ls) Object.assign(l, patch);
+    if (patch) {
+      for (const l of ls) {
+        // O gatilho do banco (`fn_emit_event_on_lead_change`): troca de dono emite `lead.assigned`.
+        if (tabela === "crm_leads" && "owner_user_id" in patch && patch.owner_user_id !== l.owner_user_id) {
+          db.event_log.push({
+            organization_id: l.organization_id, event_type: "lead.assigned", entity_kind: "lead", entity_id: l.id,
+            payload: { lead_id: l.id, from_user_id: l.owner_user_id ?? null, to_user_id: patch.owner_user_id },
+            created_at: new Date().toISOString(),
+          });
+        }
+        Object.assign(l, patch);
+      }
+    }
     return { data: ls, error: null };
   };
   const q = {
     select: () => q,
     update: (p: Linha) => ((patch = p), q),
-    eq: (c: string, v: unknown) => (conds.push((l) => l[c] === v), q),
+    eq: (c: string, v: unknown) => (conds.push((l) => valor(l, c) === v), q),
     in: (c: string, vs: unknown[]) => (conds.push((l) => vs.includes(l[c])), q),
-    is: (c: string, v: unknown) => (conds.push((l) => (l[c] ?? null) === v), q),
+    is: (c: string, v: unknown) => (conds.push((l) => (valor(l, c) ?? null) === v), q),
+    gte: (c: string, v: string) => (conds.push((l) => Date.parse(String(l[c])) >= Date.parse(v)), q),
     not: (c: string, _op: string, _v: unknown) => (conds.push((l) => (l[c] ?? null) !== null), q),
     order: (col: string, o: { ascending: boolean }) => ((ordem = { col, asc: o.ascending }), q),
     limit: (n: number) => ((limite = n), q),
@@ -88,6 +106,7 @@ beforeEach(() => {
     conversations: [{ id: "c1", organization_id: ORG, contact_id: "k1" }],
     crm_leads: [negocio("L1", "k1")],
     crm_pipelines: [{ id: "p1", organization_id: ORG, is_default: true, is_archived: false }],
+    event_log: [],
     user_organizations: [membro("priscila"), membro("maria"), membro("lauro", "admin")],
   };
 });
@@ -163,9 +182,43 @@ describe("casoParaAtendenteHandler", () => {
 
   it("worker que atribuiu e caiu antes de marcar o evento: na nova tentativa, sem push repetido", async () => {
     expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("atribuido");
+    expect(db.event_log).toHaveLength(1); // o `lead.assigned` da troca, que leva o "Caso para você"
     const r = await casoParaAtendenteHandler.handle(evento());
     expect(r).toMatchObject({ status: "skipped", detail: "atribuido_por_este_caso" });
     expect(push).not.toHaveBeenCalled();
+  });
+
+  it("dona de antes do caso, e um PATCH reenvia a mesma dona depois da abertura: o push sai (a API renova assigned_at sem lead.assigned)", async () => {
+    Object.assign(db.crm_leads[0]!, { owner_user_id: "maria", owner_kind: "user", assigned_at: new Date().toISOString() });
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r).toMatchObject({ status: "ok", detail: "ja_tinha_responsavel:sent:1" });
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push.mock.calls[0]![1]).toBe("maria");
+  });
+
+  it("lead.assigned de antes da abertura, ou de outra dona, não prova o aviso deste caso", async () => {
+    Object.assign(db.crm_leads[0]!, { owner_user_id: "maria", owner_kind: "user", assigned_at: ONTEM() });
+    const assigned = (para: string, quando: string, de: string | null = null) => ({
+      organization_id: ORG, event_type: "lead.assigned", entity_kind: "lead", entity_id: "L1",
+      payload: { lead_id: "L1", from_user_id: de, to_user_id: para }, created_at: quando,
+    });
+    db.event_log = [assigned("maria", ONTEM()), assigned("priscila", new Date().toISOString())];
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("ja_tinha_responsavel:sent:1");
+    db.event_log = [assigned("maria", new Date().toISOString())];
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("atribuido_por_este_caso");
+    expect(push).toHaveBeenCalledTimes(1);
+  });
+
+  it("carga: o caso conta só para a dona do negócio escolhido do contato, não para todas", async () => {
+    // Contato k5 tem dois negócios abertos: o do funil padrão é da maria; o outro, da priscila.
+    db.agent_cases.push(caso("caso-5", "c5"));
+    db.conversations.push({ id: "c5", organization_id: ORG, contact_id: "k5" });
+    db.crm_leads.push(
+      negocio("L5", "k5", { owner_user_id: "maria", owner_kind: "user" }),
+      negocio("L6", "k5", { pipeline_id: "p2", owner_user_id: "priscila", owner_kind: "user" }),
+    );
+    await casoParaAtendenteHandler.handle(evento());
+    expect(db.crm_leads[0]!.owner_user_id).toBe("priscila");
   });
 
   it("dona revogada ou com convite pendente: nenhum push ao aparelho dela", async () => {
