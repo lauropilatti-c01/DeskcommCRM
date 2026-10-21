@@ -118,6 +118,27 @@ describe("(C01, -c01.16) dúvida nova com o caso já aberto", () => {
     expect(novo.ok).toBe(true);
   });
 
+  it("fechamento ao mesmo tempo que a nota: a nota espera, relê o estado e não cai no caso fechado", async () => {
+    const aberto = await openCase(pool, { tenantId: ORG, conversationId: CONV_SEM_CASO }, PRIMEIRA);
+    expect(aberto.ok).toBe(true);
+    if (!aberto.ok) return;
+    const fechando = await pool.connect();
+    try {
+      await fechando.query("begin");
+      await fechando.query(`update agent_cases set status = 'resolved', closed_at = now() where id = $1`, [aberto.caseId]);
+      const nota = registrarDuvidaNoCasoAberto(pool, ORG, CONV_SEM_CASO, SEGUNDA);
+      await new Promise((r) => setTimeout(r, 300));
+      await fechando.query("commit");
+      expect(await nota).toBeNull();
+    } finally {
+      fechando.release();
+    }
+    const evs = await eventos(aberto.caseId);
+    expect(evs.filter((e) => e.kind === "agent_noted")).toHaveLength(0);
+    await pool.query(`delete from agent_case_events where case_id = $1`, [aberto.caseId]);
+    await pool.query(`delete from agent_cases where id = $1`, [aberto.caseId]);
+  });
+
   it("sem caso aberto na conversa, ou de outra organização: nenhuma nota", async () => {
     expect(await registrarDuvidaNoCasoAberto(pool, ORG, CONV_SEM_CASO, SEGUNDA)).toBeNull();
     expect(await registrarDuvidaNoCasoAberto(pool, ORG_B, CONV, SEGUNDA)).toBeNull();

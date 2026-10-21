@@ -78,8 +78,10 @@ export function notaDaDuvidaNova(duvida: { title: string; summary: string; block
  *
  * Agora ela vira uma nota do agente (`agent_noted`, o mesmo registro de
  * `registrarNotaDoAgente`) no caso aberto mais recente da conversa, e só depois o modelo
- * ouve o "vou verificar". A guarda de estado está no próprio INSERT (caso fechado não
- * recebe nota). Devolve o id do caso, ou null se nenhum caso estava aberto (fechou entre a
+ * ouve o "vou verificar". A guarda de estado está no próprio statement, com a linha do caso
+ * travada (`for update`): se uma pessoa estiver fechando o caso ao mesmo tempo, a nota espera
+ * o fechamento, o estado é relido e o caso fechado não recebe nota (revisão independente da
+ * -c01.16: sem a trava, a leitura via o caso ainda aberto e a dúvida caía num caso resolvido). Devolve o id do caso, ou null se nenhum caso estava aberto (fechou entre a
  * recusa e a nota): aí o chamador tenta abrir de novo.
  */
 export async function registrarDuvidaNoCasoAberto(
@@ -89,12 +91,17 @@ export async function registrarDuvidaNoCasoAberto(
   duvida: { title: string; summary: string; blocker: string },
 ): Promise<string | null> {
   const { rows } = await db.query<{ case_id: string }>(
-    `insert into agent_case_events (organization_id, case_id, kind, actor_kind, body)
-     select $1::uuid, c.id, 'agent_noted', 'agent', $3::text
-       from agent_cases c
-      where c.organization_id = $1 and c.conversation_id = $2 and c.status = any($4::text[])
-      order by c.opened_at desc
-      limit 1
+    `with aberto as (
+       select c.id
+         from agent_cases c
+        where c.organization_id = $1 and c.conversation_id = $2 and c.status = any($4::text[])
+        order by c.opened_at desc
+        limit 1
+        for update
+     )
+     insert into agent_case_events (organization_id, case_id, kind, actor_kind, body)
+     select $1::uuid, aberto.id, 'agent_noted', 'agent', $3::text
+       from aberto
      returning case_id`,
     [tenantId, conversationId, notaDaDuvidaNova(duvida), ESTADOS_DE_CASO_ABERTO],
   );
