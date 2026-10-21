@@ -26,6 +26,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 
 import type { Logger } from '@/lib/agent-engine/obs/logger';
 import { openCase } from '@/lib/agent-engine/agent/human-cases';
+import type { Queryable } from '@/lib/agent-engine/queue/queue';
 
 /** A versão publicada do agente tem a ferramenta de passagem desligada. Sem agente: ligada (o de hoje). */
 export function passagemDesligada(agente: { handoffToolEnabled: boolean } | null | undefined): boolean {
@@ -53,11 +54,52 @@ export const RETORNO_DO_CASO_SEM_PASSAGEM =
   'caso aberto; diga ao lead que vai verificar e já retorna ("vou verificar e já te retorno"), sem prometer ' +
   'prazo ou resultado e sem dizer que ficou registrado; continue a conversa normalmente.';
 
-/** O mesmo, quando a conversa já tinha caso aberto (o pedido de uma pessoa abre um antes do modelo). */
+/** O mesmo, quando a conversa já tinha caso aberto e a dúvida nova entrou nele (`registrarDuvidaNoCasoAberto`). */
 export const RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM =
-  'já existe um caso aberto para esta conversa (não abra outro); diga ao lead que vai verificar e já retorna ' +
-  '("vou verificar e já te retorno"), sem prometer prazo ou resultado e sem dizer que ficou registrado; ' +
-  'continue a conversa normalmente.';
+  'já existe um caso aberto para esta conversa e esta dúvida foi juntada a ele (não abra outro); diga ao lead que ' +
+  'vai verificar e já retorna ("vou verificar e já te retorno"), sem prometer prazo ou resultado e sem dizer que ' +
+  'ficou registrado; continue a conversa normalmente.';
+
+/** Os estados de caso aberto (os mesmos de `OPEN_STATUSES` em human-cases.ts, que não é exportado). */
+const ESTADOS_DE_CASO_ABERTO = ['awaiting_human', 'awaiting_lead'] as const;
+
+/** O texto da nota com a dúvida nova, no mesmo formato do caso (`buildCaseSummary`). */
+export function notaDaDuvidaNova(duvida: { title: string; summary: string; blocker: string }): string {
+  return `Dúvida nova do lead (o caso já estava aberto): ${duvida.title}\n${duvida.summary}\nBloqueio: ${duvida.blocker}`;
+}
+
+/**
+ * (C01, -c01.16) A dúvida nova com o caso já aberto entra NO caso aberto.
+ *
+ * Medido no laboratório em 20/10/2026 (teste-base da Marina v26, cartão do caso aberto): o
+ * modelo chamava `open_human_case` para a segunda dúvida, `openCase` recusava
+ * (`case_already_open`, um caso aberto por conversa) e o retorno mandava o modelo dizer
+ * "vou verificar". A dúvida não chegava a ninguém: o caso só tinha a primeira pergunta.
+ *
+ * Agora ela vira uma nota do agente (`agent_noted`, o mesmo registro de
+ * `registrarNotaDoAgente`) no caso aberto mais recente da conversa, e só depois o modelo
+ * ouve o "vou verificar". A guarda de estado está no próprio INSERT (caso fechado não
+ * recebe nota). Devolve o id do caso, ou null se nenhum caso estava aberto (fechou entre a
+ * recusa e a nota): aí o chamador tenta abrir de novo.
+ */
+export async function registrarDuvidaNoCasoAberto(
+  db: Queryable,
+  tenantId: string,
+  conversationId: string,
+  duvida: { title: string; summary: string; blocker: string },
+): Promise<string | null> {
+  const { rows } = await db.query<{ case_id: string }>(
+    `insert into agent_case_events (organization_id, case_id, kind, actor_kind, body)
+     select $1::uuid, c.id, 'agent_noted', 'agent', $3::text
+       from agent_cases c
+      where c.organization_id = $1 and c.conversation_id = $2 and c.status = any($4::text[])
+      order by c.opened_at desc
+      limit 1
+     returning case_id`,
+    [tenantId, conversationId, notaDaDuvidaNova(duvida), ESTADOS_DE_CASO_ABERTO],
+  );
+  return rows[0]?.case_id ?? null;
+}
 
 /**
  * `CASES_SYSTEM_BLOCK` com a passagem desligada. O de sempre proíbe "vou verificar e

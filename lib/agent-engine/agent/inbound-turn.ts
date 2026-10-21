@@ -252,6 +252,7 @@ import {
   RECUSA_DEPOIS_DA_VERIFICACAO,
   RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM,
   RETORNO_DO_CASO_SEM_PASSAGEM,
+  registrarDuvidaNoCasoAberto,
   TITULO_DO_CASO_POR_ORCAMENTO,
   TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM,
 } from '@/lib/c01/passagem-desligada';
@@ -5788,15 +5789,23 @@ async function executarTurnoDoAgente(
           };
         }
         try {
-          const res = await openCase(
+          let res = await openCase(
             pool,
             { tenantId, conversationId: input.conversationId, agentId: agentConfig.agentId },
             { ...parsed.data, contextSnapshot: buildCaseContextSnapshot() },
           );
           // (C01, -c01.15) Com a passagem desligada, o caso já aberto (o pedido de uma
           // pessoa abre um antes do modelo) é o mesmo desfecho: o pedido está com a equipe.
+          // (C01, -c01.16) A dúvida nova entra no caso aberto (nota do agente) antes do "vou verificar";
+          // sem caso aberto na hora da nota (fechou no meio), tenta abrir de novo, uma vez.
           if (!res.ok && semPassagem && res.error.code === 'case_already_open') {
-            return { ok: true, message: RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM };
+            const noCaso = await registrarDuvidaNoCasoAberto(pool, tenantId, input.conversationId, parsed.data);
+            if (noCaso !== null) return { ok: true, case_id: noCaso, message: RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM };
+            res = await openCase(
+              pool,
+              { tenantId, conversationId: input.conversationId, agentId: agentConfig.agentId },
+              { ...parsed.data, contextSnapshot: buildCaseContextSnapshot() },
+            );
           }
           if (!res.ok) return res;
           openedCaseThisTurn = true;
