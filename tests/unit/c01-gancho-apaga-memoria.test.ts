@@ -76,6 +76,9 @@ function banco(
         if (apagar === "erro") throw new Error("statement timeout");
         return { rows: [apagar], rowCount: 1 };
       }
+      if (sql.includes("join demandas d")) return { rows: [{ id: "demanda-1", revision: "4" }], rowCount: 1 };
+      if (sql.includes("from agent_cases")) return { rows: [{ id: "caso-1" }], rowCount: 1 };
+      if (sql.includes("update agent_cases")) return { rows: [], rowCount: 2 };
       if (sql.includes("max(created_at)::text")) return { rows: [{ em: "2026-10-07 11:59:00+00" }], rowCount: 1 };
       if (sql.includes("from conversations c"))
         return { rows: [{ assignee_kind: null, assigned_to_user_id: null, last_inbound_at: null, provider: "meta" }], rowCount: 1 };
@@ -275,5 +278,47 @@ describe("4. (-c01.15, revisão) a etiqueta sozinha não autoriza: telefone na l
     expect(avisos(sem.log)).toEqual([
       ["gancho antes do turno: memória não apagada — contato sem a etiqueta de teste", { porque: "sem_etiqueta" }],
     ]);
+  });
+});
+
+describe("5. (-c01.15+zerar) o #zerar recomeça o atendimento, por último e só com a memória apagada", () => {
+  const encerrou = (consultas: Consulta[]) => consultas.filter((c) => c.sql.includes("fn_demanda_encerrar"));
+  const fechouCaso = (consultas: Consulta[]) => consultas.filter((c) => c.sql.includes("update agent_cases"));
+
+  it("segurar com a memória apagada: fecha o caso sem turno e encerra a demanda, depois do apagar e do gravar", async () => {
+    const { desfecho, consultas } = await rodar(ZERAR);
+    expect(desfecho.fim).toBe(true);
+    expect(fechouCaso(consultas)).toHaveLength(1);
+    expect(fechouCaso(consultas)[0]!.params).toEqual(expect.arrayContaining(["caso-1", "cancelled"]));
+    expect(encerrou(consultas)).toHaveLength(1);
+    expect(encerrou(consultas)[0]!.params).toEqual([ORG, "demanda-1", "4"]);
+    const i = (f: (c: Consulta) => boolean) => consultas.findIndex(f);
+    expect(i((c) => c.sql.includes("fn_demanda_encerrar"))).toBeGreaterThan(i((c) => eOApagar(c.sql)));
+    expect(i((c) => c.sql.includes("fn_demanda_encerrar"))).toBe(consultas.length - 1);
+    // nada de turno de devolução nem envio
+    expect(consultas.some((c) => /insert into job_queue|case_reply_turn/i.test(c.sql))).toBe(false);
+  });
+
+  it("sem a etiqueta, fora da lista ou com erro no apagar: o atendimento não recomeça", async () => {
+    for (const opcoes of [
+      { apagar: { autorizado: false, apagadas: 0 } },
+      { lista: { phone_number: "5511900000009", metadata: { ai_test_phone_numbers: [TELEFONE] } } },
+      { apagar: "erro" as const },
+    ]) {
+      const { consultas } = await rodar(ZERAR, opcoes);
+      expect(encerrou(consultas)).toHaveLength(0);
+      expect(fechouCaso(consultas)).toHaveLength(0);
+    }
+  });
+
+  it("seguir com apagar_memoria: o modelo ainda roda neste turno, então o atendimento não recomeça", async () => {
+    const { consultas } = await rodar({ acao: "seguir", apagar_memoria: true });
+    expect(encerrou(consultas)).toHaveLength(0);
+  });
+
+  it("segurar sem apagar_memoria: nada muda no atendimento", async () => {
+    const { consultas } = await rodar({ ...ZERAR, apagar_memoria: false });
+    expect(encerrou(consultas)).toHaveLength(0);
+    expect(fechouCaso(consultas)).toHaveLength(0);
   });
 });

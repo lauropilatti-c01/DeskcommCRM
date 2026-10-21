@@ -122,6 +122,7 @@ import { scheduleCronJob } from '../cron/scheduler';
 import { runBeforeSend } from '../guardrails/before-send';
 import type { DesfechoDoAviso } from './aviso-de-escalacao';
 import { performHumanHandoff } from './human-handoff';
+import { encerrarChamadoPeloAgente } from './human-cases';
 import { abrirCasoDoPedidoDePessoa } from '@/lib/c01/passagem-desligada';
 import {
   ETIQUETA_DO_CELULAR_DE_TESTE,
@@ -1020,7 +1021,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     });
     break;
   }
-  await apagarMemoriaSePedida(ctx, resposta);
+  const zerou = await apagarMemoriaSePedida(ctx, resposta);
   await aplicarGravar(ctx, card, resposta.gravar);
   if (decisao.formulario !== null) {
     try {
@@ -1045,6 +1046,8 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
   } else {
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
   }
+  // Por último: encerrar a demanda deixa velha a fronteira deste turno.
+  if (zerou && resposta.passar_a_equipe !== true) await recomecarAtendimentoSeZerou(ctx);
   log.info(
     itens.length === 0
       ? 'gancho antes do turno segurou sem enviar nada — turno encerrado sem o modelo'
@@ -1260,13 +1263,13 @@ export async function apagarMemoriaDoContato(
  * gancho nunca apaga a memória de quem não é celular de teste. Falhar aqui não cala o
  * cliente: o turno segue.
  */
-async function apagarMemoriaSePedida(ctx: ContextoDoGancho, resposta: RespostaDoGancho): Promise<void> {
-  if (resposta.apagar_memoria !== true) return;
+async function apagarMemoriaSePedida(ctx: ContextoDoGancho, resposta: RespostaDoGancho): Promise<boolean> {
+  if (resposta.apagar_memoria !== true) return false;
   if (normalizarTags(resposta.gravar?.etiquetas_mais ?? []).includes(ETIQUETA_DO_CELULAR_DE_TESTE)) {
     ctx.log.warn('gancho antes do turno: memória não apagada — a própria resposta põe a etiqueta de teste', {
       porque: 'etiqueta_na_resposta',
     });
-    return;
+    return false;
   }
   try {
     await guardServiceEffect();
@@ -1283,13 +1286,83 @@ async function apagarMemoriaSePedida(ctx: ContextoDoGancho, resposta: RespostaDo
           : 'gancho antes do turno: memória não apagada — contato sem a etiqueta de teste',
         { porque: porque ?? 'sem_etiqueta' },
       );
-      return;
+      return false;
     }
     ctx.log.info('gancho antes do turno: memória do contato apagada (celular de teste)', { notas: apagadas });
+    return true;
   } catch (err) {
     if (eDeFronteira(err)) throw err;
     ctx.log.warn('gancho antes do turno: memória não apagada — a leitura da etiqueta falhou', {
       porque: 'erro',
+      erro: err instanceof Error ? err.name : 'desconhecido',
+    });
+    return false;
+  }
+}
+
+/**
+ * (C01, -c01.15+zerar) O `#zerar` do celular de teste recomeça o ATENDIMENTO, não só o
+ * card e a memória. Sem isto a IA continuava lendo a conversa de antes do `#zerar`
+ * (`getLeadContext` lê as mensagens do atendimento atual da conversa) e o caso aberto
+ * dela (`hasOpenCaseForContact`, por conversa): em 21/10/2026 a IA citou "o preparatório
+ * que te mostrei" de um teste de horas antes.
+ *
+ * Só depois de a memória ser apagada (a mesma régua dupla: lista de teste do canal E
+ * etiqueta, em `apagarMemoriaDoContato`), no `segurar`, e por último: tudo o que este
+ * turno envia e grava já saiu, porque encerrar a demanda deixa velha a fronteira do
+ * atendimento deste turno. Nada é apagado e nada é enviado:
+ *   - os casos abertos da conversa passam a `cancelled` pelo caminho do próprio agente
+ *     (`encerrarChamadoPeloAgente`), que não roda turno de devolução (o "resolver" da
+ *     Central, pela rota de resposta, roda e escreve ao cliente);
+ *   - a demanda atual é encerrada (`fn_demanda_encerrar`, desfecho `nao_procede`). A
+ *     próxima mensagem do cliente abre outra (`fn_service_inbound`): revisão nova do
+ *     atendimento e início na hora dela, e a IA deixa de ver o que veio antes.
+ * Falha aqui não desfaz o que saiu: fica no log, e o card e a memória já foram limpos.
+ */
+export async function recomecarAtendimentoDoCelularDeTeste(
+  db: Queryable,
+  organizationId: string,
+  conversationId: string,
+): Promise<{ casos: number; demanda: boolean }> {
+  const { rows: abertos } = await db.query<{ id: string }>(
+    `select id from agent_cases
+      where organization_id = $1 and conversation_id = $2 and status in ('awaiting_human', 'awaiting_lead')`,
+    [organizationId, conversationId],
+  );
+  let casos = 0;
+  for (const { id } of abertos) {
+    if (
+      await encerrarChamadoPeloAgente(db, organizationId, id, {
+        desfecho: 'sem_necessidade',
+        nota: '#zerar do celular de teste: o teste recomeçou do zero.',
+      })
+    )
+      casos += 1;
+  }
+  const { rows: demandas } = await db.query<{ id: string; revision: string }>(
+    `select d.id, d.revision from conversations c
+       join demandas d on d.organization_id = c.organization_id and d.id = c.current_demanda_id
+      where c.organization_id = $1 and c.id = $2 and d.fechada_em is null`,
+    [organizationId, conversationId],
+  );
+  const demanda = demandas[0];
+  if (demanda === undefined) return { casos, demanda: false };
+  await db.query(`select fn_demanda_encerrar($1, $2, $3, 'nao_procede', null)`, [
+    organizationId,
+    demanda.id,
+    demanda.revision,
+  ]);
+  return { casos, demanda: true };
+}
+
+async function recomecarAtendimentoSeZerou(ctx: ContextoDoGancho): Promise<void> {
+  try {
+    await guardServiceEffect();
+    const { casos, demanda } = await recomecarAtendimentoDoCelularDeTeste(ctx.pool, ctx.tenantId, ctx.conversationId);
+    ctx.log.info('gancho antes do turno: atendimento recomeçado (celular de teste)', { casos, demanda });
+  } catch (err) {
+    if (eDeFronteira(err)) throw err;
+    ctx.log.warn('gancho antes do turno: atendimento não recomeçado — a IA ainda vê a conversa de antes', {
       erro: err instanceof Error ? err.name : 'desconhecido',
     });
   }
