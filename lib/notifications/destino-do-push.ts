@@ -21,6 +21,9 @@
  *    ele: o push diz que é um caso e leva direto ao caso, não ao funil. É assim
  *    que a equipe distribui os casos (atribuindo o negócio) e quem recebe sabe
  *    que há um cliente esperando.
+ * 3. Só recebe quem é da equipe AGORA (convite aceito, não revogada). O dono do
+ *    negócio e a pessoa da conversa não mudam quando alguém sai: sem esse filtro,
+ *    revogada a atendente, a mensagem do cliente iria só para o celular dela.
  *
  * Texto sem dado do cliente, como os avisos da Central (`push-dos-avisos.ts`):
  * o push aparece na tela bloqueada.
@@ -86,26 +89,85 @@ export async function responsaveisDaConversa(
       if (l.owner_user_id) ids.add(l.owner_user_id);
     }
   }
-  return [...ids];
+  if (ids.size === 0) return [];
+  const ativos = await membrosAtivos(admin, organizationId, [...ids]);
+  if (ativos === null) return null;
+  return [...ids].filter((id) => ativos.has(id));
 }
 
-/** O caso mais recente do negócio que espera uma pessoa; `undefined` = a leitura falhou. */
+/**
+ * Quem, destes, é da equipe agora: convite aceito e não revogada. Numa leitura
+ * só; o filtro é feito aqui (e não com `is`/`not` na consulta) para que a regra
+ * fique num lugar. `null` = a leitura falhou.
+ */
+export async function membrosAtivos(
+  admin: AdminDoPush,
+  organizationId: string,
+  userIds: readonly string[],
+): Promise<Set<string> | null> {
+  if (userIds.length === 0) return new Set();
+  const { data, error } = await admin
+    .from("user_organizations")
+    .select("user_id, accepted_at, revoked_at")
+    .eq("organization_id", organizationId)
+    .in("user_id", userIds);
+  if (error) return null;
+  const linhas = (data as { user_id: string; accepted_at?: string | null; revoked_at?: string | null }[] | null) ?? [];
+  return new Set(linhas.filter((m) => m.accepted_at && !m.revoked_at).map((m) => m.user_id));
+}
+
+/**
+ * O caso mais recente do negócio que espera uma pessoa; `undefined` = a leitura
+ * falhou. `openCase` (do autor) não preenche `agent_cases.lead_id`: o caso
+ * ancora na conversa. Por isso vale tanto o caso com o `lead_id` do negócio
+ * quanto o de uma conversa do contato do negócio.
+ */
 export async function casoEsperandoGente(
   admin: AdminDoPush,
   organizationId: string,
   leadId: string,
 ): Promise<string | null | undefined> {
-  const { data, error } = await admin
+  const { data: lead, error: erroDoNegocio } = await admin
+    .from("crm_leads")
+    .select("contact_id")
+    .eq("organization_id", organizationId)
+    .eq("id", leadId)
+    .maybeSingle();
+  if (erroDoNegocio) return undefined;
+  const contato = (lead as { contact_id?: string | null } | null)?.contact_id ?? null;
+  let conversas: string[] = [];
+  if (contato) {
+    const { data, error } = await admin
+      .from("conversations")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .eq("contact_id", contato);
+    if (error) return undefined;
+    conversas = ((data as { id: string }[] | null) ?? []).map((c) => c.id);
+  }
+
+  type Caso = { id: string; opened_at?: string | null };
+  const candidatos: Caso[] = [];
+  const porNegocio = await admin
     .from("agent_cases")
-    .select("id")
+    .select("id, opened_at")
     .eq("organization_id", organizationId)
     .eq("lead_id", leadId)
-    .in("status", ["awaiting_human"])
-    .order("opened_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error) return undefined;
-  return (data as { id?: string } | null)?.id ?? null;
+    .in("status", ["awaiting_human"]);
+  if (porNegocio.error) return undefined;
+  candidatos.push(...((porNegocio.data as Caso[] | null) ?? []));
+  if (conversas.length > 0) {
+    const porConversa = await admin
+      .from("agent_cases")
+      .select("id, opened_at")
+      .eq("organization_id", organizationId)
+      .in("conversation_id", conversas)
+      .in("status", ["awaiting_human"]);
+    if (porConversa.error) return undefined;
+    candidatos.push(...((porConversa.data as Caso[] | null) ?? []));
+  }
+  const maisRecente = candidatos.sort((a, b) => (b.opened_at ?? "").localeCompare(a.opened_at ?? ""))[0];
+  return maisRecente?.id ?? null;
 }
 
 export function pushDoCasoAtribuido(caseId: string): PushPayload {

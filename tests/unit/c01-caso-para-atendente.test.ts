@@ -13,8 +13,8 @@ vi.mock("@/lib/notifications/web_push", () => ({
 }));
 
 type Linha = Record<string, unknown>;
-type Banco = { agent_cases: Linha[]; crm_leads: Linha[]; user_organizations: Linha[] };
-let db: Banco = { agent_cases: [], crm_leads: [], user_organizations: [] };
+type Banco = Record<"agent_cases" | "crm_leads" | "user_organizations" | "conversations" | "crm_pipelines", Linha[]>;
+let db: Banco = { agent_cases: [], crm_leads: [], user_organizations: [], conversations: [], crm_pipelines: [] };
 function consulta(tabela: string) {
   const conds: ((l: Linha) => boolean)[] = [];
   let patch: Linha | null = null;
@@ -56,12 +56,26 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({ from: (t: s
 import { casoParaAtendenteHandler, escolherAtendente } from "@/lib/escalacao/caso-para-atendente.handler";
 
 const ORG = "org1";
+// Relativos ao relógio: a troca de dono grava `new Date()`, e o teste do push
+// repetido compara essa hora com a abertura do caso.
+const ABERTO_EM = () => new Date(Date.now() - 60_000).toISOString();
+const ONTEM = () => new Date(Date.now() - 86_400_000).toISOString();
 const evento = (caseId = "caso-1") => ({
   id: "e1", organization_id: ORG, event_type: "ai.case_opened", entity_kind: "agent_case", entity_id: caseId,
-  payload: { case_id: caseId, lead_id: "L1" }, metadata: {}, consumed_by: [], attempts: 0,
+  payload: { case_id: caseId }, metadata: {}, consumed_by: [], attempts: 0,
 });
 const membro = (user_id: string, role = "agent", extra: Linha = {}) => ({
   organization_id: ORG, user_id, role, accepted_at: "2026-10-20T10:00:00Z", revoked_at: null, ...extra,
+});
+// Como na produção: `openCase` não preenche `lead_id`; o caso ancora na conversa.
+const caso = (id: string, conversa: string, extra: Linha = {}) => ({
+  id, organization_id: ORG, status: "awaiting_human", lead_id: null, conversation_id: conversa,
+  opened_at: ABERTO_EM(), ...extra,
+});
+const negocio = (id: string, contato: string, extra: Linha = {}) => ({
+  id, organization_id: ORG, contact_id: contato, pipeline_id: "p1", status: "open", owner_user_id: null,
+  owner_kind: null, owner_agent_id: null, assigned_at: null, last_activity_at: null,
+  created_at: "2026-10-19T09:00:00Z", ...extra,
 });
 
 beforeEach(() => {
@@ -70,8 +84,10 @@ beforeEach(() => {
   estado.falhar = "";
   push.mockClear();
   db = {
-    agent_cases: [{ id: "caso-1", organization_id: ORG, status: "awaiting_human", lead_id: "L1" }],
-    crm_leads: [{ id: "L1", organization_id: ORG, owner_user_id: null, owner_kind: null, owner_agent_id: null, assigned_at: null }],
+    agent_cases: [caso("caso-1", "c1")],
+    conversations: [{ id: "c1", organization_id: ORG, contact_id: "k1" }],
+    crm_leads: [negocio("L1", "k1")],
+    crm_pipelines: [{ id: "p1", organization_id: ORG, is_default: true, is_archived: false }],
     user_organizations: [membro("priscila"), membro("maria"), membro("lauro", "admin")],
   };
 });
@@ -87,7 +103,7 @@ describe("escolherAtendente", () => {
 });
 
 describe("casoParaAtendenteHandler", () => {
-  it("negócio sem dono vai para uma atendente (nunca para o admin) e vira dono humano", async () => {
+  it("caso da produção (sem lead_id): acha o negócio pela conversa e o dá a uma atendente (nunca ao admin)", async () => {
     const r = await casoParaAtendenteHandler.handle(evento());
     expect(r).toMatchObject({ status: "ok", detail: "atribuido" });
     const l = db.crm_leads[0]!;
@@ -97,18 +113,45 @@ describe("casoParaAtendenteHandler", () => {
     expect(push).not.toHaveBeenCalled(); // o push sai pelo `lead.assigned` que a troca dispara
   });
 
-  it("alterna: a segunda vai para a outra (a primeira já tem um caso esperando)", async () => {
+  it("caso com lead_id (se o autor um dia preencher): usa o negócio dele", async () => {
+    db.agent_cases[0]!.lead_id = "L1";
+    db.agent_cases[0]!.conversation_id = null;
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r).toMatchObject({ status: "ok", detail: "atribuido" });
+    expect(["maria", "priscila"]).toContain(db.crm_leads[0]!.owner_user_id);
+  });
+
+  it("alterna pela conversa: a segunda vai para a outra (a primeira já tem um caso esperando)", async () => {
     await casoParaAtendenteHandler.handle(evento());
     const primeira = db.crm_leads[0]!.owner_user_id;
-    db.agent_cases.push({ id: "caso-2", organization_id: ORG, status: "awaiting_human", lead_id: "L2" });
-    db.crm_leads.push({ id: "L2", organization_id: ORG, owner_user_id: null, owner_kind: null, assigned_at: null });
-    await casoParaAtendenteHandler.handle({ ...evento("caso-2"), payload: { case_id: "caso-2", lead_id: "L2" } });
+    db.agent_cases.push(caso("caso-2", "c2"));
+    db.conversations.push({ id: "c2", organization_id: ORG, contact_id: "k2" });
+    db.crm_leads.push(negocio("L2", "k2"));
+    await casoParaAtendenteHandler.handle(evento("caso-2"));
     expect(db.crm_leads[1]!.owner_user_id).not.toBe(primeira);
   });
 
-  it("negócio que já tem uma pessoa: fica com ela e ela recebe 'Caso para você'", async () => {
-    db.crm_leads[0]!.owner_user_id = "maria";
-    db.crm_leads[0]!.owner_kind = "user";
+  it("alterna também com lead_id preenchido", async () => {
+    db.agent_cases[0]!.lead_id = "L1";
+    await casoParaAtendenteHandler.handle(evento());
+    const primeira = db.crm_leads[0]!.owner_user_id;
+    db.agent_cases.push(caso("caso-2", "c2", { lead_id: "L2" }));
+    db.crm_leads.push(negocio("L2", "k2"));
+    await casoParaAtendenteHandler.handle(evento("caso-2"));
+    expect(db.crm_leads[1]!.owner_user_id).not.toBe(primeira);
+  });
+
+  it("dois negócios abertos do contato: o do funil padrão; empate sem padrão = nenhum", async () => {
+    db.crm_leads = [negocio("L1", "k1", { pipeline_id: "p2" }), negocio("L9", "k1")];
+    await casoParaAtendenteHandler.handle(evento());
+    expect(db.crm_leads[0]!.owner_user_id).toBeNull();
+    expect(db.crm_leads[1]!.owner_user_id).toBeTruthy();
+    db.crm_leads = [negocio("L1", "k1", { pipeline_id: "p2" }), negocio("L9", "k1", { pipeline_id: "p3" })];
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("caso_sem_negocio");
+  });
+
+  it("negócio que já tem uma pessoa (de antes do caso): fica com ela e ela recebe 'Caso para você'", async () => {
+    Object.assign(db.crm_leads[0]!, { owner_user_id: "maria", owner_kind: "user", assigned_at: ONTEM() });
     const r = await casoParaAtendenteHandler.handle(evento());
     expect(r.status).toBe("ok");
     expect(db.crm_leads[0]!.owner_user_id).toBe("maria");
@@ -118,6 +161,22 @@ describe("casoParaAtendenteHandler", () => {
     expect(push.mock.calls[0]![2].href).toBe("/app/ai/cases?caso=caso-1");
   });
 
+  it("worker que atribuiu e caiu antes de marcar o evento: na nova tentativa, sem push repetido", async () => {
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("atribuido");
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r).toMatchObject({ status: "skipped", detail: "atribuido_por_este_caso" });
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("dona revogada ou com convite pendente: nenhum push ao aparelho dela", async () => {
+    Object.assign(db.crm_leads[0]!, { owner_user_id: "maria", owner_kind: "user", assigned_at: ONTEM() });
+    db.user_organizations = [membro("priscila"), membro("maria", "agent", { revoked_at: "2026-10-20T11:00:00Z" })];
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("ja_tinha_responsavel:fora_da_equipe");
+    db.user_organizations = [membro("priscila"), membro("maria", "agent", { accepted_at: null })];
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("ja_tinha_responsavel:fora_da_equipe");
+    expect(push).not.toHaveBeenCalled();
+  });
+
   it("sem atendente (só admin, convite pendente ou revogada): nada muda", async () => {
     db.user_organizations = [membro("lauro", "admin"), membro("p", "agent", { accepted_at: null }), membro("m", "agent", { revoked_at: "2026-10-01" })];
     const r = await casoParaAtendenteHandler.handle(evento());
@@ -125,22 +184,27 @@ describe("casoParaAtendenteHandler", () => {
     expect(db.crm_leads[0]!.owner_user_id).toBeNull();
   });
 
-  it("caso que espera o cliente, sem negócio ou desligado: não mexe", async () => {
+  it("caso que espera o cliente, sem negócio aberto, sem conversa ou desligado: não mexe", async () => {
     db.agent_cases[0]!.status = "awaiting_lead";
     expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("caso_nao_espera_pessoa");
     db.agent_cases[0]!.status = "awaiting_human";
-    db.agent_cases[0]!.lead_id = null;
+    db.crm_leads[0]!.status = "won";
     expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("caso_sem_negocio");
-    db.agent_cases[0]!.lead_id = "L1";
+    db.crm_leads[0]!.status = "open";
+    db.agent_cases[0]!.conversation_id = null;
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("caso_sem_negocio");
+    db.agent_cases[0]!.conversation_id = "c1";
     estado.ligado = "desligado";
     expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("desligado");
     expect(db.crm_leads[0]!.owner_user_id).toBeNull();
   });
 
-  it("leitura que falha: tenta de novo, sem atribuir", async () => {
-    estado.falhar = "user_organizations";
-    const r = await casoParaAtendenteHandler.handle(evento());
-    expect(r.status).toBe("retry");
-    expect(db.crm_leads[0]!.owner_user_id).toBeNull();
+  it("leitura que falha (equipe ou conversa): tenta de novo, sem atribuir", async () => {
+    for (const tabela of ["user_organizations", "conversations"]) {
+      estado.falhar = tabela;
+      const r = await casoParaAtendenteHandler.handle(evento());
+      expect(r.status).toBe("retry");
+      expect(db.crm_leads[0]!.owner_user_id).toBeNull();
+    }
   });
 });

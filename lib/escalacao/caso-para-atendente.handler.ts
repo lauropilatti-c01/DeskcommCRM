@@ -18,10 +18,22 @@
  * ainda sem pessoa (`owner_user_id is null`): duas aberturas ao mesmo tempo não
  * tiram o negócio de quem o recebeu primeiro. A IA continua atendendo: o motor
  * não lê o dono do negócio. Desliga com `CASOS_PARA_ATENDENTES=desligado`.
+ *
+ * O negócio do caso: `openCase` (do autor) nunca preenche `agent_cases.lead_id`
+ * (na produção, todos os casos têm `lead_id` nulo); o caso ancora na conversa.
+ * Sem `lead_id`, vale o negócio aberto do contato da conversa (`negocioDoCaso`).
+ * A carga de cada atendente segue o mesmo caminho.
+ *
+ * A dona que já existia só recebe o push daqui se for da equipe agora, e se o
+ * negócio não foi atribuído por este mesmo caso: o worker que atribuiu e caiu
+ * antes de marcar o evento consumido volta aqui e acha a dona, mas o push dela
+ * já saiu pelo `lead.assigned` da troca.
  */
 import { env } from "@/lib/env";
 import type { EventHandler, EventRow, HandlerResult } from "@/lib/event-log/dispatcher";
-import { pushDoCasoAtribuido } from "@/lib/notifications/destino-do-push";
+import { resolveActiveLeadForContact, type LeadCandidate } from "@/lib/leads/active-lead";
+import type { LeadStatus } from "@/lib/types/leads";
+import { membrosAtivos, pushDoCasoAtribuido, type AdminDoPush } from "@/lib/notifications/destino-do-push";
 import { vapidPronto } from "@/lib/notifications/vapid";
 import { enviarPushAoUsuario } from "@/lib/notifications/web_push";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -66,33 +78,188 @@ export function escolherAtendente(
   })[0] ?? null;
 }
 
+type Admin = ReturnType<typeof createAdminClient>;
+type Caso = { status?: string; lead_id?: string | null; conversation_id?: string | null; opened_at?: string | null };
+type Negocio = { id: string; owner_user_id: string | null; assigned_at: string | null };
+type Falha = { erro: string };
+const falhou = (v: unknown): v is Falha => typeof v === "object" && v !== null && "erro" in v;
+
+/**
+ * O negócio do caso: o `lead_id`, se vier; senão, o negócio aberto do contato da
+ * conversa, escolhido pela mesma regra com que o motor move o card
+ * (`resolveActiveLeadForContact`): o único aberto; senão o do funil padrão;
+ * senão o de atividade mais recente (`last_activity_at`, que só anda com
+ * interação; `updated_at` anda com qualquer escrita, inclusive de sistema, e
+ * `created_at` daria o negócio mais novo, não o que está em conversa); empate
+ * = nenhum. Assim o caso fica no mesmo card que a IA está mexendo.
+ * `null` = sem negócio (ou ambíguo); `{ erro }` = leitura que falhou.
+ */
+async function negocioDoCaso(admin: Admin, org: string, caso: Caso): Promise<Negocio | null | Falha> {
+  if (caso.lead_id) {
+    const { data, error } = await admin
+      .from("crm_leads")
+      .select("id, owner_user_id, assigned_at")
+      .eq("organization_id", org)
+      .eq("id", caso.lead_id)
+      .maybeSingle();
+    if (error) return { erro: `leitura do negócio falhou: ${error.message}` };
+    return (data as Negocio | null) ?? null;
+  }
+  if (!caso.conversation_id) return null;
+  const { data: conversa, error: erroDaConversa } = await admin
+    .from("conversations")
+    .select("contact_id")
+    .eq("organization_id", org)
+    .eq("id", caso.conversation_id)
+    .maybeSingle();
+  if (erroDaConversa) return { erro: `leitura da conversa falhou: ${erroDaConversa.message}` };
+  const contato = (conversa as { contact_id?: string | null } | null)?.contact_id ?? null;
+  if (!contato) return null;
+  const { data: abertos, error: erroDosNegocios } = await admin
+    .from("crm_leads")
+    .select("id, organization_id, pipeline_id, status, last_activity_at, created_at, owner_user_id, assigned_at")
+    .eq("organization_id", org)
+    .eq("contact_id", contato)
+    .eq("status", "open");
+  if (erroDosNegocios) return { erro: `leitura dos negócios falhou: ${erroDosNegocios.message}` };
+  const linhas = (abertos ?? []) as (Negocio & {
+    organization_id: string;
+    pipeline_id: string;
+    status: LeadStatus;
+    last_activity_at: string | null;
+    created_at: string;
+  })[];
+  if (linhas.length === 0) return null;
+  let funilPadrao: string | null = null;
+  if (linhas.length > 1) {
+    const { data: padrao, error: erroDoFunil } = await admin
+      .from("crm_pipelines")
+      .select("id")
+      .eq("organization_id", org)
+      .eq("is_default", true)
+      .eq("is_archived", false)
+      .limit(1)
+      .maybeSingle();
+    if (erroDoFunil) return { erro: `leitura do funil padrão falhou: ${erroDoFunil.message}` };
+    funilPadrao = (padrao as { id?: string } | null)?.id ?? null;
+  }
+  const candidatos: LeadCandidate[] = linhas.map((l) => ({
+    id: l.id,
+    organization_id: l.organization_id,
+    pipeline_id: l.pipeline_id,
+    status: l.status,
+    last_activity_at: l.last_activity_at,
+    created_at: l.created_at,
+  }));
+  const alvo = resolveActiveLeadForContact(candidatos, { defaultPipelineId: funilPadrao });
+  if (!alvo.routed) return null;
+  const n = linhas.find((l) => l.id === alvo.leadId)!;
+  return { id: n.id, owner_user_id: n.owner_user_id ?? null, assigned_at: n.assigned_at ?? null };
+}
+
+/**
+ * Casos esperando gente por atendente. O caso chega ao negócio pelo `lead_id`
+ * ou, como na produção, pela conversa: conta para quem é dona de um negócio
+ * aberto do contato. O caso que está sendo distribuído não conta.
+ */
+async function cargas(
+  admin: Admin,
+  org: string,
+  caseId: string,
+  elegiveis: readonly string[],
+): Promise<Map<string, number> | Falha> {
+  const { data, error } = await admin
+    .from("agent_cases")
+    .select("id, lead_id, conversation_id")
+    .eq("organization_id", org)
+    .eq("status", "awaiting_human");
+  if (error) return { erro: `leitura dos casos falhou: ${error.message}` };
+  const casos = ((data ?? []) as { id: string; lead_id: string | null; conversation_id: string | null }[]).filter(
+    (c) => c.id !== caseId,
+  );
+  const leadIds = [...new Set(casos.flatMap((c) => (c.lead_id ? [c.lead_id] : [])))];
+  const convIds = [...new Set(casos.flatMap((c) => (!c.lead_id && c.conversation_id ? [c.conversation_id] : [])))];
+
+  const donoDoNegocio = new Map<string, string>();
+  if (leadIds.length > 0) {
+    const { data: donos, error: erroDosDonos } = await admin
+      .from("crm_leads")
+      .select("id, owner_user_id")
+      .eq("organization_id", org)
+      .in("id", leadIds)
+      .in("owner_user_id", [...elegiveis]);
+    if (erroDosDonos) return { erro: `leitura das cargas falhou: ${erroDosDonos.message}` };
+    for (const d of (donos ?? []) as { id: string; owner_user_id: string }[]) donoDoNegocio.set(d.id, d.owner_user_id);
+  }
+  const contatoDaConversa = new Map<string, string>();
+  const donasDoContato = new Map<string, Set<string>>();
+  if (convIds.length > 0) {
+    const { data: conversas, error: erroDasConversas } = await admin
+      .from("conversations")
+      .select("id, contact_id")
+      .eq("organization_id", org)
+      .in("id", convIds);
+    if (erroDasConversas) return { erro: `leitura das conversas falhou: ${erroDasConversas.message}` };
+    for (const c of (conversas ?? []) as { id: string; contact_id: string | null }[]) {
+      if (c.contact_id) contatoDaConversa.set(c.id, c.contact_id);
+    }
+    const contatos = [...new Set(contatoDaConversa.values())];
+    if (contatos.length > 0) {
+      const { data: negocios, error: erroDosNegocios } = await admin
+        .from("crm_leads")
+        .select("contact_id, owner_user_id")
+        .eq("organization_id", org)
+        .in("contact_id", contatos)
+        .eq("status", "open")
+        .in("owner_user_id", [...elegiveis]);
+      if (erroDosNegocios) return { erro: `leitura das cargas falhou: ${erroDosNegocios.message}` };
+      for (const n of (negocios ?? []) as { contact_id: string; owner_user_id: string }[]) {
+        const donas = donasDoContato.get(n.contact_id) ?? new Set<string>();
+        donas.add(n.owner_user_id);
+        donasDoContato.set(n.contact_id, donas);
+      }
+    }
+  }
+
+  const abertos = new Map<string, number>();
+  for (const c of casos) {
+    const donas = c.lead_id
+      ? new Set(donoDoNegocio.has(c.lead_id) ? [donoDoNegocio.get(c.lead_id)!] : [])
+      : (donasDoContato.get(contatoDaConversa.get(c.conversation_id ?? "") ?? "") ?? new Set<string>());
+    for (const d of donas) abertos.set(d, (abertos.get(d) ?? 0) + 1);
+  }
+  return abertos;
+}
+
 async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
   const admin = createAdminClient();
   const org = row.organization_id;
 
   const { data: caso, error } = await admin
     .from("agent_cases")
-    .select("status, lead_id")
+    .select("status, lead_id, conversation_id, opened_at")
     .eq("organization_id", org)
     .eq("id", caseId)
     .maybeSingle();
   if (error) return tentarDeNovo(`leitura do caso falhou: ${error.message}`);
-  const c = caso as { status?: string; lead_id?: string | null } | null;
+  const c = caso as Caso | null;
   if (c?.status !== "awaiting_human") return resultado("skipped", "caso_nao_espera_pessoa");
-  if (!c.lead_id) return resultado("skipped", "caso_sem_negocio");
 
-  const { data: lead, error: erroDoLead } = await admin
-    .from("crm_leads")
-    .select("owner_user_id")
-    .eq("organization_id", org)
-    .eq("id", c.lead_id)
-    .maybeSingle();
-  if (erroDoLead) return tentarDeNovo(`leitura do negócio falhou: ${erroDoLead.message}`);
-  if (!lead) return resultado("skipped", "negocio_ausente");
-  const dona = (lead as { owner_user_id?: string | null }).owner_user_id ?? null;
+  const negocio = await negocioDoCaso(admin, org, c);
+  if (falhou(negocio)) return tentarDeNovo(negocio.erro);
+  if (!negocio) return resultado("skipped", "caso_sem_negocio");
+  const dona = negocio.owner_user_id;
 
   // Já tem uma pessoa: não há troca de dono (nem `lead.assigned`), então o push sai daqui.
   if (dona) {
+    // Atribuição posterior à abertura do caso: foi este caso que deu a dona (ou
+    // alguém a deu à mão depois), e o `lead.assigned` já levou o "Caso para você".
+    if (negocio.assigned_at && c.opened_at && Date.parse(negocio.assigned_at) >= Date.parse(c.opened_at)) {
+      return resultado("skipped", "atribuido_por_este_caso");
+    }
+    const ativas = await membrosAtivos(admin as unknown as AdminDoPush, org, [dona]);
+    if (ativas === null) return tentarDeNovo("leitura da equipe falhou");
+    if (!ativas.has(dona)) return resultado("skipped", "ja_tinha_responsavel:fora_da_equipe");
     if (!vapidPronto()) return resultado("skipped", "ja_tinha_responsavel:vapid_ausente");
     const { sent } = await enviarPushAoUsuario(org, dona, pushDoCasoAtribuido(caseId));
     return resultado("ok", `ja_tinha_responsavel:sent:${sent}`);
@@ -109,28 +276,8 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
   const elegiveis = ((membros ?? []) as { user_id: string }[]).map((m) => m.user_id);
   if (elegiveis.length === 0) return resultado("skipped", "sem_atendente");
 
-  // Carga de cada uma: casos esperando gente cujos negócios ela já tem.
-  const { data: abertosRows, error: erroDosAbertos } = await admin
-    .from("agent_cases")
-    .select("lead_id")
-    .eq("organization_id", org)
-    .eq("status", "awaiting_human")
-    .not("lead_id", "is", null);
-  if (erroDosAbertos) return tentarDeNovo(`leitura dos casos falhou: ${erroDosAbertos.message}`);
-  const leadsAbertos = [...new Set(((abertosRows ?? []) as { lead_id: string }[]).map((r) => r.lead_id))];
-  const abertos = new Map<string, number>();
-  if (leadsAbertos.length > 0) {
-    const { data: donos, error: erroDosDonos } = await admin
-      .from("crm_leads")
-      .select("owner_user_id")
-      .eq("organization_id", org)
-      .in("id", leadsAbertos)
-      .in("owner_user_id", elegiveis);
-    if (erroDosDonos) return tentarDeNovo(`leitura das cargas falhou: ${erroDosDonos.message}`);
-    for (const d of (donos ?? []) as { owner_user_id: string }[]) {
-      abertos.set(d.owner_user_id, (abertos.get(d.owner_user_id) ?? 0) + 1);
-    }
-  }
+  const abertos = await cargas(admin, org, caseId, elegiveis);
+  if (falhou(abertos)) return tentarDeNovo(abertos.erro);
   const ultima = new Map<string, string>();
   const { data: recentes, error: erroDosRecentes } = await admin
     .from("crm_leads")
@@ -157,7 +304,7 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
       assigned_at: new Date().toISOString(),
     })
     .eq("organization_id", org)
-    .eq("id", c.lead_id)
+    .eq("id", negocio.id)
     .is("owner_user_id", null)
     .select("id");
   if (erroDaTroca) return tentarDeNovo(`atribuição falhou: ${erroDaTroca.message}`);

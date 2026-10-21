@@ -9,6 +9,7 @@ import type { PushPayload } from "./push_payload";
 import { rotuloDoContato, SEM_NOME } from "@/lib/contacts/rotulo-do-contato";
 import {
   casoEsperandoGente,
+  membrosAtivos,
   modoDoPushDeMensagem,
   pushDoCasoAtribuido,
   responsaveisDaConversa,
@@ -230,8 +231,26 @@ export const webPushInboundHandler: EventHandler = {
     if (row.event_type === "lead.assigned") {
       const toUserId = typeof row.payload.to_user_id === "string" ? row.payload.to_user_id : lead.ownerUserId;
       // (C01, -c01.16) Negócio atribuído com um caso esperando gente: o push diz
-      // que é um caso e abre o caso. Leitura que falha cai no aviso de sempre.
+      // que é um caso e abre o caso. Leitura do caso que falha cai no aviso de
+      // sempre. E só para quem é da equipe agora: negócio atribuído a alguém já
+      // revogado não leva o aviso ao celular dela.
       if (toUserId) {
+        const ativos = await membrosAtivos(
+          createAdminClient() as unknown as AdminDoPush,
+          row.organization_id,
+          [toUserId],
+        );
+        if (ativos === null) {
+          return {
+            consumer_key: WEB_PUSH_INBOUND_KEY,
+            status: "retry",
+            retry_at: new Date(Date.now() + 60_000).toISOString(),
+            detail: "equipe_ilegivel",
+          };
+        }
+        if (!ativos.has(toUserId)) {
+          return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "skipped", detail: "destinatario_fora_da_equipe" };
+        }
         const caso = await casoEsperandoGente(
           createAdminClient() as unknown as AdminDoPush,
           row.organization_id,
