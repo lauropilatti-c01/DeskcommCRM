@@ -1,6 +1,8 @@
 /**
  * (C01, -c01.16) O CONTEXTO DO CARD que o modelo lê: os campos definidos no funil
- * entram primeiro, na ordem do funil, com tetos de 30 campos e 1.400 caracteres.
+ * entram primeiro, na ordem do funil, depois os nativos do Deskcomm (`next_action`,
+ * `need`, `timeline`, `budget`, `authority`, `reason`), depois o resto, com tetos de 40
+ * campos e 1.600 caracteres.
  * Antes, o corte seguia a ordem do `jsonb` (chave curta primeiro) com 20 campos e 800
  * caracteres, e o lead antigo perdia `plano_oferecido`, `inscrito_tp2026` e
  * `objecao_principal`. Card sem definição no funil continua como antes.
@@ -13,6 +15,7 @@ import { projetarRetornoDeTool } from "@/lib/agent-engine/agent/projecao";
 import {
   camposCompactosDoCard,
   lerCardDoContato,
+  CAMPOS_NATIVOS_DO_CARD,
   TETO_DE_CAMPOS_COM_FUNIL,
   TETO_DE_CAMPOS_NO_CONTEXTO,
   TETO_DO_BLOCO_COM_FUNIL,
@@ -81,38 +84,47 @@ describe("camposCompactosDoCard com a ordem do funil", () => {
     for (const k of DO_ATENDIMENTO) expect(comFunil).toHaveProperty(k);
   });
 
-  it("os campos do funil vêm primeiro, na ordem do funil; os demais depois, na ordem de antes", () => {
-    const card = comoJsonb(B);
+  it("ordem: os do funil (na ordem do funil), depois os nativos (nessa ordem), depois o resto na ordem de antes", () => {
+    const card = comoJsonb({ ...B, budget: "até 2 mil", reason: "quer estabilidade", authority: "decide sozinho" });
     const chaves = Object.keys(camposCompactosDoCard(card, FUNIL));
     const doFunil = FUNIL.filter((k) => chaves.includes(k));
+    const nativos = CAMPOS_NATIVOS_DO_CARD.filter((k) => chaves.includes(k));
+    expect(nativos).toEqual(["next_action", "need", "timeline", "budget", "authority", "reason"]);
     expect(chaves.slice(0, doFunil.length)).toEqual(doFunil);
-    const resto = Object.keys(card).filter((k) => chaves.includes(k) && !FUNIL.includes(k));
-    expect(chaves.slice(doFunil.length)).toEqual(resto);
+    expect(chaves.slice(doFunil.length, doFunil.length + nativos.length)).toEqual(nativos);
+    const resto = Object.keys(card).filter(
+      (k) => chaves.includes(k) && !FUNIL.includes(k) && !(nativos as string[]).includes(k),
+    );
+    expect(chaves.slice(doFunil.length + nativos.length)).toEqual(resto);
   });
 
-  it("funil do laboratório: A cabe inteiro; em B e C entram todos os campos do funil, e o corte cai nos de fora dele", () => {
+  it("funil do laboratório: os cenários A, B e C cabem inteiros, e nada que entra hoje fica de fora", () => {
     const elegiveis = (card: Record<string, unknown>) =>
       Object.keys(card).filter((k) => k in camposCompactosDoCard({ [k]: card[k] }, FUNIL));
     for (const cenario of [A, B, C]) {
       const card = comoJsonb(cenario);
       const r = camposCompactosDoCard(card, FUNIL);
-      for (const k of elegiveis(card).filter((k) => FUNIL.includes(k))) expect(r).toHaveProperty(k);
+      expect(Object.keys(r).sort()).toEqual(elegiveis(card).sort());
+      for (const k of Object.keys(camposCompactosDoCard(card))) expect(r).toHaveProperty(k);
       expect(JSON.stringify(r).length).toBeLessThanOrEqual(TETO_DO_BLOCO_COM_FUNIL);
     }
-    const a = comoJsonb(A);
-    expect(Object.keys(camposCompactosDoCard(a, FUNIL)).sort()).toEqual(elegiveis(a).sort());
   });
 
-  it("tetos: com o funil, 30 campos e 1.400 caracteres; sem o funil, 20 e 800 como antes", () => {
-    expect([TETO_DE_CAMPOS_COM_FUNIL, TETO_DO_BLOCO_COM_FUNIL]).toEqual([30, 1400]);
-    const muitos = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`campo_${i}`, "v"]));
-    expect(Object.keys(camposCompactosDoCard(muitos, ["campo_49"]))).toHaveLength(30);
+  it("tetos: com o funil, 40 campos e 1.600 caracteres; sem o funil, 20 e 800 como antes", () => {
+    expect([TETO_DE_CAMPOS_COM_FUNIL, TETO_DO_BLOCO_COM_FUNIL]).toEqual([40, 1600]);
+    const muitos = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`campo_${i}`, "v"]));
+    expect(Object.keys(camposCompactosDoCard(muitos, ["campo_59"]))).toHaveLength(40);
     expect(Object.keys(camposCompactosDoCard(muitos))).toHaveLength(TETO_DE_CAMPOS_NO_CONTEXTO);
-    const grandes = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`c${i}`, "z".repeat(119)]));
+    const grandes = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`c${i}`, "z".repeat(119)]));
     const comFunil = JSON.stringify(camposCompactosDoCard(grandes, ["c0"]));
-    expect(comFunil.length).toBeLessThanOrEqual(1400);
-    expect(comFunil.length).toBeGreaterThan(800);
+    expect(comFunil.length).toBeLessThanOrEqual(1600);
+    expect(comFunil.length).toBeGreaterThan(1400);
     expect(JSON.stringify(camposCompactosDoCard(grandes)).length).toBeLessThanOrEqual(TETO_DO_BLOCO_NO_CONTEXTO);
+  });
+
+  it("sem o funil, os nativos não ganham prioridade (tudo como antes)", () => {
+    const card = comoJsonb({ a: "1", next_action: "ligar" });
+    expect(Object.keys(camposCompactosDoCard(card))).toEqual(["a", "next_action"]);
   });
 
   it("campo `_`, dado pessoal e chave do funil ausente no card continuam fora", () => {

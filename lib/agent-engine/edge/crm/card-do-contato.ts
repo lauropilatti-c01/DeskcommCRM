@@ -143,8 +143,14 @@ export const TETO_DO_BLOCO_NO_CONTEXTO = 800;
  * quem entra, e os tetos maiores fazem caber o card de um lead antigo que entra
  * pela campanha. Card sem definição no funil fica nos tetos de cima.
  */
-export const TETO_DE_CAMPOS_COM_FUNIL = 30;
-export const TETO_DO_BLOCO_COM_FUNIL = 1400;
+export const TETO_DE_CAMPOS_COM_FUNIL = 40;
+export const TETO_DO_BLOCO_COM_FUNIL = 1600;
+/**
+ * (C01, -c01.16) Os campos que o próprio Deskcomm grava no card (a qualificação do
+ * agente), logo depois dos do funil: não são definidos no funil, e sem eles na frente
+ * o lead antigo os perdia para carimbo técnico.
+ */
+export const CAMPOS_NATIVOS_DO_CARD = ['next_action', 'need', 'timeline', 'budget', 'authority', 'reason'] as const;
 
 /**
  * Os campos do card como o modelo os lê: só valores curtos e legíveis.
@@ -158,8 +164,9 @@ export const TETO_DO_BLOCO_COM_FUNIL = 1400;
  * tetos acima, na ordem das chaves; o que não cabe fica de fora.
  *
  * (C01, -c01.16) Com `ordemDoFunil` (as chaves definidas no funil do card), esses
- * campos vêm primeiro, na ordem do funil, e os demais depois, na ordem de antes; os
- * tetos passam a `TETO_DE_CAMPOS_COM_FUNIL` e `TETO_DO_BLOCO_COM_FUNIL`. Sem
+ * campos vêm primeiro, na ordem do funil; depois os nativos (`CAMPOS_NATIVOS_DO_CARD`);
+ * depois os demais, na ordem de antes. Os tetos passam a `TETO_DE_CAMPOS_COM_FUNIL` e
+ * `TETO_DO_BLOCO_COM_FUNIL`. Sem
  * definição no funil, tudo como antes. A projeção do prompt (`projetarRetornoDeTool`)
  * continua depois daqui.
  */
@@ -170,8 +177,10 @@ export function camposCompactosDoCard(
   const comFunil = ordemDoFunil.length > 0;
   const tetoDeCampos = comFunil ? TETO_DE_CAMPOS_COM_FUNIL : TETO_DE_CAMPOS_NO_CONTEXTO;
   const tetoDoBloco = comFunil ? TETO_DO_BLOCO_COM_FUNIL : TETO_DO_BLOCO_NO_CONTEXTO;
-  const doFunil = ordemDoFunil.filter((k) => Object.prototype.hasOwnProperty.call(campos, k));
-  const naOrdem = [...new Set([...doFunil, ...Object.keys(campos)])];
+  const primeiro = comFunil ? [...ordemDoFunil, ...CAMPOS_NATIVOS_DO_CARD] : [];
+  const naOrdem = [
+    ...new Set([...primeiro.filter((k) => Object.prototype.hasOwnProperty.call(campos, k)), ...Object.keys(campos)]),
+  ];
   const saida: Record<string, string | number | boolean> = {};
   let tamanho = 2;
   for (const chave of naOrdem) {
