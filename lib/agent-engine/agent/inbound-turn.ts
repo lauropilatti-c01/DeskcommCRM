@@ -5794,18 +5794,11 @@ async function executarTurnoDoAgente(
             { tenantId, conversationId: input.conversationId, agentId: agentConfig.agentId },
             { ...parsed.data, contextSnapshot: buildCaseContextSnapshot() },
           );
-          // (C01, -c01.15) Com a passagem desligada, o caso já aberto (o pedido de uma
-          // pessoa abre um antes do modelo) é o mesmo desfecho: o pedido está com a equipe.
-          // (C01, -c01.16) A dúvida nova entra no caso aberto (nota do agente) antes do "vou verificar";
-          // sem caso aberto na hora da nota (fechou no meio), tenta abrir de novo, uma vez.
+          // (C01, -c01.15/16) sem passagem, caso já aberto = a dúvida vira nota nele; fechou no meio: abre de novo
           if (!res.ok && semPassagem && res.error.code === 'case_already_open') {
             const noCaso = await registrarDuvidaNoCasoAberto(pool, tenantId, input.conversationId, parsed.data);
             if (noCaso !== null) return { ok: true, case_id: noCaso, message: RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM };
-            res = await openCase(
-              pool,
-              { tenantId, conversationId: input.conversationId, agentId: agentConfig.agentId },
-              { ...parsed.data, contextSnapshot: buildCaseContextSnapshot() },
-            );
+            res = await openCase(pool, { tenantId, conversationId: input.conversationId, agentId: agentConfig.agentId }, { ...parsed.data, contextSnapshot: buildCaseContextSnapshot() });
           }
           if (!res.ok) return res;
           openedCaseThisTurn = true;
