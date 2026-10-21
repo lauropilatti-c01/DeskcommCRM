@@ -3541,7 +3541,7 @@ async function executarTurnoDoAgente(
     if (desfechoDoGancho.enviadasAntes !== undefined)
       acrescentarEnviadasAntesNoContexto(openingContext.context.messages, desfechoDoGancho.enviadasAntes, fusoDaOrg);
     if (desfechoDoGancho.camposDoCard !== undefined) {
-      const campos = camposCompactosDoCard(desfechoDoGancho.camposDoCard);
+      const campos = camposCompactosDoCard(desfechoDoGancho.camposDoCard, desfechoDoGancho.ordemDoFunil);
       if (Object.keys(campos).length > 0) openingContext.context.campos_do_card = campos;
       else delete openingContext.context.campos_do_card;
     }

@@ -844,6 +844,8 @@ export type DesfechoDoGancho =
       fim: false;
       resumo?: { mensagemId: string; sentAt: string | null; texto: string };
       camposDoCard?: Record<string, unknown>;
+      /** (C01, -c01.16) A ordem dos campos do funil do card relido (`CardDoContato.ordemDoFunil`). */
+      ordemDoFunil?: string[];
       /**
        * (C01, -c01.15) O que o `enviar_antes` mandou NESTA execução, na ordem: o turno
        * acrescenta ao histórico já lido (`acrescentarEnviadasAntesNoContexto`).
@@ -997,7 +999,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     await apagarMemoriaSePedida(ctx, resposta);
     const gravou = await aplicarGravar(ctx, card, resposta.gravar);
     const relido = gravou ? await lerCardComCuidado(ctx) : null;
-    const campos = relido !== null ? { camposDoCard: relido.campos, ...antes } : antes;
+    const campos = relido !== null ? { camposDoCard: relido.campos, ordemDoFunil: relido.ordemDoFunil, ...antes } : antes;
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
     const f = decisao.formulario;
     if (f !== null) {
