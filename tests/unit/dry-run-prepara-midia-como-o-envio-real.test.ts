@@ -268,6 +268,9 @@ describe("dry-run prepara a mídia do produto como o envio real (#2490)", () => 
     expect(bloco).toContain(`conversationId: PASTA_DE_TESTE_DE_MIDIA`);
     // E o envio real continua com a dele — a prévia não pode tê-la substituído.
     const send = fonte.slice(fonte.indexOf("send_message: tool({"), fonte.indexOf("update_lead_state: tool({"));
-    expect(send).toContain("prepararFotosDoProduto(pool, copiarFotoNoStorage(runLog),");
+    // (C01) `deps.copiarFoto` existe só para o invariante da recuperação
+    // (`c01-recuperacao-com-falha-na-posicao-1`); nenhum código de produção o passa,
+    // e sem ele vale a cópia real, como no autor.
+    expect(send).toContain("prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog),");
   });
 });

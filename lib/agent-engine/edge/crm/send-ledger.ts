@@ -230,8 +230,12 @@ async function ocuparPosicao(
   store: LedgerStore,
   input: Intent,
   hash: string,
-): Promise<{ kind: "key"; key: string } | { kind: "outcome"; outcome: SendOutcome }> {
+): Promise<{ kind: "key"; key: string; replay: boolean } | { kind: "outcome"; outcome: SendOutcome }> {
   let key: string;
+  // Chave saída de `create`, `rotate` ou da próxima posição livre acabou de nascer:
+  // nenhuma mensagem pode carregá-la (a otimização do autor na 1.86). Só a chave do
+  // recibo anterior, reaproveitada como está, é replay.
+  let replay = false;
   try {
     key = await store.create(input, hash);
   } catch (error) {
@@ -267,9 +271,10 @@ async function ocuparPosicao(
         };
       if (prior.status === "vetoed") return { kind: "outcome", outcome: { kind: "blocked", idempotencyKey: key } };
       if (prior.status === "failed") key = await store.rotate(input, hash);
+      else replay = true;
     }
   }
-  return { kind: "key", key };
+  return { kind: "key", key, replay };
 }
 /** Inline e daemon compartilham identidade (job,seq), reconciliação e mensagem.
  * Página/worker perdido não cria uma segunda intenção. queued é reavaliado pelo
@@ -313,7 +318,7 @@ export async function sendWithLedger(
     const posicao = await ocuparPosicao(store, input, hash);
     if (posicao.kind !== "key") return posicao.outcome;
     key = posicao.key;
-    existing = await store.message(input.tenantId, key);
+    existing = posicao.replay ? await store.message(input.tenantId, key) : null;
   }
   let message = existing;
   if (!message || message.status === "queued") {

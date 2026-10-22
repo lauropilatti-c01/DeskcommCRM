@@ -392,17 +392,22 @@ export interface CorteDoLaco {
 export function fimDoLacoPorLimite(
   resultado: {
     finishReason: string;
-    steps: ReadonlyArray<{ usage?: { outputTokens?: number } }>;
+    // (Junção da 1.86.0) Opcional: resultado sem `steps` (o dublê de um provedor
+    // que responde numa etapa só, como em `custo-do-provedor-personalizado-vem-do-catalogo`)
+    // conta como uma etapa, com o uso do próprio resultado.
+    steps?: ReadonlyArray<{ usage?: { outputTokens?: number } }>;
+    usage?: { outputTokens?: number };
   },
   limites: { maxSteps?: number; maxOutputTokens?: number },
 ): CorteDoLaco | null {
-  const etapas = resultado.steps.length;
+  const passos = resultado.steps ?? [{ usage: resultado.usage }];
+  const etapas = passos.length;
   if (resultado.finishReason === 'length') {
     return {
       motivo: 'teto_de_saida',
       // 0 = sem teto nosso: parou no máximo do próprio modelo.
       teto: limites.maxOutputTokens ?? 0,
-      gastos: resultado.steps.at(-1)?.usage?.outputTokens ?? 0,
+      gastos: passos.at(-1)?.usage?.outputTokens ?? 0,
       etapas,
     };
   }

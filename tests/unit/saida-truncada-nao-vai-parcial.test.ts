@@ -67,7 +67,8 @@ describe("turno: detecção, retry limitado e falha terminal visível", () => {
     const bloco = turno.slice(i - 700, i);
     expect(bloco).toContain("saidaTruncada");
     expect(bloco).toContain("outcomes.length === 0");
-    expect(bloco).toContain("seq === 0");
+    // (C01) Contagem de entregas, não a posição `seq` (C54, rodada 4).
+    expect(bloco).toContain("!leadTemResposta");
     expect(bloco).toContain("tentativasDeEnvio === 0");
   });
 

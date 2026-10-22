@@ -115,7 +115,10 @@ describe("decisão terminal: DEPOIS da correção, com os flags re-avaliados", (
     // veto — o veto é a razão e já ensinou) não escala a caso humano.
     expect(bloco).toContain("outcomes.length === 0");
     expect(bloco).toContain("tentativasDeEnvio === 0");
-    expect(bloco).toContain("seq === 0");
+    // (C01) "Nada despachado" é a contagem de entregas (`leadTemResposta`), não a
+    // posição `seq`, que conta também o envio que falhou (C54, rodada 4;
+    // `c01-recuperacao-conta-entregas-nao-posicao`).
+    expect(bloco).toContain("!leadTemResposta");
     expect(bloco).toContain("!preview");
   });
 
