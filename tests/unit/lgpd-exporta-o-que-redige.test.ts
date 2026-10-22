@@ -39,7 +39,11 @@ import { describe, expect, it } from "vitest";
  *
  * Que o conteúdo exportado seja suficiente — só que a tabela é VISITADA.
  * E não olha o PDF: `activities` está no payload e não no relatório, o que é
- * legítimo (o worker sobe `data.json` E `report.pdf`, e o JSON leva tudo).
+ * legítimo (o worker sobe `data.json` E `report.pdf`, e o JSON leva o payload).
+ * "Leva o payload" tem exceção desde o doc 103: `copiaDoTitular` tira do
+ * arquivo o que é da equipe, e duas seções que a cascata redige —
+ * `conversation_notes` e `case_chat_messages` — são VISITADAS aqui e não vão ao
+ * titular. É decisão do dono, não esquecimento: ver `lib/lgpd/copia-do-titular.ts`.
  */
 
 const RAIZ = path.resolve(__dirname, "../..");
@@ -83,6 +87,33 @@ function tabelasExportadas(): string[] {
     .sort();
 }
 
+/**
+ * Colunas de `contacts` que um gatilho de anonimização ZERA (`new.<coluna> :=`
+ * em função com `anonimiz` no nome). A varredura por TABELA não as vê: o
+ * `.from("contacts")` já existe, e uma coluna nova apagada na anonimização
+ * passaria fora do `select` do export sem ninguém notar (PR #2439,
+ * `address_book_name`).
+ */
+function colunasZeradasNaAnonimizacao(): string[] {
+  const colunas = new Set<string>();
+  const abre = /create or replace function\s+"?public"?\.\s*"?([a-z_]*anonimiz[a-z_]*)"?/gi;
+  for (const m of BASELINE.matchAll(abre)) {
+    const inicio = m.index ?? 0;
+    const fim = BASELINE.indexOf("$;", inicio);
+    const corpo = BASELINE.slice(inicio, fim === -1 ? BASELINE.length : fim);
+    for (const a of corpo.matchAll(/\bnew\.([a-z_]+)\s*:=/gi)) if (a[1]) colunas.add(a[1]);
+  }
+  return [...colunas].sort();
+}
+
+function colunasDoContatoExportadas(): Set<string> {
+  const colunas = new Set<string>();
+  for (const m of COLETOR.matchAll(/\.from\("contacts"\)\s*\.select\(\s*"([^"]+)"/g)) {
+    for (const c of (m[1] ?? "").split(",")) colunas.add(c.trim());
+  }
+  return colunas;
+}
+
 describe("LGPD: o export alcança tudo que a redação alcança", () => {
   it("CONTROLE: as duas varreduras acham tabela (senão o teste passa medindo o vazio)", () => {
     // Sem isto, um regex que deixe de casar devolve dois conjuntos vazios e a
@@ -113,5 +144,14 @@ describe("LGPD: o export alcança tudo que a redação alcança", () => {
         "`lib/lgpd/export-collector.ts`, espelhando o de `crm_lead_activities`:\n" +
         faltando.map((f) => `  ${f}`).join("\n"),
     ).toEqual([]);
+  });
+
+  it("toda coluna do contato que a anonimização zera é lida pelo export", () => {
+    const zeradas = colunasZeradasNaAnonimizacao();
+    // CONTROLE: a sonda enxerga a coluna que motivou o caso (0206) — senão o
+    // conjunto vazio deixaria a asserção abaixo verde.
+    expect(zeradas).toContain("custom_fields");
+    const exportadas = colunasDoContatoExportadas();
+    expect(zeradas.filter((c) => !exportadas.has(c))).toEqual([]);
   });
 });

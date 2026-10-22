@@ -25,6 +25,7 @@ import { z } from "zod";
 import { costCents } from "@/lib/agent-engine/edge/llm/pricing";
 import { resolverAgenteDaConversa } from "@/lib/ai/agents/agente-da-conversa";
 import { agenteAtende, precisaRecuperarLegado } from "@/lib/ai/agents/no-ar";
+import { podeGastarComIa } from "@/lib/ai/budget/pode-gastar";
 import { computeCost } from "@/lib/ai/cost";
 import { avisarNaCentral, fecharAvisoDoJev } from "@/lib/ai/decisao/aviso";
 import { modeloDoJev } from "@/lib/ai/decisao/cliente";
@@ -43,6 +44,8 @@ import { logInvocation, type LogInvocationInput } from "@/lib/ai/log-invocation"
 import { DEFAULT_SENTIMENT_THRESHOLD, SENTIMENT_SYSTEM_PROMPT } from "@/lib/ai/prompts/sentiment";
 import type { EventRow } from "@/lib/event-log/dispatcher";
 import { normalizarIdioma } from "@/lib/i18n/idiomas";
+import { MENSAGEM_REDIGIDA } from "@/lib/lgpd/cascata";
+import { logger } from "@/lib/logger";
 import { aiDispatchModeSchema } from "@/lib/schemas/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { aConversaAgora, perguntarOsPedidosDoCliente } from "@/workers/ai-sentiment-worker.pedidos";
@@ -83,32 +86,6 @@ export interface SentimentResult {
 
 export async function processSentiment(event: EventRow): Promise<SentimentResult> {
   try {
-    // Sem portão de `.env` na frente: `isAiGatewayConfigured()` só olhava três
-    // variáveis de ambiente e barrava a chave colada pela tela (IA ›
-    // Credenciais) e a OpenAI. Quem sabe se existe modelo é o resolver abaixo,
-    // que devolve `null` quando nada existe.
-    //
-    // Passar SENTIMENT_MODEL como string cai no gateway da Vercel mesmo sem
-    // chave (plano anônimo) e devolve "Unauthenticated ... Configure
-    // AI_GATEWAY_API_KEY" — o que quebrava este worker em toda instalação que
-    // só tem ANTHROPIC_API_KEY, ou seja, o padrão do install.sh. O resolver
-    // devolve o provider certo para a chave que existir.
-    // O painel de provedores manda AQUI também. Sem esta linha, a tela
-    // oferecia "Medir o clima da conversa", aceitava a escolha e dizia
-    // "salvo" — e este worker seguia usando o modelo padrão. Botão que não
-    // controla nada é pior que botão ausente: gasta a confiança de quem clicou.
-    // O id padrão é da Anthropic: numa empresa que atende pela OpenAI, Google
-    // ou DeepSeek sem modelo escolhido para o clima, ninguém o executa, e o
-    // clima ficava mudo enquanto o painel dizia "Usando o padrão da
-    // organização". A queda para o padrão da organização é o que torna isso
-    // verdade. A rota do cartão do Jev faz a MESMA pergunta.
-    const resolvido = await resolverModeloDoPonto(
-      "sentiment_classify",
-      event.organization_id,
-      SENTIMENT_MODEL,
-      { naFaltaUsarOPadraoDaOrganizacao: true },
-    );
-
     const messageId =
       (event.payload?.["message_id"] as string | undefined) ?? event.entity_id ?? null;
     const conversationId = (event.payload?.["conversation_id"] as string | undefined) ?? null;
@@ -133,11 +110,6 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
     const climaDoJev = estadoEfetivoDaTarefa(configDoJev, TAREFA_DO_CLIMA);
     // Os pedidos do cliente não dependem do clima: rodam com ele pausado.
     const pedidosRodam = TAREFAS_DOS_PEDIDOS.some((t) => estadoEfetivoDaTarefa(configDoJev, t) !== "desligada");
-
-    // Sem IA de linguagem e sem o Jev, não há quem meça nem o que perguntar.
-    if (!resolvido && climaDoJev === "desligada" && !pedidosRodam) {
-      return { skipped: true, reason: "ai_gateway_key_missing" };
-    }
 
     // ── Load message (programmatic org filter) ────────────────────────────
     const { data: message, error: msgErr } = await admin
@@ -166,11 +138,13 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
     }
 
     // ── Guard: elegibilidade da IA ────────────────────────────────────────
-    // O único efeito deste worker é alimentar o handoff por sentimento
-    // (`ai.sentiment_alert` → `triggerHandoff`). Numa conversa que o gate
-    // `allowlist` barra, `triggerHandoff` já se recusa — então classificar aqui
-    // seria só queimar um Haiku à toa. Pula cedo. `open` (o default) segue.
-    // Fail-closed: erro de leitura → pula (sem custo, sem efeito).
+    // Os efeitos deste worker são o handoff por sentimento (`ai.sentiment_alert`
+    // → `triggerHandoff`) e os pedidos do cliente. Com `!permite` os dois são
+    // nada: `triggerHandoff` recusa pela MESMA régua (orchestrator.ts, "GATE DE
+    // ELEGIBILIDADE") e `perguntarOsPedidosDoCliente` devolve `null` sem
+    // `iaPodeResponder`. Classificar seria pagar o modelo por um alerta que
+    // ninguém consome — conversa com uma pessoa, silenciada, contato passado a
+    // humano, trava da lista. Fail-closed: erro de leitura → pula.
     const convIdParaGate = conversationId ?? (message.conversation_id as string | null);
     let elegib: DecisaoDeElegibilidade | null = null;
     if (convIdParaGate) {
@@ -181,8 +155,8 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
           agora: new Date(),
           ttlMs: ttlDaAutorizacaoMs(process.env),
         });
-        if (elegib !== null && elegib.bloqueioPorAllowlist) {
-          return { skipped: true, reason: "nao_elegivel_para_ia" };
+        if (elegib !== null && !elegib.permite) {
+          return { skipped: true, reason: `nao_elegivel_para_ia:${elegib.motivo}` };
         }
       } catch {
         return { skipped: true, reason: "elegibilidade_indeterminada" };
@@ -241,6 +215,40 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
       return { skipped: true, reason: "nenhum_agente_no_ar" };
     }
 
+    // ── O modelo do clima, depois das guardas baratas ─────────────────────
+    // Três leituras e uma decifragem: fica atrás de tudo que pula sem ele.
+    //
+    // Sem portão de `.env` na frente: `isAiGatewayConfigured()` só olhava três
+    // variáveis de ambiente e barrava a chave colada pela tela (IA ›
+    // Credenciais) e a OpenAI. Quem sabe se existe modelo é o resolver abaixo,
+    // que devolve `null` quando nada existe.
+    //
+    // Passar SENTIMENT_MODEL como string cai no gateway da Vercel mesmo sem
+    // chave (plano anônimo) e devolve "Unauthenticated ... Configure
+    // AI_GATEWAY_API_KEY" — o que quebrava este worker em toda instalação que
+    // só tem ANTHROPIC_API_KEY, ou seja, o padrão do install.sh. O resolver
+    // devolve o provider certo para a chave que existir.
+    // O painel de provedores manda AQUI também. Sem esta linha, a tela
+    // oferecia "Medir o clima da conversa", aceitava a escolha e dizia
+    // "salvo" — e este worker seguia usando o modelo padrão. Botão que não
+    // controla nada é pior que botão ausente: gasta a confiança de quem clicou.
+    // O id padrão é da Anthropic: numa empresa que atende pela OpenAI, Google
+    // ou DeepSeek sem modelo escolhido para o clima, ninguém o executa, e o
+    // clima ficava mudo enquanto o painel dizia "Usando o padrão da
+    // organização". A queda para o padrão da organização é o que torna isso
+    // verdade. A rota do cartão do Jev faz a MESMA pergunta.
+    const resolvido = await resolverModeloDoPonto(
+      "sentiment_classify",
+      event.organization_id,
+      SENTIMENT_MODEL,
+      { naFaltaUsarOPadraoDaOrganizacao: true },
+    );
+
+    // Sem IA de linguagem e sem o Jev, não há quem meça nem o que perguntar.
+    if (!resolvido && climaDoJev === "desligada" && !pedidosRodam) {
+      return { skipped: true, reason: "ai_gateway_key_missing" };
+    }
+
     const { agente: agent, motivo: motivoDoAgente } = resolverAgenteDaConversa(
       candidatos ?? [],
       conversa
@@ -271,6 +279,32 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
       message_id: messageId,
       invocation_kind: "sentiment_classify",
     } satisfies Partial<LogInvocationInput>;
+
+    // ── O teto de gasto de IA, ANTES de qualquer chamada paga ─────────────
+    //
+    // Este worker roda a cada mensagem recebida e não passa pelo seam do engine
+    // nem pelo guard do caminho legado — os dois lugares onde o teto vinculava.
+    // Com a organização em "parar a IA" e o teto estourado, o turno ia para a
+    // fila humana e o clima seguia cobrando cada mensagem. A pergunta é a MESMA
+    // decisão pura dos outros dois (`podeGastarComIa` → `decidirOrcamento`):
+    // "só avisar" e "desligado" seguem; só o veredito `bloquear` pula.
+    //
+    // Aqui, e não mais abaixo, porque daqui para baixo TUDO é pago: o Jev do
+    // clima, o Jev dos pedidos e o LLM de reserva. E depois dos guards baratos
+    // (mensagem, direção, elegibilidade, agente no ar), para a leitura do
+    // orçamento não rodar à toa em mensagem que nem seria classificada.
+    // Pular não deixa linha em `llm_calls` — não houve chamada —, e o motivo
+    // fica no resultado do consumidor do event_log e no log.
+    const orcamento = await podeGastarComIa(event.organization_id, "sentiment_classify");
+    if (!orcamento.pode) {
+      logger.info("[ai-sentiment-worker] clima não medido: teto de gasto de IA atingido", {
+        organization_id: event.organization_id,
+        message_id: messageId,
+        gasto_cents: orcamento.gastoCents,
+        teto_cents: orcamento.tetoCents,
+      });
+      return { skipped: true, reason: "orcamento_de_ia_estourado" };
+    }
 
     // ── Os pedidos do cliente, ao lado do clima ────────────────────────────
     //
@@ -498,6 +532,13 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
         [CHAVES_DO_CLIMA.nota]: decisao.score,
         sentiment_latency_ms: decisao.latenciaMs,
         [CHAVES_DO_CLIMA.motor]: decisao.engine,
+        // O limiar COM O QUAL esta nota foi cortada (#2219): é o do agente da
+        // conversa, e não o default. A concordância do cartão do Jev lê daqui —
+        // sem gravá-lo, um agente em 0,1 tinha a conta dele medida contra 0,3.
+        // Vai junto com a nota (não só no alerta) porque as mensagens ACIMA do
+        // limiar também entram na concordância, e são justamente as que o
+        // alerta não emite.
+        [CHAVES_DO_CLIMA.limiar]: threshold,
         ...(clima?.ok
           ? { [CHAVES_DO_CLIMA.notaDoJev]: clima.score01, [CHAVES_DO_CLIMA.modeloDoJev]: clima.modelo }
           : {}),
@@ -507,7 +548,12 @@ export async function processSentiment(event: EventRow): Promise<SentimentResult
         .from("messages")
         .update({ metadata: updatedMetadata })
         .eq("id", messageId)
-        .eq("organization_id", event.organization_id);
+        .eq("organization_id", event.organization_id)
+        // Mesma guarda LGPD do media-derive-worker (#1991): `updatedMetadata`
+        // parte da foto lida antes da classificação, e a anonimização que rodar
+        // nesse meio tempo zera `metadata` — regravá-la devolveria o dado
+        // apagado, mais a nota derivada, a uma mensagem já redigida.
+        .filter("body", "isdistinct", MENSAGEM_REDIGIDA);
 
       if (updateErr) {
         console.warn("[ai-sentiment-worker] metadata update failed", {

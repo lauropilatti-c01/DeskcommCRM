@@ -51,14 +51,25 @@ import { z } from "zod";
 
 import { env } from "@/lib/env";
 
+import { basePadraoDaOrigem, MODELO_DA_TYPESAFE, modeloDaOrigem, ORIGEM_PADRAO, type OrigemDoJev } from "./origem";
+
 /**
- * A base da API do fornecedor. O destino é intrínseco ao provider; a variável
- * existe só para o dublê do e2e. Vazio é ausente (`||`, não `??`): quem copia o
- * `.env.example` recebe a variável PRESENTE e vazia.
+ * A base da API do fornecedor. O destino é intrínseco à ORIGEM (TypeSafe direto
+ * ou via OpenRouter, `./origem`); a variável existe só para o dublê do e2e.
+ * Vazio é ausente (`||`, não `??`): quem copia o `.env.example` recebe a
+ * variável PRESENTE e vazia.
  */
-export function baseDaApiDoJev(): string {
+export function baseDaApiDoJev(origem: OrigemDoJev = ORIGEM_PADRAO): string {
   const configurada = (env.JEV_API_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  return configurada || "https://api.typesafe.ai";
+  if (configurada) return configurada;
+  // Via OpenRouter a chave é a da CONVERSA, e ela vai para onde a conversa vai:
+  // com `OPENROUTER_BASE_URL` apontando para um gateway próprio, mandar essa
+  // chave para openrouter.ai entregaria a credencial a um host que não é o dela.
+  if (origem === "openrouter") {
+    const daConversa = (env.OPENROUTER_BASE_URL ?? "").trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+    if (daConversa) return daConversa;
+  }
+  return basePadraoDaOrigem(origem);
 }
 
 /**
@@ -68,9 +79,12 @@ export function baseDaApiDoJev(): string {
  * próprio fornecedor recomenda fixar quando há limiar ajustado. Se ela for
  * aposentada, a API responde 400, que vira `contrato_invalido` com `exigeAcao`.
  *
+ * É o nome do caminho TypeSafe DIRETO. Via OpenRouter o MESMO Jev responde por
+ * `typesafe/jev-1.13` (`modeloDaOrigem`), porque lá o nome da TypeSafe devolve
+ * `400 Model typesafe/jev-1.13.0 does not exist`.
  * (C01, -c01.3, item 6) Esta é a versão PADRÃO; a pedida à API é a de `modeloDoJev()`.
  */
-export const MODELO_DO_JEV = "jev-1.13.0";
+export const MODELO_DO_JEV = MODELO_DA_TYPESAFE;
 
 /**
  * (C01, -c01.3, item 6) A versão pedida à API: `JEV_MODEL` do ambiente, ou
@@ -156,6 +170,12 @@ export interface EntradaDaDecisao {
   perguntas: Record<string, Pergunta>;
   /** Teto por chamada. */
   tetoMs?: number;
+  /**
+   * De onde o Jev responde nesta chamada (`./origem`). Ausente é o caminho de
+   * sempre, TypeSafe direto — quem liga o Jev via OpenRouter passa `openrouter`,
+   * e a base e o nome do modelo mudam juntos.
+   */
+  origem?: OrigemDoJev;
 }
 
 export interface DependenciasDaDecisao {
@@ -267,18 +287,22 @@ export async function decidir(
   for (const [id, pergunta] of Object.entries(entrada.perguntas)) {
     questions[id] = paraOFornecedor(pergunta);
   }
+  const origem = entrada.origem ?? ORIGEM_PADRAO;
+  // (C01, -c01.3, item 6) `JEV_MODEL` no ambiente vale para as duas origens; sem ele,
+  // o nome que a origem aceita (`modeloDaOrigem`, do autor desde a 1.86).
+  const modelo = (env.JEV_MODEL ?? "").trim() ? modeloDoJev() : modeloDaOrigem(origem);
 
   const abortador = new AbortController();
   const relogio = setTimeout(() => abortador.abort(), entrada.tetoMs ?? TETO_PADRAO_MS);
   const inicio = Date.now();
   try {
-    const res = await (deps.fetchImpl ?? fetch)(`${deps.baseUrl ?? baseDaApiDoJev()}/v1/systemone`, {
+    const res = await (deps.fetchImpl ?? fetch)(`${deps.baseUrl ?? baseDaApiDoJev(origem)}/v1/systemone`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${entrada.chave}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ model: modeloDoJev(), state: entrada.estado, questions }),
+      body: JSON.stringify({ model: modelo, state: entrada.estado, questions }),
       signal: abortador.signal,
     });
 
@@ -322,7 +346,7 @@ export async function decidir(
     return {
       ok: true,
       respostas,
-      modelo: lido.data.model ?? modeloDoJev(),
+      modelo: lido.data.model ?? modelo,
       latenciaMs,
       uso: {
         tokensDeEntrada: lido.data.usage?.input_tokens ?? 0,

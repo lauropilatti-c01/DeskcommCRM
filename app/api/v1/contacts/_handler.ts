@@ -18,7 +18,7 @@ import type { Idioma } from "@/lib/i18n/idiomas";
 import { roleAtLeast } from "@/lib/auth/types";
 import { canonicalPhoneBR, phoneLookupVariants } from "@/lib/channels/phone-variants";
 import { encontrarContatoPorTelefone } from "@/lib/channels/contato-por-telefone";
-import { hashCpf, encryptCpfSql } from "@/lib/contacts/cpf";
+import { camposCpfParaGravar, hashCpf } from "@/lib/contacts/cpf";
 import type { Contact } from "@/lib/types/contacts";
 import { ensureConversation, sessaoProntaParaEnvio } from "@/lib/automation/start-conversation";
 import type {
@@ -29,12 +29,13 @@ import type {
 } from "@/lib/schemas";
 import { contactListQuerySchema } from "@/lib/schemas";
 import { arrayDeUmValorParaOr } from "@/lib/inbox/marcador-da-conversa";
-import { buscaValeConsulta, normalizarTermoDeBusca } from "@/lib/inbox/termo-de-busca";
+import { buscaValeConsulta } from "@/lib/inbox/termo-de-busca";
+import { padraoRegexDeBusca } from "@/lib/contacts/busca-regex";
 
 type SB = SupabaseClient;
 
 const SELECT_COLS =
-  "id, organization_id, name, display_name, email, email_normalized, phone_number, cpf_hash, birthdate, is_blocked, blocked_reason, is_anonymized, anonymized_at, is_merged_into, merged_at, consent, tags, source, source_metadata, custom_fields, created_at, updated_at, last_activity_at, first_service_at";
+  "id, organization_id, name, display_name, address_book_name, email, email_normalized, phone_number, cpf_hash, birthdate, is_blocked, blocked_reason, is_personal, ai_opt_out, is_anonymized, anonymized_at, is_merged_into, merged_at, consent, tags, source, source_metadata, custom_fields, created_at, updated_at, last_activity_at, first_service_at";
 
 interface CursorPayload {
   sort: string | null;
@@ -93,6 +94,12 @@ export async function listContactsHandler(
   supabase: SB,
   ctx: HandlerCtx,
   raw: ContactListQueryParams,
+  /**
+   * Só este contato — o escopo do turno do agente (`crm_search_contacts`).
+   * Fora do `raw` de propósito: não é parâmetro da rota HTTP, e vai no WHERE,
+   * antes do limite.
+   */
+  soContato?: string,
 ): Promise<ListContactsResult> {
   const q: ContactListQuery = contactListQuerySchema.parse(raw);
 
@@ -155,25 +162,44 @@ export async function listContactsHandler(
     .limit(q.limit + 1);
 
   if (q.search && termoDeTexto !== undefined) {
-    // ─── Duas normalizações, em ordem, com responsabilidades diferentes ─────
-    // É a MESMA composição da busca de conversas
-    // (`conversations/_handler.ts:297`, `termoSeguroParaOr(normalizarTermoDeBusca(...))`):
+    // ─── O padrão sai em regex, não em LIKE (#1835, F2) ─────────────────────
+    // A composição continua a MESMA da busca de conversas
+    // (`conversations/_handler.ts:297`, `termoSeguroParaOr(normalizarTermoDeBusca(...))`)
+    // e continua sendo a régua única de `lib/inbox/termo-de-busca.ts` — o que
+    // muda é o DESTINO do padrão:
     //
     //   normalizarTermoDeBusca → como a PESSOA digitou: espaço duplo, vírgula e
     //                            ponto e vírgula colapsam num curinga só, então
-    //                            "Paulo  Lima" e "Paulo Jr" achem o "Paulo Lima Jr"
+    //                            "Paulo  Lima" e "Paulo Jr" acham o "Paulo Lima Jr"
     //                            e "Silva, Maria" não exige mais adjacência
-    //   saneamento de `%`/`_`  → gramática do LIKE: curinga digitado é literal
+    //   padraoRegexDeBusca     → o curinga vira `.*`, o `%`/`_` digitado continua
+    //                            literal, e a LETRA com grafias vira classe
+    //                            (`jo[aáàâãä]o`) — é ela que faz "Joao" achar
+    //                            "João" e "João" achar "Joao"
+    //
+    // Por que regex e não `ilike` (a parte medida da F2): `ILIKE` dobra a CAIXA,
+    // não o ACENTO — `lower("Á") = "á"`, que não é `"a"` —, e o banco não tem
+    // `unaccent` nenhum (`git grep unaccent origin/main -- supabase/` = 0) para
+    // chamar do lado de lá. Sem coluna materializada (migração + backfill + gatilho,
+    // a F2 que ficou de fora do #1892), a comparação de acento é NOSSA dos dois
+    // lados: o termo normalizado aqui, a coluna virando classe no padrão. O
+    // operador `imatch` (`~*`) resolve a caixa. Medido contra o PostgREST real
+    // (docker postgrest/postgrest:latest + postgres:17) antes de escrever esta
+    // linha: um só `or=` com as quatro colunas em `imatch` + as variantes de
+    // telefone em `ilike` devolve as seis linhas certas.
     //
     // Os PARÊNTESES saem ANTES da régua: são delimitador do DSL do `.or()` do
-    // PostgREST (um "(" sem fechar derrubaria o filtro inteiro com HTTP 400) e
-    // a normalização não os conhece — tirá-los depois deixaria `Paulo* Jr` com
-    // espaço solto, que não casa nada. Mesmo escape de sempre, mesmo defeito de
-    // sempre: um nome com vírgula injetaria condição extra no `.or()`.
-    const s = normalizarTermoDeBusca(termoDeTexto).replace(/[%_]/g, (m) => `\\${m}`);
+    // PostgREST (um "(" sem fechar derrubaria o filtro inteiro com HTTP 400 — no
+    // regex o Postgres devolve `2201B parentheses () not balanced`) e a régua não
+    // os conhece — tirá-los depois deixaria `Paulo* Jr` com espaço solto, que não
+    // casa nada. A VÍRGULA também não passa: `normalizarTermoDeBusca` usa ela
+    // como separador, e uma vírgula que sobrasse splitaria o `.or()` em duas
+    // condições (medido: `PGRST100 failed to parse logic tree`). Um nome com
+    // vírgula continua sem injetar condição nenhuma.
+    const s = padraoRegexDeBusca(termoDeTexto);
     const digits = q.search.replace(/\D/g, "");
     const orParts = [
-      `name.ilike.%${s}%`,
+      `name.imatch.${s}`,
       // ⚠️ `display_name` ESTAVA DE FORA, e é a coluna que a tela MOSTRA.
       //
       // Contato que entra pelo WhatsApp nasce só com `display_name` (o pushName);
@@ -192,9 +218,15 @@ export async function listContactsHandler(
       // um retorno para "Cliente Retorno E2E", o modelo chamou esta busca, levou
       // zero resultados para um contato que EXISTE, e desistiu — a demanda
       // morreria por uma coluna faltando no OR.
-      `display_name.ilike.%${s}%`,
-      `email.ilike.%${s}%`,
-      `phone_number.ilike.%${s}%`,
+      `display_name.imatch.${s}`,
+      // O nome da agenda do celular (#2439) é o que a tela mostra quando não há
+      // nome escolhido no CRM — mesma razão do `display_name` acima. Mas ele é SÓ
+      // DA EQUIPE: com `soContato` (a busca do agente durante a conversa), casar
+      // nele faria a ferramenta responder ao modelo se o rótulo interno contém o
+      // termo digitado — o rótulo chegaria ao cliente aos pedaços.
+      ...(soContato ? [] : [`address_book_name.imatch.${s}`]),
+      `email.imatch.${s}`,
+      `phone_number.imatch.${s}`,
     ];
     if (digits.length >= 8) {
       // 10/11 dígitos sem DDI: no Brasil é DDD+local. Sem o 55, `3284793302`
@@ -230,6 +262,13 @@ export async function listContactsHandler(
     query = query.contains("tags", q.tag);
   }
   if (q.source) query = query.eq("source", q.source);
+  if (soContato) query = query.eq("id", soContato);
+  // Pessoal fora da lista por padrão; `?pessoais=true` lista SÓ pessoais
+  // (spec 21, etapa 13 — a tela do filtro e o desmarcar). Sem esta linha a
+  // lista de Contatos furava pelo outro lado o esconderijo que o inbox
+  // construiu — e o MCP search herdaria o furo junto.
+  if (q.pessoais) query = query.eq("is_personal", true);
+  else query = query.eq("is_personal", false);
 
   if (q.cursor) {
     const c = decodeCursor(q.cursor);
@@ -454,9 +493,10 @@ export async function createContactHandler(
   };
 
   if (input.cpf) {
-    insertRow.cpf_hash = hashCpf(input.cpf);
-    const enc = await encryptCpfSql(supabase, input.cpf);
-    if (enc) insertRow.cpf_encrypted = enc;
+    // #2522: os DOIS campos ou NENHUM — o CHECK `contacts_cpf_consistency`
+    // recusa a linha inteira se só o hash for gravado. Sem cifra disponível
+    // (RPC ausente ou chave não semeada) o contato nasce SEM CPF.
+    Object.assign(insertRow, await camposCpfParaGravar(supabase, input.cpf));
   }
 
   const { data: created, error: insErr } = await supabase
@@ -625,9 +665,11 @@ export async function patchContactHandler(
     patch.consent = { ...anterior, ...input.consent };
   }
   if (input.cpf !== undefined) {
-    patch.cpf_hash = hashCpf(input.cpf);
-    const enc = await encryptCpfSql(supabase, input.cpf);
-    if (enc) patch.cpf_encrypted = enc;
+    // Mesma regra do create (#2522): os DOIS campos ou NENHUM. Quando a cifra
+    // falha aqui, o par ANTIGO permanece intacto (hash e texto continuam do
+    // mesmo CPF) — apagar só um dos dois seria a corrupção silenciosa que o
+    // CHECK existe para impedir.
+    Object.assign(patch, await camposCpfParaGravar(supabase, input.cpf));
   }
 
   if (Object.keys(patch).length === 0) {
@@ -727,6 +769,42 @@ export async function patchContactHandler(
     }
   }
 
+  /**
+   * #2812 (segunda metade) — O CONTATO GANHOU TELEFONE.
+   *
+   * O gatilho `contact.phone_added` é a transição que faltava no vocabulário de
+   * automação: a ficha que estava SEM número passa a ter um. Emitido AQUI, e só
+   * aqui, por dois motivos que são a metade do trabalho:
+   *
+   *  - DEPOIS do UPDATE acima — a regra que este evento dispara lê a ficha para
+   *    decidir, e a guarda `checarGuardasDeContato` (lib/automation/guarda-do-contato.ts)
+   *    mata com `no_phone` (sem nova tentativa) quem chega sem número. Emitir
+   *    antes da gravação entregaria à regra um contato ainda vazio, e o defeito
+   *    é MUDO: a regra some sem erro, sem log e sem run.
+   *  - SÓ na TRANSIÇÃO (antes vazio/nulo, depois preenchido) — quem já tinha
+   *    número não "ganhou" nenhum, e tirar o número não é ganhá-lo. Um evento a
+   *    cada edição de ficha encheria a fila de automação com o que não aconteceu.
+   *
+   * A grafia do par é a MESMA de `contact.tag_added`, logo acima — e o `contact.phone_added`
+   * está irmão dele no mapa de gatilhos (lib/schemas/webhooks.ts).
+   */
+  const telefoneAntes = ((antes as { phone_number?: string | null }).phone_number ?? "").trim();
+  const telefoneDepois = ((contact as { phone_number?: string | null }).phone_number ?? "").trim();
+  if (!telefoneAntes && telefoneDepois) {
+    await createAdminClient()
+      .rpc("emit_event", {
+        p_event_type: "contact.phone_added",
+        p_entity_kind: "contact",
+        p_entity_id: contact.id,
+        p_payload: { phone_number: telefoneDepois },
+        p_metadata: { request_id: ctx.requestId, ...a.metadataActor },
+        p_organization_id: contact.organization_id,
+      })
+      .then(({ error }) => {
+        if (error) console.error("[contacts.patch] emit_event failed", error.message);
+      });
+  }
+
   await audit({
     action: "contact.updated",
     actorUserId: a.actorUserId,
@@ -788,11 +866,17 @@ const VINCULOS_RESTRICT_NAO_APAGADOS: ReadonlyArray<{ tabela: string; rotulo: st
   { tabela: "calendar_appointments", rotulo: "compromisso(s) na agenda" },
 ];
 
-export async function deleteContactHandler(
+/**
+ * A ficha precisa existir DENTRO da organização de quem chama — o mesmo 404 da
+ * exclusão. É a porta também da pré-checagem de vínculos (#1925): sem o filtro
+ * por organização, um id alheio responderia "sem vínculos" e a tela diria que é
+ * seguro excluir algo que quem chamou nem enxerga.
+ */
+async function contatoExistente(
   supabase: SB,
   ctx: HandlerCtx,
   contactId: string,
-): Promise<{ id: string }> {
+): Promise<void> {
   const { data: existing, error: selErr } = await supabase
     .from("contacts")
     .select("id, organization_id")
@@ -812,14 +896,21 @@ export async function deleteContactHandler(
       traduzir("Contato não encontrado.", ctx.idioma ?? "pt-BR"),
     );
   }
+}
 
-  const a = actorAuditPayload(ctx.actor);
-
-  // Pré-checagem dos vínculos que barram o DELETE da ficha (issue #752).
-  //
-  // Só CONTA: quem recusa continua sendo o banco, com o 23503 do RESTRICT. A
-  // contagem existe para saber disso antes de apagar o histórico, e é por isso
-  // que ela vem antes da chamada que apaga — depois não há mais como desfazer.
+/**
+ * Pré-checagem dos vínculos que barram o DELETE da ficha (issue #752), que a
+ * pré-checagem da tela e a exclusão compartilham (#1925).
+ *
+ * Só CONTA: quem recusa continua sendo o banco, com o 23503 do RESTRICT. A
+ * contagem existe para saber disso antes de apagar o histórico, e é por isso
+ * que ela vem antes da chamada que apaga — depois não há mais como desfazer.
+ */
+async function contarVinculosRestrict(
+  supabase: SB,
+  ctx: HandlerCtx,
+  contactId: string,
+): Promise<{ vinculos: string[]; por_tabela: Record<string, number> }> {
   const vinculos: string[] = [];
   // A contagem crua por tabela é o que a tela traduz e pluraliza; `vinculos`
   // (texto em pt-BR) segue igual ao da auditoria.
@@ -842,6 +933,37 @@ export async function deleteContactHandler(
       por_tabela[vinculo.tabela] = count ?? 0;
     }
   }
+  return { vinculos, por_tabela };
+}
+
+/**
+ * O que a exclusão VAI encontrar, apurado sem apagar nada: a pré-checagem que o
+ * diálogo "Excluir contato?" consulta antes do clique (issue #1925).
+ *
+ * Reusa as duas funções acima de propósito: uma lista própria de vínculos para a
+ * tela viraria uma segunda verdade — dia em que uma FK RESTRICT nova entrar em
+ * `VINCULOS_RESTRICT_NAO_APAGADOS`, o diálogo avisaria de um bloqueio que não
+ * existe e ficaria quieto sobre outro.
+ */
+export async function vinculosDoContatoHandler(
+  supabase: SB,
+  ctx: HandlerCtx,
+  contactId: string,
+): Promise<{ vinculos: string[]; por_tabela: Record<string, number> }> {
+  await contatoExistente(supabase, ctx, contactId);
+  return contarVinculosRestrict(supabase, ctx, contactId);
+}
+
+export async function deleteContactHandler(
+  supabase: SB,
+  ctx: HandlerCtx,
+  contactId: string,
+): Promise<{ id: string }> {
+  await contatoExistente(supabase, ctx, contactId);
+
+  const a = actorAuditPayload(ctx.actor);
+
+  const { vinculos, por_tabela } = await contarVinculosRestrict(supabase, ctx, contactId);
 
   if (vinculos.length > 0) {
     // O 409 é o MESMO do caminho de FK (mesma causa, mesmo tratamento no

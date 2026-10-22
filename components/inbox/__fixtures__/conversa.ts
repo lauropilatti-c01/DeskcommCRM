@@ -40,6 +40,10 @@ const conversation: ConversationWithContact = {
   bot_silenced_until: null,
   last_handoff_at: null,
   comando_da_conversa: "aguardando",
+  // A conversa do exemplo NÃO está marcada como exemplo para a IA (#3006): é o
+  // default de toda conversa, e é o que o caso "não marcada não mostra o selo"
+  // precisa como ponto de partida.
+  usable_for_rag: false,
   contacts: {
     id: "contact-1",
     display_name: "Maria",
@@ -48,6 +52,7 @@ const conversation: ConversationWithContact = {
     tags: [],
     is_blocked: false,
     is_anonymized: false,
+    is_personal: false,
   },
   channel_sessions: {
     phone_number: "+5521988880000",

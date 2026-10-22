@@ -213,6 +213,21 @@ export interface PedidoDoGancho {
    * exige para o `#zerar` e o `apagar_memoria`.
    */
   celular_de_teste: boolean;
+  /**
+   * (C01, -c01.16) A conversa tem um caso aberto (`agent_cases` esperando gente ou
+   * esperando o cliente; `lerCasoAberto`). Lido antes da chamada. O porteiro não manda
+   * mensagem automática (a pergunta de acesso) enquanto um caso está em andamento.
+   * `false` em erro de leitura: quem usa o campo para segurar envio trata o erro pelo
+   * lado seguro com `caso_aberto_lido`.
+   */
+  caso_aberto: boolean;
+  /** (C01, -c01.16) `false` = a leitura do caso falhou; `caso_aberto` não vale. */
+  caso_aberto_lido: boolean;
+  /**
+   * (C01, -c01.16) O id interno do contato (uuid do CRM, não é dado pessoal): a identidade estável da pessoa para o
+   * sorteio dos experimentos da C01 (o card pode mudar; o contato fica). Telefone continua fora do pedido.
+   */
+  contato_id: string;
   lead: { id: string | null; etapa: string | null; campos: Record<string, unknown>; etiquetas: string[] };
   mensagens: MensagemDoPedido[];
   formulario?: FormularioDoPedido;
@@ -342,6 +357,29 @@ export async function lerCelularDeTeste(
   }
 }
 
+/**
+ * (C01, -c01.16) A conversa tem caso aberto (esperando gente ou o cliente)? `null` em
+ * qualquer erro de leitura: quem chama decide (o pedido leva `caso_aberto_lido: false`).
+ */
+export async function lerCasoAberto(
+  db: Queryable,
+  organizationId: string,
+  conversationId: string,
+): Promise<boolean | null> {
+  try {
+    const { rows } = await db.query<{ aberto: boolean }>(
+      `select exists(select 1 from agent_cases
+                      where organization_id = $1 and conversation_id = $2
+                        and status in ('awaiting_human', 'awaiting_lead')) as aberto`,
+      [organizationId, conversationId],
+    );
+    const lido = rows[0];
+    return lido === undefined ? null : lido.aberto === true;
+  } catch {
+    return null;
+  }
+}
+
 export async function montarPedidoDoGancho(
   db: Queryable,
   alvo: {
@@ -398,6 +436,8 @@ export async function montarPedidoDoGancho(
   const formulario = alvo.reconsulta === true ? null : await formularioDoTurno(db, alvo);
   // (C01, -c01.15) Antes da chamada: o `gravar` desta resposta não muda o valor do turno.
   const celularDeTeste = await lerCelularDeTeste(db, alvo.organizationId, alvo.contactId, alvo.channelSessionId);
+  // (C01, -c01.16) Também antes da chamada: o caso que a resposta abrir não muda este turno.
+  const casoAberto = await lerCasoAberto(db, alvo.organizationId, alvo.conversationId);
 
   const pedido: PedidoDoGancho = {
     versao: 1,
@@ -413,6 +453,9 @@ export async function montarPedidoDoGancho(
       ultima_entrada_em: iso(conversa?.last_inbound_at),
     },
     celular_de_teste: celularDeTeste,
+    caso_aberto: casoAberto === true,
+    caso_aberto_lido: casoAberto !== null,
+    contato_id: alvo.contactId,
     lead: {
       id: card?.id ?? null,
       etapa: card ? etapaDoCard(card) : null,
@@ -802,6 +845,8 @@ export type DesfechoDoGancho =
       fim: false;
       resumo?: { mensagemId: string; sentAt: string | null; texto: string };
       camposDoCard?: Record<string, unknown>;
+      /** (C01, -c01.16) A ordem dos campos do funil do card relido (`CardDoContato.ordemDoFunil`). */
+      ordemDoFunil?: string[];
       /**
        * (C01, -c01.15) O que o `enviar_antes` mandou NESTA execução, na ordem: o turno
        * acrescenta ao histórico já lido (`acrescentarEnviadasAntesNoContexto`).
@@ -955,7 +1000,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     await apagarMemoriaSePedida(ctx, resposta);
     const gravou = await aplicarGravar(ctx, card, resposta.gravar);
     const relido = gravou ? await lerCardComCuidado(ctx) : null;
-    const campos = relido !== null ? { camposDoCard: relido.campos, ...antes } : antes;
+    const campos = relido !== null ? { camposDoCard: relido.campos, ordemDoFunil: relido.ordemDoFunil, ...antes } : antes;
     await agendarReconsulta(ctx, resposta.reconsultar_em_s);
     const f = decisao.formulario;
     if (f !== null) {

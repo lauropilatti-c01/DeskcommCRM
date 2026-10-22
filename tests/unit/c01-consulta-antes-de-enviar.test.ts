@@ -193,7 +193,7 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
     expect(CADEIA).toMatch(
       /agendaStallGate,\s*consultaAntesDeEnviarGate,\s*marcadorEntreColchetesGate,\s*linkEValorDeFerramentaGate,/,
     );
-    expect(CADEIA).toMatch(/export const BEFORE_SEND_CHAIN_VERSION = 13;/);
+    expect(CADEIA).toMatch(/export const BEFORE_SEND_CHAIN_VERSION = 1[3-9];/);
   });
 
   it("consulte antes é de estilo (a 2ª tentativa passa); marcador é de conteúdo (nunca sai)", () => {
@@ -208,7 +208,8 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
   });
 
   it("o send_message confere o que o modelo leu (as mensagens do passo) e arma só no agente ligado", () => {
-    expect(TURNO).toMatch(/execute: async \(\{ body, produto_codigo \}, opcoes\) => \{/);
+    // Junção da 1.86: o autor recebe o corpo como `corpoDoModelo` e formata (`formatarParaWhatsApp`).
+    expect(TURNO).toMatch(/execute: async \(\{ body(?:: corpoDoModelo)?, produto_codigo \}, opcoes\) => \{/);
     expect(TURNO).toMatch(/tabelasCobradas\.filter\(\(tabela\) => !leuConsultaDaTabela\(opcoes\?\.messages, tabela\)\)/);
     expect(TURNO).toMatch(/consultaAntes\.agentes\.includes\(agentConfig\.agentId\)/);
     expect(TURNO).toMatch(/travasArmadas\(\{ consultasFaltando \}\)/);

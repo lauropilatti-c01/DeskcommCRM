@@ -15,7 +15,7 @@
  *    ninguém consegue escolher pela tela — trabalho feito e inalcançável, que é
  *    a forma como funcionalidade morre neste produto.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createDefaultRegistry } from "@/lib/agent-engine/edge/llm/providers";
 import {
@@ -140,15 +140,27 @@ describe("lista de provedores × os pontos de ESCRITA", () => {
     // existe um ramo por provedor, e não o `default` que devolve
     // `unknown_provider` — cadastrar a chave devolveria "provedor
     // desconhecido" com o provedor na lista da tela.
+    //
+    // (C01) O ramo de cada provedor faz um GET de verdade na API dele (até 5 s
+    // cada, um depois do outro). Sem o `fetch` falso, o teste dependia da rede
+    // e estourava os 15 s com a máquina carregada. O 401 falso basta: a
+    // pergunta é se o ramo existe, não se a chave vale.
+    const fetchFalso = vi.fn(async () => new Response(null, { status: 401 }));
+    vi.stubGlobal("fetch", fetchFalso);
     const semValidador: string[] = [];
-    for (const id of ids) {
-      const r = await validators.validateProviderKey(
-        id as Parameters<typeof validators.validateProviderKey>[0],
-        "",
-      );
-      if (!r.ok && r.error.startsWith("unknown_provider")) semValidador.push(id);
+    try {
+      for (const id of ids) {
+        const r = await validators.validateProviderKey(
+          id as Parameters<typeof validators.validateProviderKey>[0],
+          "",
+        );
+        if (!r.ok && r.error.startsWith("unknown_provider")) semValidador.push(id);
+      }
+    } finally {
+      vi.unstubAllGlobals();
     }
     expect(semValidador).toEqual([]);
+    expect(fetchFalso).toHaveBeenCalled();
   });
 
   it("nenhuma cópia da lista de três sobrou no código de provedor", async () => {

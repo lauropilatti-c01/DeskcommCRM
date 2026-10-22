@@ -1,4 +1,5 @@
 import type { ScoreBand } from "@/lib/kanban/score-band";
+import type { ResumoDasTarefas } from "@/lib/tarefas/tipos";
 
 /**
  * Canonical Lead shape returned by the `/api/v1/leads/*` endpoints.
@@ -70,8 +71,9 @@ export interface Lead {
    *
    * Ausente é estado LEGÍTIMO e comum: lead criado à mão ou por webhook não tem
    * contato, e contato sem conversa existe. O card precisa saber a diferença
-   * entre "não há conversa" e "ainda não carregou" — por isso `undefined` e não
-   * um objeto vazio.
+   * entre "não há conversa" e "ainda não carregou": a rota do quadro devolve
+   * `null` para contato SEM conversa (o card mostra "Abrir conversa", #1993) e
+   * deixa ausente (`undefined`) para lead sem contato. Nunca um objeto vazio.
    */
   conversa?: {
     id: string;
@@ -134,6 +136,14 @@ export interface Lead {
    * recente. Filtrar por ela é decisão do dono (doc 40, item 7, 19/09).
    */
   conversation_tags?: string[];
+  /**
+   * Derivado (não é coluna): as tarefas EM ABERTO presas a este negócio
+   * (`crm_tasks.lead_id`), e quantas delas já passaram do prazo — o selo do
+   * card do quadro. Ausente quando não há nenhuma em aberto: o payload do
+   * quadro não engorda com `{ abertas: 0 }` em todo card. Ver
+   * `lib/kanban/tarefas-no-quadro.ts`.
+   */
+  tarefas?: ResumoDasTarefas;
   created_at: string;
   updated_at: string;
   created_by_user_id: string | null;

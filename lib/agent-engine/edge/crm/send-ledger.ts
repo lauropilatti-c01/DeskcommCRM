@@ -1,4 +1,5 @@
 import { ApiError } from "@/lib/api/types";
+import { OrgNaoOperanteError } from "@/lib/organizacao/operante";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Queryable } from "../../queue/queue";
@@ -72,6 +73,9 @@ interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
   find(input: Intent): Promise<Row | null>;
   rotate(input: Intent, hash: string): Promise<string>;
+  /** Pela PK primeiro: o envio grava `messages.id = chave` (`internalMessageId`). O
+   * `metadata->>'idempotency_key'` não tem índice e só alcança linha gravada antes
+   * dessa convenção, então fica de reserva para quando a PK não acha. */
   message(org: string, key: string): Promise<{ id: string; status: string } | null>;
   update(
     org: string,
@@ -226,8 +230,12 @@ async function ocuparPosicao(
   store: LedgerStore,
   input: Intent,
   hash: string,
-): Promise<{ kind: "key"; key: string } | { kind: "outcome"; outcome: SendOutcome }> {
+): Promise<{ kind: "key"; key: string; replay: boolean } | { kind: "outcome"; outcome: SendOutcome }> {
   let key: string;
+  // Chave saída de `create`, `rotate` ou da próxima posição livre acabou de nascer:
+  // nenhuma mensagem pode carregá-la (a otimização do autor na 1.86). Só a chave do
+  // recibo anterior, reaproveitada como está, é replay.
+  let replay = false;
   try {
     key = await store.create(input, hash);
   } catch (error) {
@@ -263,9 +271,10 @@ async function ocuparPosicao(
         };
       if (prior.status === "vetoed") return { kind: "outcome", outcome: { kind: "blocked", idempotencyKey: key } };
       if (prior.status === "failed") key = await store.rotate(input, hash);
+      else replay = true;
     }
   }
-  return { kind: "key", key };
+  return { kind: "key", key, replay };
 }
 /** Inline e daemon compartilham identidade (job,seq), reconciliação e mensagem.
  * Página/worker perdido não cria uma segunda intenção. queued é reavaliado pelo
@@ -309,13 +318,18 @@ export async function sendWithLedger(
     const posicao = await ocuparPosicao(store, input, hash);
     if (posicao.kind !== "key") return posicao.outcome;
     key = posicao.key;
-    existing = await store.message(input.tenantId, key);
+    existing = posicao.replay ? await store.message(input.tenantId, key) : null;
   }
   let message = existing;
   if (!message || message.status === "queued") {
     try {
       message = await send(key, existing?.id ?? key);
     } catch (error) {
+      // Organização parada NÃO é veto do contato. Gravar `vetoed` faria o dono
+      // do job ler `blocked` — e no agent-engine `blocked` cancela TODOS os
+      // follow-ups do contato como opt-out irrevogável (`applySendOutcome`).
+      // Sobe como está: `terminal: true` encerra o job sem tocar no contato.
+      if (error instanceof OrgNaoOperanteError) throw error;
       if (error instanceof ApiError && error.status === 403) {
         await store.update(input.tenantId, key, "vetoed", null, "handler 403");
         return { kind: "blocked", idempotencyKey: key };
@@ -581,10 +595,15 @@ export function pgSendLedger(db: Queryable): LedgerStore {
     },
     async message(org, key) {
       const { rows } = await db.query<{ id: string; status: string }>(
+        "select id,status from messages where organization_id=$1 and id=$2",
+        [org, key],
+      );
+      if (rows[0]) return rows[0];
+      const legado = await db.query<{ id: string; status: string }>(
         "select id,status from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
         [org, key],
       );
-      return rows[0] ?? null;
+      return legado.rows[0] ?? null;
     },
     async update(org, key, status, id, error) {
       await db.query(
@@ -677,6 +696,14 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
       return data.id;
     },
     async message(org, key) {
+      const porId = await db
+        .from("messages")
+        .select("id,status")
+        .eq("organization_id", org)
+        .eq("id", key)
+        .maybeSingle();
+      if (porId.error) throw porId.error;
+      if (porId.data) return porId.data;
       const { data, error } = await db
         .from("messages")
         .select("id,status")

@@ -60,7 +60,18 @@ import {
   trechosAprovados,
 } from './texto-afirmavel';
 
-const SEM_PROMESSA: PromiseClassification = { isPromise: false, suspectPhrase: null };
+/**
+ * Junção da 1.86: a classificação do autor traz também o retorno humano
+ * (`prometeuRetornoHumano`, `retornoSoDoAssistente`). A mensagem que é só o texto da
+ * base não passa pelo modelo: o retorno humano dela fica com o detector léxico do
+ * autor, que a trava de caso lê em OU com este sinal.
+ */
+const SEM_PROMESSA: PromiseClassification = {
+  isPromise: false,
+  suspectPhrase: null,
+  prometeuRetornoHumano: false,
+  retornoSoDoAssistente: false,
+};
 
 /**
  * (C01, -c01.15) A PARÁFRASE DE UM BENEFÍCIO APROVADO NÃO É PROMESSA.
@@ -185,7 +196,14 @@ export async function classificarPromessaComTextoAfirmavel(
   const inteira = await classificar(body);
   if (!inteira.isPromise) return inteira;
   if (ondeEstaASuspeita(t, aprovados, inteira.suspectPhrase) === 'fora') return inteira;
-  const doResto = await classificar(resto);
+  const releitura = await classificar(resto);
+  // Junção da 1.86: a exceção da base vale só para a promessa comercial. O retorno
+  // humano continua o da leitura da mensagem inteira, como o autor o leria.
+  const doResto: PromiseClassification = {
+    ...inteira,
+    isPromise: releitura.isPromise,
+    suspectPhrase: releitura.suspectPhrase,
+  };
   if (!doResto.isPromise) {
     log?.info('trava de promessa: a promessa apontada estava no texto afirmável da base — o resto passou', {
       event: 'promise_semantic_texto_afirmavel',

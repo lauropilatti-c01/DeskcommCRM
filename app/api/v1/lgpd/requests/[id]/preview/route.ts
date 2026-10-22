@@ -33,7 +33,8 @@ export async function GET(
   const authz = await requireRole("admin", {
     requestId,
     resource: "lgpd_requests",
-    allowPlatformAdmin: true,
+    allowPlatformAdmin: "leitura",
+    permiteOrgSuspensa: true,
   });
   if (!authz.ok) return authz.response;
   const t = (texto: string) => traduzir(texto, authz.user.idioma);
@@ -87,6 +88,7 @@ export async function GET(
         id: payload.contact.id,
         name: payload.contact.name,
         display_name: payload.contact.display_name,
+        address_book_name: payload.contact.address_book_name,
         email: maskEmail(payload.contact.email),
         phone_number: maskPhone(payload.contact.phone_number),
         // cpf_present tells whether it exists — CPF value itself NEVER exposed
@@ -107,6 +109,9 @@ export async function GET(
       ...m,
       // Mask message body if it contains likely PII patterns — keep structural info
       body: m.body ? "[masked]" : null,
+      // A transcrição/OCR da mídia é o mesmo conteúdo do titular em outra forma:
+      // mascara pela mesma régua do `body`, senão o spread acima a entrega crua.
+      media_derived_text: m.media_derived_text ? "[masked]" : null,
     })),
     leads: payload.leads.slice(0, SAMPLE_LIMIT),
     orders: payload.orders.slice(0, SAMPLE_LIMIT),

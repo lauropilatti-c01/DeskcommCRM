@@ -657,10 +657,14 @@ describe("(C01, -c01.8) o texto afirmável da base passa pela `valor_em_dinheiro
 
   it("sem consulta neste turno (o cupom só numa mensagem já enviada), barrado", async () => {
     await ligaValorEmDinheiro();
+    // (Junção da 1.86) `created_at` junto com `sent_at`: a mensagem é ANTERIOR à do
+    // cliente. Sem ele, o `now()` a punha depois da inbound do cenário, e a memória da
+    // quase-duplicata do autor (`corposEnviadosDesdeUltimaInbound`, que lê `created_at`)
+    // suprimia o envio antes de a trava do valor ser avaliada.
     await pool.query(
       `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
-         type, direction, status, body, sent_via, sent_at)
-       values ($1,$2,$3,$4,$5,'text','outbound','delivered',$6,'ai',$7)`,
+         type, direction, status, body, sent_via, sent_at, created_at)
+       values ($1,$2,$3,$4,$5,'text','outbound','delivered',$6,'ai',$7,$7)`,
       [randomUUID(), ORG, CONV, SESSION, CONTACT, CUPOM, GANCHO_EM],
     );
     const mod = modelo([{ envia: CUPOM }]);

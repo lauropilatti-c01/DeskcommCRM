@@ -157,7 +157,8 @@ describe("a ligação no turno, pelo código", () => {
   const TURNO = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
 
   it("o classificador do turno manda ao modelo a lista dos textos afirmáveis da promessa deste turno", () => {
-    const i = TURNO.indexOf("const semanticClassifier = camadaLigada(");
+    // Junção da 1.86: o memo virou `classificadorMemoizado`; o `semanticClassifier` do autor o envolve.
+    const i = TURNO.indexOf("const classificadorMemoizado = camadaLigada(");
     expect(i).toBeGreaterThan(-1);
     const bloco = TURNO.slice(i, TURNO.indexOf(": undefined;", i));
     expect(bloco).toMatch(/candidate: texto,[\s\S]*aprovados: \[\.\.\.textosAfirmaveisDaPromessa\],/);

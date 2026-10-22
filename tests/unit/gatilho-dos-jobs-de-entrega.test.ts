@@ -234,6 +234,10 @@ const GATILHO_ESPERADO: Record<string, { condicao: string | null; efeito: string
     condicao: null,
     efeito: "Este é o check obrigatório `build-and-size` (`pnpm build` em Node 22).",
   },
+  // C01 (junção da 1.86.0): sem `mysql-integracao.yml`. Workflow novo do autor sai do fork
+  // (a regra do conferir para workflow que o GitHub ainda não conhece: no push ele nasceria
+  // ligado). Os dois jobs eram informativos; o dialeto MySQL segue nos testes com driver
+  // simulado, e a C01 não usa MySQL.
 
   // --- e o que legitimamente tem interruptor -----------------------------------
   // C01 (versão nossa, repositório privado lauropilatti-c01/deskcomm-c01): ver C01.md.

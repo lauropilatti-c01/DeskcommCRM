@@ -1,4 +1,5 @@
 import type { Lead } from "@/lib/types/leads";
+import { diaDeHojeLocal } from "@/lib/ai/pacing-knobs";
 import { cardTemMarcador, cardTemTodasNaMesmaCaixa } from "@/lib/kanban/marcadores-do-card";
 import {
   type ModoDeEtiqueta,
@@ -38,8 +39,29 @@ export interface LeadFilters {
   /** E ou OU entre as etiquetas escolhidas (#1274). `e` é o padrão. */
   tagMode?: ModoDeEtiqueta;
   search?: string;
+  /**
+   * Limite de valor mínimo/máximo, em centavos (#1531).
+   *
+   * ⚠️ NÃO É COMPARÁVEL SOZINHO: ver `valueCurrency`. Guardar centavos sem
+   * dizer a moeda é guardar metade da pergunta.
+   */
   valueCentsMin?: number | null;
   valueCentsMax?: number | null;
+  /**
+   * A MOEDA EM QUE OS LIMITES DE VALOR FORAM ESCRITOS (#1531).
+   *
+   * Quem monta o filtro coloca aqui a da organização — é o padrão do issue.
+   * Só dentro dela os centavos se comparam: `valueCentsMin` de 1.000,00 em real
+   * não é pergunta nenhuma para um negócio de 5.000,00 € — responder exigiria
+   * converter, e converter é o que a issue proíbe (o valor real só se conhece
+   * no pagamento).
+   *
+   * Lead SEM moeda declarada (`currency` nulo, dado anterior à coluna) nasceu
+   * na moeda da organização — e é nela que o limite nasce por padrão —, então
+   * ele é comparável. Sem `valueCurrency`, nenhum lead é: o limite não responde
+   * "fora do intervalo", ele não sabe nem qual é a pergunta.
+   */
+  valueCurrency?: string | null;
   overdueOnly?: boolean;
   /** O `lost_reason` exato do card — filtro de perda (issue #1537). */
   lostReason?: string;
@@ -137,7 +159,11 @@ export function applyFilters(
   f: LeadFilters,
   contexto?: ContextoDosFiltros,
 ): Lead[] {
-  const today = new Date().toISOString().slice(0, 10);
+  // O "hoje" de quem olha o funil — NÃO o dia UTC (#2935). `toISOString()`
+  // adianta o dia a oeste, e depois das 21h em Brasília "Apenas atrasados"
+  // marcava como vencido o negócio que fecha HOJE (`expected_close_date >= today`
+  // deixava de excluí-lo). A mesma conta que o resto do produto usa.
+  const today = diaDeHojeLocal();
   const search = f.search?.trim().toLowerCase() ?? "";
   // Fora do `filter`: a escolha de E/OU é do filtro, não do card, e calculá-la a
   // cada linha pagaria uma normalização por card — a lista do funil é pequena
@@ -197,10 +223,21 @@ export function applyFilters(
       !`${l.title} ${l.description ?? ""}`.toLowerCase().includes(search)
     )
       return false;
-    if (typeof f.valueCentsMin === "number" && (l.value_cents ?? 0) < f.valueCentsMin)
-      return false;
-    if (typeof f.valueCentsMax === "number" && (l.value_cents ?? 0) > f.valueCentsMax)
-      return false;
+    // O LIMITE DE VALOR SÓ SE COMPARA COM A MOEDA EM QUE FOI ESCRITO (#1531).
+    // Um negócio de 5.000,00 € não "passa" nem "reprova" um mínimo de
+    // 1.000,00 R$: responder exigiria converter, e converter é o que a issue
+    // proíbe. Ele fica FORA do resultado — a lista diz o que é comparável, não
+    // um número que não existe em moeda nenhuma. Lead sem moeda declarada é da
+    // moeda da organização (regra em `valueCurrency`), e é nela que o limite
+    // nasce por padrão.
+    if (typeof f.valueCentsMin === "number" || typeof f.valueCentsMax === "number") {
+      const moedaDoLimite = f.valueCurrency ?? null;
+      const moedaDoLead = l.currency ?? moedaDoLimite;
+      if (moedaDoLimite === null || moedaDoLead !== moedaDoLimite) return false;
+      const valor = l.value_cents ?? 0;
+      if (typeof f.valueCentsMin === "number" && valor < f.valueCentsMin) return false;
+      if (typeof f.valueCentsMax === "number" && valor > f.valueCentsMax) return false;
+    }
     if (f.overdueOnly) {
       if (l.status !== "open") return false;
       if (!l.expected_close_date || l.expected_close_date >= today) return false;

@@ -55,9 +55,14 @@ process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??= "placeholder-anon";
 process.env.SUPABASE_SERVICE_ROLE_KEY ??= "placeholder-service";
 
 const PORT = Number(process.env.TEST_DB_PORT ?? 54329);
+// (Junção da 1.86) 3 conexões, não 2: desde o #2426 a cadeia grava o trace pelo pool
+// DEPOIS do commit e ANTES de soltar a sua conexão. Na corrida da rodada 3 (frase de
+// espera e template na mesma etapa), as duas cadeias seguravam as 2 conexões, cada uma
+// esperando uma terceira para o trace, e o teste parava por tempo. (A -c01.16 já gravava
+// o trace pelo pool com a conexão da cadeia na mão; só a ordem mudou.)
 const pool = new pg.Pool({
   connectionString: `postgresql://postgres:postgres@127.0.0.1:${PORT}/postgres`,
-  max: 2,
+  max: 3,
 });
 
 const ORG = "dddddddd-0000-4000-8000-000000000001";
@@ -144,6 +149,17 @@ function modeloQueVazaEDepoisTentaTemplate(
       );
     if (pedeCheckpoint) {
       estado.checkpoints += 1;
+      // (Junção da 1.86) O fechamento do autor leva as ferramentas como TEXTO
+      // (`toolPartsAsText`: "[ferramenta X chamada com … → resultado]"), sem partes
+      // `tool-result`. O resultado da última etapa (o 3º veto), que só o fechamento vê,
+      // vem daí.
+      for (const msg of msgs) {
+        if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+        for (const parte of msg.content as Array<Record<string, unknown>>) {
+          if (parte.type === "text" && typeof parte.text === "string" && parte.text.startsWith("[ferramenta "))
+            estado.resultados.push(parte.text);
+        }
+      }
       return {
         content: [{ type: "text" as const, text: CHECKPOINT }],
         finishReason: { unified: "stop" as const, raw: undefined },

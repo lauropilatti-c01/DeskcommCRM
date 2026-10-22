@@ -159,6 +159,19 @@ function modeloQueChama(chamadas: readonly Chamada[], opcoes: { caiNoCheckpoint?
       );
     if (pedeCheckpoint) {
       estado.checkpoints += 1;
+      // (Junção da 1.86) O fechamento do autor leva as ferramentas como TEXTO
+      // (`toolPartsAsText`: "[ferramenta X chamada com … → resultado]"), sem partes
+      // `tool-result`. O resultado da última etapa, que só o fechamento vê, vem daí; os
+      // anteriores já vieram das etapas seguintes, na mesma ordem.
+      const stubs: string[] = [];
+      for (const msg of msgs) {
+        if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+        for (const parte of msg.content as Array<Record<string, unknown>>) {
+          if (parte.type === "text" && typeof parte.text === "string" && parte.text.startsWith("[ferramenta "))
+            stubs.push(parte.text);
+        }
+      }
+      for (let i = estado.resultados.size; i < stubs.length; i++) estado.resultados.set(`fechamento-${i}`, stubs[i]!);
       // (Rodada 6, 2) O modelo cai ao fechar o turno: o envio já saiu, o checkpoint
       // não existe, o job falha e a fila o re-executa.
       if (opcoes.caiNoCheckpoint) throw new Error("modelo caiu antes do checkpoint (teste)");
@@ -1013,5 +1026,64 @@ describe("(rodada 7) o fail-safe de vocabulário interno com o teto cheio e uma 
     expect(modelo.estado.etapas).toBe(3);
     const resultados = [...modelo.estado.resultados.values()];
     expect(resultados[2]).toMatch(/internal_vocabulary_leak_handoff/);
+  });
+});
+
+describe("(junção da 1.86) a quase-duplicata do autor não barra a retomada do C54", () => {
+  // A 1.86 semeia a trava de quase-duplicata (`near-dup.ts`) com as mensagens enviadas
+  // desde a última fala do cliente, `queued` incluída. A pendência que a re-execução
+  // deve retomar pela mesma chave estava nessa memória: o modelo regenerava o mesmo
+  // texto, a trava devolvia `duplicate_suppressed` antes do ledger e a mensagem ficava
+  // presa no CRM (o caso da rodada 5 acima falhava assim). A memória agora tira as
+  // pendências que este job retoma (`semAsRetomadas`); o resto continua valendo.
+  it("B pendente (`queued`) e o modelo regenera B: retoma pela MESMA chave, uma mensagem só, sem `duplicate_suppressed`", async () => {
+    const modelo = modeloQueRegeneraAsTres([B]);
+    let chaveDeB = "";
+    let mensagemDeB = "";
+    const { erro, jobId } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000040",
+      async (id) => {
+        chaveDeB = await recibo(id, 1, "queued", B);
+        mensagemDeB = await mensagemNaFila(chaveDeB, B);
+      },
+    );
+    expect(erro).toBeNull();
+
+    expect(entregues).toEqual([{ body: B, key: chaveDeB }]);
+    const resultados = [...modelo.estado.resultados.values()];
+    expect(resultados[0]).toMatch(/"status":"enviada"/);
+    expect(resultados.join("\n")).not.toMatch(/duplicate_suppressed/);
+
+    const { rows } = await pool.query<{ seq: number; status: string; crm_message_id: string | null }>(
+      "select seq, status, crm_message_id from send_ledger where organization_id = $1 and job_id = $2 order by seq",
+      [ORG, jobId],
+    );
+    expect(rows.map((r) => [Number(r.seq), r.status, r.crm_message_id])).toEqual([[1, "accepted", mensagemDeB]]);
+    const { rows: mensagens } = await pool.query<{ body: string; status: string }>(
+      "select body, status from messages where organization_id = $1 and direction = 'outbound'",
+      [ORG],
+    );
+    expect(mensagens).toEqual([{ body: B, status: "sent" }]);
+  });
+
+  it("controle: o mesmo texto JÁ ENTREGUE (outro job, depois da fala do cliente) continua barrado pela quase-duplicata", async () => {
+    await pool.query(
+      `insert into messages (id, organization_id, conversation_id, channel_session_id, contact_id,
+         type, direction, status, body, sent_via, metadata)
+       values ($1,$2,$3,$4,$5,'text','outbound','sent',$6,'ai',$7::jsonb)`,
+      [randomUUID(), ORG, CONV, SESSION, CONTACT, B, JSON.stringify({ idempotency_key: randomUUID() })],
+    );
+    const modelo = modeloQueRegeneraAsTres([B]);
+    const { erro } = await rodaTurno(
+      montaHandler(modelo.doGenerate),
+      "eeeeeeee-0000-4000-8000-000000000041",
+      async () => {},
+    );
+    expect(erro).toBeNull();
+
+    expect(entregues).toEqual([]);
+    const resultados = [...modelo.estado.resultados.values()];
+    expect(resultados[0]).toMatch(/duplicate_suppressed/);
   });
 });
