@@ -115,15 +115,20 @@ async function handleInbound(row: EventRow): Promise<HandlerResult> {
     contactName,
     icon,
   });
-  // (C01) Modo `responsavel`: a lista é a nossa, um push por pessoa, como na
-  // -c01.16. A trava do autor por visibilidade (`enviarPushAQuemVeAConversa`) não
-  // entra aqui: ver "Sobreposições" no relatório da junção da 1.86.0.
+  // (C01) Modo `responsavel`: QUEM deve ser avisado é a nossa lista; QUEM PODE ver
+  // é a trava do autor (1.86), a mesma do modo `equipe`. Nome e prévia só saem para
+  // quem a RLS de `conversations` deixaria abrir a conversa. O responsável que não
+  // vê a conversa (o dono do negócio, com a conversa de outra pessoa e a
+  // visibilidade restrita) não recebe nada, nem sem prévia: a regra mais
+  // conservadora, a mesma da menção do autor, e um push que ele não consegue abrir
+  // não o ajudaria a responder. (Revisão da junção da 1.86.0, achado 5.)
   if (destinatarios !== null) {
-    let enviados = 0;
-    for (const userId of destinatarios) {
-      enviados += (await enviarPushAoUsuario(row.organization_id, userId, payload)).sent;
-    }
-    return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "ok", detail: `sent:${enviados}` };
+    const { sent } = await enviarPushAQuemVeAConversa(row.organization_id, conversationId, payload, destinatarios);
+    return {
+      consumer_key: WEB_PUSH_INBOUND_KEY,
+      status: "ok",
+      detail: `sent:${sent};responsavel:${destinatarios.length}`,
+    };
   }
   // Modo `equipe`: a regra do autor (1.86), inteira.
   const destino = await destinatariosDoInbound(row.organization_id, conversationId, contactId);
