@@ -20,7 +20,9 @@
  *     como no achado 5). Nenhum negócio nem etapa muda: a escolha fica no
  *     próprio caso (`context_snapshot.c01_atendente`), que entra na carga e na
  *     vez das próximas escolhas. Decisão do Lauro de 20/10: os casos para a
- *     equipe se distribuem entre as atendentes, alternando, com push.
+ *     equipe se distribuem entre as atendentes, alternando, com push. Como a
+ *     conversa não é atribuída, a vez é só de quem VÊ a conversa
+ *     (`veAConversa`); ninguém vê = só a Central.
  *
  * Só para caso que espera gente (`awaiting_human`). A atribuição só pega negócio
  * ainda sem pessoa (`owner_user_id is null`): duas aberturas ao mesmo tempo não
@@ -102,6 +104,21 @@ const vezNoCaso = (v: unknown): VezNoCaso | null =>
   typeof v === "object" && v !== null && typeof (v as VezNoCaso).user_id === "string" && typeof (v as VezNoCaso).em === "string"
     ? (v as VezNoCaso)
     : null;
+/**
+ * A atendente (papel `agent`) vê a conversa? A mesma regra de
+ * `fn_can_view_conversation` (migration 0035) para esse papel: a conversa dela
+ * sempre; com `visibility_mode` `all`, todas; com `own_and_unassigned` (o
+ * padrão), também as sem dono; com `own`, só as dela. O push ainda passa pela
+ * função do banco (`enviarPushAQuemVeAConversa`), que tem a última palavra.
+ */
+export function veAConversa(modo: string | null | undefined, atribuidaA: string | null, atendente: string): boolean {
+  if (atribuidaA === atendente) return true;
+  const m = modo ?? "own_and_unassigned";
+  if (m === "all") return true;
+  if (m === "own_and_unassigned") return atribuidaA === null;
+  return false;
+}
+
 /** O que a anonimização (migrations 0370 e 0483) grava no resumo: snapshot apagado não se regrava. */
 const RESUMO_ANONIMIZADO = "[resumo anonimizado]";
 type Negocio = { id: string; owner_user_id: string | null; assigned_at: string | null };
@@ -323,9 +340,16 @@ async function avisoJaEnfileirado(
  * A atendente da vez pela regra de `escolherAtendente`: as atendentes ativas
  * (papel `agent`, convite aceito, não revogada), a carga de cada uma e quando
  * cada uma recebeu caso pela última vez (negócio atribuído ou caso sem negócio
- * dado pelo rodízio). `null` = nenhuma atendente.
+ * dado pelo rodízio). `podeReceber` tira da vez quem não pode ficar com o caso
+ * (a carga continua contando todas). `null` = nenhuma atendente;
+ * `"ninguem_pode"` = há atendentes, mas `podeReceber` recusou todas.
  */
-async function atendenteDaVez(admin: Admin, org: string, caseId: string): Promise<string | null | Falha> {
+async function atendenteDaVez(
+  admin: Admin,
+  org: string,
+  caseId: string,
+  podeReceber: (atendente: string) => boolean = () => true,
+): Promise<string | null | "ninguem_pode" | Falha> {
   const { data: membros, error: erroDosMembros } = await admin
     .from("user_organizations")
     .select("user_id")
@@ -364,7 +388,34 @@ async function atendenteDaVez(admin: Admin, org: string, caseId: string): Promis
     const vez = vezNoCaso(v.c01_atendente);
     if (vez && elegiveis.includes(vez.user_id) && vez.em > (ultima.get(vez.user_id) ?? "")) ultima.set(vez.user_id, vez.em);
   }
-  return escolherAtendente(elegiveis, abertos, ultima);
+  const candidatas = elegiveis.filter(podeReceber);
+  if (candidatas.length === 0) return "ninguem_pode";
+  return escolherAtendente(candidatas, abertos, ultima);
+}
+
+/** Quem vê a conversa, para a vez do caso sem negócio. `null` = a conversa não existe. */
+async function visibilidadeDaConversa(
+  admin: Admin,
+  org: string,
+  conversa: string,
+): Promise<((atendente: string) => boolean) | null | Falha> {
+  const { data: conv, error: erroDaConversa } = await admin
+    .from("conversations")
+    .select("assigned_to_user_id")
+    .eq("organization_id", org)
+    .eq("id", conversa)
+    .maybeSingle();
+  if (erroDaConversa) return { erro: `leitura da conversa falhou: ${erroDaConversa.message}` };
+  if (!conv) return null;
+  const { data: organizacao, error: erroDaOrganizacao } = await admin
+    .from("organizations")
+    .select("visibility_mode:settings->>visibility_mode")
+    .eq("id", org)
+    .maybeSingle();
+  if (erroDaOrganizacao) return { erro: `leitura da organização falhou: ${erroDaOrganizacao.message}` };
+  const modo = (organizacao as { visibility_mode?: string | null } | null)?.visibility_mode ?? null;
+  const atribuidaA = (conv as { assigned_to_user_id?: string | null }).assigned_to_user_id ?? null;
+  return (atendente) => veAConversa(modo, atribuidaA, atendente);
 }
 
 /**
@@ -378,9 +429,13 @@ async function semNegocio(admin: Admin, org: string, caseId: string, c: Caso): P
   let vez = vezNoCaso(c.context_snapshot?.c01_atendente);
   if (!vez) {
     if (c.summary === RESUMO_ANONIMIZADO) return resultado("skipped", "caso_sem_negocio:anonimizado");
-    const escolhida = await atendenteDaVez(admin, org, caseId);
+    const ve = await visibilidadeDaConversa(admin, org, conversa);
+    if (falhou(ve)) return tentarDeNovo(ve.erro);
+    if (!ve) return resultado("skipped", "caso_sem_negocio:sem_conversa");
+    const escolhida = await atendenteDaVez(admin, org, caseId, ve);
     if (falhou(escolhida)) return tentarDeNovo(escolhida.erro);
     if (!escolhida) return resultado("skipped", "caso_sem_negocio:sem_atendente");
+    if (escolhida === "ninguem_pode") return resultado("skipped", "caso_sem_negocio:ninguem_ve_a_conversa");
     const nova: VezNoCaso = { user_id: escolhida, em: new Date().toISOString() };
     // Só grava se ninguém gravou antes e o caso não foi anonimizado entre a
     // leitura e a escrita (a anonimização zera o snapshot: regravá-lo traria de
@@ -437,7 +492,7 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
 
   const escolhida = await atendenteDaVez(admin, org, caseId);
   if (falhou(escolhida)) return tentarDeNovo(escolhida.erro);
-  if (!escolhida) return resultado("skipped", "sem_atendente");
+  if (!escolhida || escolhida === "ninguem_pode") return resultado("skipped", "sem_atendente");
 
   const { data: trocados, error: erroDaTroca } = await admin
     .from("crm_leads")

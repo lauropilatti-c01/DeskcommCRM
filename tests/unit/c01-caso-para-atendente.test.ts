@@ -20,8 +20,13 @@ vi.mock("@/lib/notifications/web_push", () => ({
 }));
 
 type Linha = Record<string, unknown>;
-type Banco = Record<"agent_cases" | "crm_leads" | "user_organizations" | "conversations" | "crm_pipelines" | "event_log", Linha[]>;
-let db: Banco = { agent_cases: [], crm_leads: [], user_organizations: [], conversations: [], crm_pipelines: [], event_log: [] };
+type Banco = Record<
+  "agent_cases" | "crm_leads" | "user_organizations" | "conversations" | "crm_pipelines" | "event_log" | "organizations",
+  Linha[]
+>;
+let db: Banco = {
+  agent_cases: [], crm_leads: [], user_organizations: [], conversations: [], crm_pipelines: [], event_log: [], organizations: [],
+};
 /** `payload->>campo` e `snapshot->campo` leem dentro do jsonb, como o PostgREST. */
 const valor = (l: Linha, c: string) => {
   const [col, campo] = c.includes("->>") ? c.split("->>") : c.split("->");
@@ -129,6 +134,7 @@ beforeEach(() => {
     crm_pipelines: [{ id: "p1", organization_id: ORG, is_default: true, is_archived: false }],
     event_log: [],
     user_organizations: [membro("priscila"), membro("maria"), membro("lauro", "admin")],
+    organizations: [{ id: ORG, settings: {} }], // sem visibility_mode = own_and_unassigned, como na produção
   };
 });
 
@@ -342,7 +348,7 @@ describe("caso sem negócio aberto: rodízio entre as atendentes, sem tocar em n
     expect(db.crm_leads[1]!.owner_user_id).not.toBe(atendenteDoCaso());
   });
 
-  it("a escolhida não vê a conversa: nada de push para ela (nem sem prévia)", async () => {
+  it("a trava do banco no push continua com a última palavra: se ela diz que a escolhida não vê, nada de push (nem sem prévia)", async () => {
     soGanho();
     estado.naoVeem = ["maria", "priscila"];
     const r = await casoParaAtendenteHandler.handle(evento());
@@ -441,5 +447,63 @@ describe("conta de serviço (admin) nunca entra no rodízio", () => {
     expect((db.agent_cases[0]!.context_snapshot as Linha).c01_atendente).toBeUndefined();
     expect(paraQuemVe).not.toHaveBeenCalled();
     expect(push).not.toHaveBeenCalled();
+  });
+});
+
+// (Revisão da junção da 1.86, achado 3, reserva por visibilidade) O rodízio grava
+// a vez e não atribui a conversa. A atendente da vez que não vê a conversa (já
+// atribuída a outra pessoa, ou `visibility_mode = 'own'`) não recebe push, e o
+// caso ficaria sem ninguém: vale a próxima elegível que vê, pela mesma regra de
+// `fn_can_view_conversation` (migration 0035) para o papel agent.
+describe("caso sem negócio: a vez é de quem vê a conversa", () => {
+  const atendenteDoCaso = () =>
+    ((db.agent_cases[0]!.context_snapshot as Linha).c01_atendente as Linha | undefined)?.user_id;
+  beforeEach(() => {
+    db.crm_leads[0]!.status = "won";
+  });
+
+  it("conversa atribuída à priscila (padrão own_and_unassigned): a vez pula a maria, que não vê, e vai à priscila", async () => {
+    Object.assign(db.conversations[0]!, { assigned_to_user_id: "priscila" });
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r.detail).toBe("sem_negocio:rodizio:sent:1");
+    expect(atendenteDoCaso()).toBe("priscila");
+    expect(paraQuemVe.mock.calls[0]![3]).toEqual(["priscila"]);
+  });
+
+  it("visibility_mode own e conversa sem dono: ninguém vê, só a Central, com o motivo", async () => {
+    db.organizations[0]!.settings = { visibility_mode: "own" };
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r).toMatchObject({ status: "skipped", detail: "caso_sem_negocio:ninguem_ve_a_conversa" });
+    expect(atendenteDoCaso()).toBeUndefined();
+    expect(paraQuemVe).not.toHaveBeenCalled();
+  });
+
+  it("conversa atribuída ao admin (o Lauro): nenhuma atendente vê, só a Central", async () => {
+    Object.assign(db.conversations[0]!, { assigned_to_user_id: "lauro" });
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r).toMatchObject({ status: "skipped", detail: "caso_sem_negocio:ninguem_ve_a_conversa" });
+    expect(atendenteDoCaso()).toBeUndefined();
+  });
+
+  it("visibility_mode all: todas veem, mesmo atribuída a outra pessoa; vale a vez normal", async () => {
+    db.organizations[0]!.settings = { visibility_mode: "all" };
+    Object.assign(db.conversations[0]!, { assigned_to_user_id: "lauro" });
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r.detail).toBe("sem_negocio:rodizio:sent:1");
+    expect(atendenteDoCaso()).toBe("maria");
+  });
+
+  it("visibility_mode own e conversa da maria: só a maria vê, e é ela", async () => {
+    db.organizations[0]!.settings = { visibility_mode: "own" };
+    Object.assign(db.conversations[0]!, { assigned_to_user_id: "maria" });
+    await casoParaAtendenteHandler.handle(evento());
+    expect(atendenteDoCaso()).toBe("maria");
+  });
+
+  it("leitura da organização que falha: tenta de novo, sem gravar a vez", async () => {
+    estado.falhar = "organizations";
+    const r = await casoParaAtendenteHandler.handle(evento());
+    expect(r.status).toBe("retry");
+    expect(atendenteDoCaso()).toBeUndefined();
   });
 });
