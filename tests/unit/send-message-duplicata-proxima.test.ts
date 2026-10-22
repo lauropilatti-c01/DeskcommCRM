@@ -80,7 +80,11 @@ describe("a memória de duplicata só cresce com envio REAL e é semeada por his
     // Janela "desde a última inbound": vazia num turno fresco (não suprime
     // resposta legítima), cheia num follow-up que re-responde conversa calada.
     expect(FONTE).toContain("corposEnviadosDesdeUltimaInbound(");
-    expect(FONTE).toMatch(/dupTrava\.semear\(jaDito\)/);
+    // (C01, junção da 1.86.0) A memória é `jaDito` menos uma ocorrência de cada pendente
+    // que ESTE job vai retomar pela mesma chave (C54, `semAsRetomadas`). Sem pendente
+    // (o follow-up), é `jaDito` inteira: ver c01-retomada-nao-e-quase-duplicata.
+    expect(FONTE).toMatch(/const memoria = semAsRetomadas\(\s*jaDito,/);
+    expect(FONTE).toMatch(/dupTrava\.semear\(memoria\)/);
   });
 });
 

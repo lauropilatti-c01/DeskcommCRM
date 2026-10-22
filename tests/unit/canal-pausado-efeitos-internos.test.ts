@@ -87,6 +87,14 @@ vi.mock("@/lib/notifications/web_push", () => ({
   enviarPushAoUsuario: async () => ({ sent: 0, gone: 0 }),
 }));
 vi.mock("@/lib/notifications/vapid", () => ({ vapidPronto: () => true }));
+// (C01, junção da 1.86.0) O caminho bom deste teste é a regra do autor para a mensagem
+// recebida, que na C01 vale com `PUSH_DE_MENSAGEM=equipe`. O padrão da C01 (`responsavel`)
+// tem suíte própria em `lib/notifications/destino-do-push.test.ts`; a guarda do canal
+// pausado vem antes dos dois modos.
+vi.mock("@/lib/notifications/destino-do-push", async (original) => ({
+  ...(await original<typeof import("@/lib/notifications/destino-do-push")>()),
+  modoDoPushDeMensagem: () => "equipe",
+}));
 vi.mock("@/lib/branding/saida", () => ({ marcaDaSaida: async () => ({ nome: "Marca" }) }));
 
 // ─── 2. reatividade do fluxo ────────────────────────────────────────────────
