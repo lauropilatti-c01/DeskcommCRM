@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type * as Cliente from "@/lib/ai/decisao/cliente";
+import type { OrigemDoJev } from "@/lib/ai/decisao/origem";
 
 afterEach(() => {
   vi.doUnmock("@/lib/env");
@@ -31,14 +32,17 @@ const RESPOSTA = {
   usage: { input_tokens: 10, output_tokens: 0 },
 };
 
-async function modeloPedido(jevModel: string | undefined): Promise<{ constante: string; noCorpo: unknown }> {
+async function modeloPedido(
+  jevModel: string | undefined,
+  origem?: OrigemDoJev,
+): Promise<{ constante: string; noCorpo: unknown }> {
   const cliente = await clienteCom(jevModel);
   const fetchImpl = vi.fn().mockResolvedValue(
     new Response(JSON.stringify(RESPOSTA), { status: 200, headers: { "content-type": "application/json" } }),
   );
   await cliente.decidir(
-    { chave: "tsk_teste", estado: "oi", perguntas: { clima: { tipo: "noul", instrucao: "Gostou?" } } },
-    { fetchImpl },
+    { chave: "tsk_teste", estado: "oi", perguntas: { clima: { tipo: "noul", instrucao: "Gostou?" } }, origem },
+    { fetchImpl, baseUrl: "https://jev.invalid" },
   );
   const corpo = JSON.parse(String(fetchImpl.mock.calls[0]![1].body)) as { model: unknown };
   return { constante: cliente.modeloDoJev(), noCorpo: corpo.model };
@@ -56,6 +60,23 @@ describe("(C01) o modelo do Jev pelo ambiente", () => {
   it("vazio ou ausente: a versão fixada de antes (jev-1.13.0)", async () => {
     expect(await modeloPedido("")).toEqual({ constante: "jev-1.13.0", noCorpo: "jev-1.13.0" });
     expect(await modeloPedido(undefined)).toEqual({ constante: "jev-1.13.0", noCorpo: "jev-1.13.0" });
+  });
+
+  // Junção da 1.86.0: com JEV_MODEL vazio, o nome passou a vir de `modeloDaOrigem`
+  // (do autor). Na origem que usamos (TypeSafe direto, a padrão; a produção não tem
+  // `settings.jev` nem chave do Jev), o nome pedido é o mesmo de antes: `modeloDoJev()`.
+  it("vazio, origem TypeSafe (a nossa): o mesmo nome de modeloDoJev(), antes e depois da 1.86", async () => {
+    expect(await modeloPedido("", "typesafe")).toEqual({ constante: "jev-1.13.0", noCorpo: "jev-1.13.0" });
+    expect(await modeloPedido(undefined, "typesafe")).toEqual({ constante: "jev-1.13.0", noCorpo: "jev-1.13.0" });
+  });
+
+  it("vazio, origem OpenRouter (não usamos): vale o nome do autor, e não o de modeloDoJev()", async () => {
+    expect(await modeloPedido("", "openrouter")).toEqual({ constante: "jev-1.13.0", noCorpo: "typesafe/jev-1.13" });
+  });
+
+  it("preenchido vale em qualquer origem", async () => {
+    expect((await modeloPedido("jev-1.13", "openrouter")).noCorpo).toBe("jev-1.13");
+    expect((await modeloPedido("jev-1.13", "typesafe")).noCorpo).toBe("jev-1.13");
   });
 
   it("todo uso do nome lê a função (corpo, telemetria, worker), nenhum a constante", () => {
