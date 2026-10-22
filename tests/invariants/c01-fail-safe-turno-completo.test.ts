@@ -632,6 +632,37 @@ describe("turno completo — o fail-safe de vocabulário interno (achados 2 e 3 
     expect(passagem.central[0]!.body).toMatch(/O cliente NÃO foi avisado/);
   });
 
+  it("(revisão da junção da 1.86, achado 1) caso antigo aberto: o resumo novo entra como nota nele e o caso volta à equipe", async () => {
+    const { openCase } = await import("@/lib/agent-engine/agent/human-cases");
+    const antigo = await openCase(
+      pool,
+      { tenantId: ORG, conversationId: CONV, agentId: null },
+      { title: "Caso antigo", summary: "a dúvida de antes", blocker: "sem fonte" },
+    );
+    if (!antigo.ok) throw new Error(`caso antigo não abriu: ${antigo.error.code}`);
+    await pool.query(`update agent_cases set status = 'awaiting_lead' where id = $1`, [antigo.caseId]);
+
+    const modelo = modeloQueVazaEDepoisTentaTemplate();
+    const erro = await rodaTurno(montaHandler(modelo.doGenerate), "dddddddd-0000-4000-8000-000000000022");
+    expect(erro).toBeNull();
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0]!.body).toContain(m.turno.FRASE_DE_ESPERA_PADRAO);
+
+    // Um caso só (o antigo), agora com o texto vetado deste turno e esperando a equipe.
+    const { rows: casos } = await pool.query<{ id: string; status: string }>(
+      "select id, status from agent_cases where organization_id = $1 and conversation_id = $2",
+      [ORG, CONV],
+    );
+    expect(casos).toEqual([{ id: antigo.caseId, status: "awaiting_human" }]);
+    const { rows: notas } = await pool.query<{ body: string }>(
+      `select body from agent_case_events where case_id = $1 and kind = 'agent_noted' order by created_at`,
+      [antigo.caseId],
+    );
+    expect(notas, "o resumo novo do fail-safe se perdeu").toHaveLength(1);
+    expect(notas[0]!.body).toContain(VAZAMENTOS[2]!);
+    expect(notas[0]!.body).toContain("Resposta travada pela revisão automática");
+  });
+
   it("(rodada 3) `send_template` e o 3º vazamento na MESMA etapa: o template passa pela trava de entrada antes do fail-safe e é barrado no ponto comum — só a frase sai", async () => {
     // A corrida, encenada: a consulta do modelo aprovado (`meta_templates`) do
     // `send_template` fica SEGURA até a frase de espera sair pelo canal. É o atraso

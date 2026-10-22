@@ -12,7 +12,17 @@
  *     que recebeu negócio há mais tempo; empate de novo, a ordem do id. A troca
  *     de dono dispara `lead.assigned`, e o push de negócio atribuído já diz que
  *     é um caso;
- *   - nenhuma atendente: nada muda (a Central continua sendo o aviso).
+ *   - nenhuma atendente: nada muda (a Central continua sendo o aviso);
+ *   - (revisão da junção da 1.86, achado 3) caso sem negócio aberto (cliente
+ *     só com negócio ganho, o aluno que já comprou e volta com dúvida, ou sem
+ *     negócio nenhum): a mesma regra escolhe a atendente da vez, que recebe o
+ *     push "Caso para você" só se vê a conversa (`enviarPushAQuemVeAConversa`,
+ *     como no achado 5). Nenhum negócio nem etapa muda: a escolha fica no
+ *     próprio caso (`context_snapshot.c01_atendente`), que entra na carga e na
+ *     vez das próximas escolhas. Decisão do Lauro de 20/10: os casos para a
+ *     equipe se distribuem entre as atendentes, alternando, com push. Como a
+ *     conversa não é atribuída, a vez é só de quem VÊ a conversa
+ *     (`veAConversa`); ninguém vê = só a Central.
  *
  * Só para caso que espera gente (`awaiting_human`). A atribuição só pega negócio
  * ainda sem pessoa (`owner_user_id is null`): duas aberturas ao mesmo tempo não
@@ -36,7 +46,7 @@ import { resolveActiveLeadForContact, type LeadCandidate } from "@/lib/leads/act
 import type { LeadStatus } from "@/lib/types/leads";
 import { membrosAtivos, pushDoCasoAtribuido, type AdminDoPush } from "@/lib/notifications/destino-do-push";
 import { vapidPronto } from "@/lib/notifications/vapid";
-import { enviarPushAoUsuario } from "@/lib/notifications/web_push";
+import { enviarPushAQuemVeAConversa, enviarPushAoUsuario } from "@/lib/notifications/web_push";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const CASO_PARA_ATENDENTE_KEY = "c01.caso-para-atendente";
@@ -80,7 +90,37 @@ export function escolherAtendente(
 }
 
 type Admin = ReturnType<typeof createAdminClient>;
-type Caso = { status?: string; lead_id?: string | null; conversation_id?: string | null; opened_at?: string | null };
+type Caso = {
+  status?: string;
+  lead_id?: string | null;
+  conversation_id?: string | null;
+  opened_at?: string | null;
+  summary?: string | null;
+  context_snapshot?: Record<string, unknown> | null;
+};
+/** A atendente da vez de um caso sem negócio aberto, guardada no próprio caso. */
+type VezNoCaso = { user_id: string; em: string };
+const vezNoCaso = (v: unknown): VezNoCaso | null =>
+  typeof v === "object" && v !== null && typeof (v as VezNoCaso).user_id === "string" && typeof (v as VezNoCaso).em === "string"
+    ? (v as VezNoCaso)
+    : null;
+/**
+ * A atendente (papel `agent`) vê a conversa? A mesma regra de
+ * `fn_can_view_conversation` (migration 0035) para esse papel: a conversa dela
+ * sempre; com `visibility_mode` `all`, todas; com `own_and_unassigned` (o
+ * padrão), também as sem dono; com `own`, só as dela. O push ainda passa pela
+ * função do banco (`enviarPushAQuemVeAConversa`), que tem a última palavra.
+ */
+export function veAConversa(modo: string | null | undefined, atribuidaA: string | null, atendente: string): boolean {
+  if (atribuidaA === atendente) return true;
+  const m = modo ?? "own_and_unassigned";
+  if (m === "all") return true;
+  if (m === "own_and_unassigned") return atribuidaA === null;
+  return false;
+}
+
+/** O que a anonimização (migrations 0370 e 0483) grava no resumo: snapshot apagado não se regrava. */
+const RESUMO_ANONIMIZADO = "[resumo anonimizado]";
 type Negocio = { id: string; owner_user_id: string | null; assigned_at: string | null };
 type Falha = { erro: string };
 const falhou = (v: unknown): v is Falha => typeof v === "object" && v !== null && "erro" in v;
@@ -191,13 +231,13 @@ async function cargas(
 ): Promise<Map<string, number> | Falha> {
   const { data, error } = await admin
     .from("agent_cases")
-    .select("id, lead_id, conversation_id")
+    .select("id, lead_id, conversation_id, c01_atendente:context_snapshot->c01_atendente")
     .eq("organization_id", org)
     .eq("status", "awaiting_human");
   if (error) return { erro: `leitura dos casos falhou: ${error.message}` };
-  const casos = ((data ?? []) as { id: string; lead_id: string | null; conversation_id: string | null }[]).filter(
-    (c) => c.id !== caseId,
-  );
+  const casos = (
+    (data ?? []) as { id: string; lead_id: string | null; conversation_id: string | null; c01_atendente?: unknown }[]
+  ).filter((c) => c.id !== caseId);
   const leadIds = [...new Set(casos.flatMap((c) => (c.lead_id ? [c.lead_id] : [])))];
   const convIds = [...new Set(casos.flatMap((c) => (!c.lead_id && c.conversation_id ? [c.conversation_id] : [])))];
 
@@ -252,9 +292,13 @@ async function cargas(
 
   const abertos = new Map<string, number>();
   for (const c of casos) {
-    const dona = c.lead_id
-      ? donoDoNegocio.get(c.lead_id)
-      : donaDoContato.get(contatoDaConversa.get(c.conversation_id ?? "") ?? "");
+    // Caso sem negócio aberto que o rodízio deu a alguém: conta para ela.
+    const daVez = vezNoCaso(c.c01_atendente)?.user_id;
+    const dona =
+      (c.lead_id
+        ? donoDoNegocio.get(c.lead_id)
+        : donaDoContato.get(contatoDaConversa.get(c.conversation_id ?? "") ?? "")) ??
+      (daVez && elegiveis.includes(daVez) ? daVez : undefined);
     if (dona) abertos.set(dona, (abertos.get(dona) ?? 0) + 1);
   }
   return abertos;
@@ -292,13 +336,135 @@ async function avisoJaEnfileirado(
   return ((data ?? []) as unknown[]).length > 0;
 }
 
+/**
+ * A atendente da vez pela regra de `escolherAtendente`: as atendentes ativas
+ * (papel `agent`, convite aceito, não revogada), a carga de cada uma e quando
+ * cada uma recebeu caso pela última vez (negócio atribuído ou caso sem negócio
+ * dado pelo rodízio). `podeReceber` tira da vez quem não pode ficar com o caso
+ * (a carga continua contando todas). `null` = nenhuma atendente;
+ * `"ninguem_pode"` = há atendentes, mas `podeReceber` recusou todas.
+ */
+async function atendenteDaVez(
+  admin: Admin,
+  org: string,
+  caseId: string,
+  podeReceber: (atendente: string) => boolean = () => true,
+): Promise<string | null | "ninguem_pode" | Falha> {
+  const { data: membros, error: erroDosMembros } = await admin
+    .from("user_organizations")
+    .select("user_id")
+    .eq("organization_id", org)
+    .eq("role", "agent")
+    .not("accepted_at", "is", null)
+    .is("revoked_at", null);
+  if (erroDosMembros) return { erro: `leitura da equipe falhou: ${erroDosMembros.message}` };
+  const elegiveis = ((membros ?? []) as { user_id: string }[]).map((m) => m.user_id);
+  if (elegiveis.length === 0) return null;
+
+  const abertos = await cargas(admin, org, caseId, elegiveis);
+  if (falhou(abertos)) return abertos;
+  const ultima = new Map<string, string>();
+  const { data: recentes, error: erroDosRecentes } = await admin
+    .from("crm_leads")
+    .select("owner_user_id, assigned_at")
+    .eq("organization_id", org)
+    .in("owner_user_id", elegiveis)
+    .not("assigned_at", "is", null)
+    .order("assigned_at", { ascending: false })
+    .limit(200);
+  if (erroDosRecentes) return { erro: `leitura das atribuições falhou: ${erroDosRecentes.message}` };
+  for (const r of (recentes ?? []) as { owner_user_id: string; assigned_at: string }[]) {
+    if (!ultima.has(r.owner_user_id)) ultima.set(r.owner_user_id, r.assigned_at);
+  }
+  const { data: vezes, error: erroDasVezes } = await admin
+    .from("agent_cases")
+    .select("c01_atendente:context_snapshot->c01_atendente")
+    .eq("organization_id", org)
+    .not("context_snapshot->c01_atendente", "is", null)
+    .order("opened_at", { ascending: false })
+    .limit(200);
+  if (erroDasVezes) return { erro: `leitura do rodízio dos casos falhou: ${erroDasVezes.message}` };
+  for (const v of (vezes ?? []) as { c01_atendente?: unknown }[]) {
+    const vez = vezNoCaso(v.c01_atendente);
+    if (vez && elegiveis.includes(vez.user_id) && vez.em > (ultima.get(vez.user_id) ?? "")) ultima.set(vez.user_id, vez.em);
+  }
+  const candidatas = elegiveis.filter(podeReceber);
+  if (candidatas.length === 0) return "ninguem_pode";
+  return escolherAtendente(candidatas, abertos, ultima);
+}
+
+/** Quem vê a conversa, para a vez do caso sem negócio. `null` = a conversa não existe. */
+async function visibilidadeDaConversa(
+  admin: Admin,
+  org: string,
+  conversa: string,
+): Promise<((atendente: string) => boolean) | null | Falha> {
+  const { data: conv, error: erroDaConversa } = await admin
+    .from("conversations")
+    .select("assigned_to_user_id")
+    .eq("organization_id", org)
+    .eq("id", conversa)
+    .maybeSingle();
+  if (erroDaConversa) return { erro: `leitura da conversa falhou: ${erroDaConversa.message}` };
+  if (!conv) return null;
+  const { data: organizacao, error: erroDaOrganizacao } = await admin
+    .from("organizations")
+    .select("visibility_mode:settings->>visibility_mode")
+    .eq("id", org)
+    .maybeSingle();
+  if (erroDaOrganizacao) return { erro: `leitura da organização falhou: ${erroDaOrganizacao.message}` };
+  const modo = (organizacao as { visibility_mode?: string | null } | null)?.visibility_mode ?? null;
+  const atribuidaA = (conv as { assigned_to_user_id?: string | null }).assigned_to_user_id ?? null;
+  return (atendente) => veAConversa(modo, atribuidaA, atendente);
+}
+
+/**
+ * Caso sem negócio aberto: a atendente da vez, guardada no caso, recebe o push
+ * se vê a conversa. Nova tentativa do mesmo evento reaproveita a que já foi
+ * guardada e manda o aviso de novo (aviso repetido é melhor que nenhum).
+ */
+async function semNegocio(admin: Admin, org: string, caseId: string, c: Caso): Promise<HandlerResult> {
+  const conversa = c.conversation_id;
+  if (!conversa) return resultado("skipped", "caso_sem_negocio:sem_conversa");
+  let vez = vezNoCaso(c.context_snapshot?.c01_atendente);
+  if (!vez) {
+    if (c.summary === RESUMO_ANONIMIZADO) return resultado("skipped", "caso_sem_negocio:anonimizado");
+    const ve = await visibilidadeDaConversa(admin, org, conversa);
+    if (falhou(ve)) return tentarDeNovo(ve.erro);
+    if (!ve) return resultado("skipped", "caso_sem_negocio:sem_conversa");
+    const escolhida = await atendenteDaVez(admin, org, caseId, ve);
+    if (falhou(escolhida)) return tentarDeNovo(escolhida.erro);
+    if (!escolhida) return resultado("skipped", "caso_sem_negocio:sem_atendente");
+    if (escolhida === "ninguem_pode") return resultado("skipped", "caso_sem_negocio:ninguem_ve_a_conversa");
+    const nova: VezNoCaso = { user_id: escolhida, em: new Date().toISOString() };
+    // Só grava se ninguém gravou antes e o caso não foi anonimizado entre a
+    // leitura e a escrita (a anonimização zera o snapshot: regravá-lo traria de
+    // volta as falas apagadas). `updated_at` fica: o vigia de casos parados o lê
+    // como "alguém da equipe encostou".
+    const { data: gravados, error: erroDaGravacao } = await admin
+      .from("agent_cases")
+      .update({ context_snapshot: { ...(c.context_snapshot ?? {}), c01_atendente: nova } })
+      .eq("organization_id", org)
+      .eq("id", caseId)
+      .is("context_snapshot->c01_atendente", null)
+      .neq("summary", RESUMO_ANONIMIZADO)
+      .select("id");
+    if (erroDaGravacao) return tentarDeNovo(`gravação da atendente do caso falhou: ${erroDaGravacao.message}`);
+    if ((gravados ?? []).length === 0) return tentarDeNovo("o caso mudou entre a leitura e a gravação da atendente");
+    vez = nova;
+  }
+  if (!vapidPronto()) return resultado("skipped", "sem_negocio:rodizio:vapid_ausente");
+  const { sent } = await enviarPushAQuemVeAConversa(org, conversa, pushDoCasoAtribuido(caseId), [vez.user_id]);
+  return resultado("ok", `sem_negocio:rodizio:sent:${sent}`);
+}
+
 async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
   const admin = createAdminClient();
   const org = row.organization_id;
 
   const { data: caso, error } = await admin
     .from("agent_cases")
-    .select("status, lead_id, conversation_id, opened_at")
+    .select("status, lead_id, conversation_id, opened_at, summary, context_snapshot")
     .eq("organization_id", org)
     .eq("id", caseId)
     .maybeSingle();
@@ -308,7 +474,7 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
 
   const negocio = await negocioDoCaso(admin, org, c);
   if (falhou(negocio)) return tentarDeNovo(negocio.erro);
-  if (!negocio) return resultado("skipped", "caso_sem_negocio");
+  if (!negocio) return semNegocio(admin, org, caseId, c);
   const dona = negocio.owner_user_id;
 
   // Já tem uma pessoa: não há troca de dono (nem `lead.assigned`), então o push sai daqui.
@@ -324,35 +490,9 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
     return resultado("ok", `ja_tinha_responsavel:sent:${sent}`);
   }
 
-  const { data: membros, error: erroDosMembros } = await admin
-    .from("user_organizations")
-    .select("user_id")
-    .eq("organization_id", org)
-    .eq("role", "agent")
-    .not("accepted_at", "is", null)
-    .is("revoked_at", null);
-  if (erroDosMembros) return tentarDeNovo(`leitura da equipe falhou: ${erroDosMembros.message}`);
-  const elegiveis = ((membros ?? []) as { user_id: string }[]).map((m) => m.user_id);
-  if (elegiveis.length === 0) return resultado("skipped", "sem_atendente");
-
-  const abertos = await cargas(admin, org, caseId, elegiveis);
-  if (falhou(abertos)) return tentarDeNovo(abertos.erro);
-  const ultima = new Map<string, string>();
-  const { data: recentes, error: erroDosRecentes } = await admin
-    .from("crm_leads")
-    .select("owner_user_id, assigned_at")
-    .eq("organization_id", org)
-    .in("owner_user_id", elegiveis)
-    .not("assigned_at", "is", null)
-    .order("assigned_at", { ascending: false })
-    .limit(200);
-  if (erroDosRecentes) return tentarDeNovo(`leitura das atribuições falhou: ${erroDosRecentes.message}`);
-  for (const r of (recentes ?? []) as { owner_user_id: string; assigned_at: string }[]) {
-    if (!ultima.has(r.owner_user_id)) ultima.set(r.owner_user_id, r.assigned_at);
-  }
-
-  const escolhida = escolherAtendente(elegiveis, abertos, ultima);
-  if (!escolhida) return resultado("skipped", "sem_atendente");
+  const escolhida = await atendenteDaVez(admin, org, caseId);
+  if (falhou(escolhida)) return tentarDeNovo(escolhida.erro);
+  if (!escolhida || escolhida === "ninguem_pode") return resultado("skipped", "sem_atendente");
 
   const { data: trocados, error: erroDaTroca } = await admin
     .from("crm_leads")

@@ -145,8 +145,11 @@ export function valoresNoResultado(
   if (profundidade > 8 || valor === null || valor === undefined) return achados;
   if (typeof valor === 'number') {
     if (Number.isFinite(valor)) {
-      achados.add(Math.round(valor * 100));
+      // (Revisão da junção da 1.86.0, achado 4) Chave em centavos com número inteiro:
+      // SÓ em centavos. Antes valia também em reais, e `preco_centavos: 199700`
+      // liberava "R$ 199.700" (100×) além de "R$ 1.997".
       if (CHAVE_EM_CENTAVOS.test(chave) && Number.isInteger(valor)) achados.add(valor);
+      else achados.add(Math.round(valor * 100));
     }
     return achados;
   }

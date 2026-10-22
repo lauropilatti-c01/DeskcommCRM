@@ -156,7 +156,7 @@ describe("(C01) a ligação no send_message.execute", () => {
   });
 
   it("no último veto: caso ANTES da frase, frase pela cadeia com caso aberto, lead à etapa de passagem, turno encerrado", () => {
-    const caso = failSafe.indexOf("await openCase(");
+    const caso = failSafe.indexOf("await abrirCasoDoFailSafe("); // achado 1 da revisão da junção da 1.86.0
     const passagem = failSafe.indexOf("moverParaHandoffBestEffort('vocabulario_interno_autofallback')");
     const frase = failSafe.indexOf("body: fraseDoFailSafe");
     expect(caso).toBeGreaterThan(-1);

@@ -169,10 +169,13 @@ describe("push de mensagem de cliente (message.received)", () => {
     tabelas.conversations = [{ id: "c1", organization_id: ORG, assigned_to_user_id: null, contact_id: "k1" }];
     tabelas.crm_leads = [{ organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "user", owner_user_id: "priscila" }];
     tabelas.user_organizations = [membro("priscila")];
+    paraQuemVe.mockImplementationOnce(async () => ({ sent: 1, gone: 0 }));
     const r = await webPushInboundHandler.handle(msg());
-    expect(r).toMatchObject({ status: "ok", detail: "sent:1" });
-    expect(paraUsuario).toHaveBeenCalledTimes(1);
-    expect(paraUsuario.mock.calls[0]![1]).toBe("priscila");
+    expect(r).toMatchObject({ status: "ok", detail: "sent:1;responsavel:1" });
+    // (Junção da 1.86) Só ela, e pela trava de visibilidade do autor.
+    expect(paraQuemVe).toHaveBeenCalledTimes(1);
+    expect(paraQuemVe.mock.calls[0]![3]).toEqual(["priscila"]);
+    expect(paraUsuario).not.toHaveBeenCalled();
     expect(paraOrg).not.toHaveBeenCalled();
   });
 
@@ -182,6 +185,27 @@ describe("push de mensagem de cliente (message.received)", () => {
     const r = await webPushInboundHandler.handle(msg());
     expect(r).toMatchObject({ status: "skipped", detail: "sem_responsavel" });
     expect(paraUsuario).not.toHaveBeenCalled();
+    expect(paraOrg).not.toHaveBeenCalled();
+  });
+
+  it("(junção da 1.86) negócio do A, conversa do B, visibilidade restrita: só quem vê a conversa recebe nome e prévia", async () => {
+    // O A (dono do negócio) não pode abrir a conversa do B. Nome e prévia na tela
+    // bloqueada dele seriam conteúdo que a RLS de `conversations` não lhe mostra.
+    tabelas.conversations = [{ id: "c1", organization_id: ORG, assigned_to_user_id: "bruno", contact_id: "k1" }];
+    tabelas.crm_leads = [{ organization_id: ORG, contact_id: "k1", status: "open", owner_kind: "user", owner_user_id: "ana" }];
+    tabelas.user_organizations = [membro("ana"), membro("bruno")];
+    const veem = new Set(["bruno"]);
+    paraQuemVe.mockImplementationOnce(async (_o, _c, _p, so) => ({
+      sent: (so ?? []).filter((u) => veem.has(u)).length,
+      gone: 0,
+    }));
+    const r = await webPushInboundHandler.handle(msg());
+    expect(paraUsuario, "push por pessoa, sem a trava de visibilidade").not.toHaveBeenCalled();
+    expect(paraQuemVe).toHaveBeenCalledTimes(1);
+    const [org, conv, , so] = paraQuemVe.mock.calls[0]!;
+    expect([org, conv]).toEqual([ORG, "c1"]);
+    expect([...(so ?? [])].sort()).toEqual(["ana", "bruno"]);
+    expect(r).toMatchObject({ status: "ok", detail: "sent:1;responsavel:2" });
     expect(paraOrg).not.toHaveBeenCalled();
   });
 

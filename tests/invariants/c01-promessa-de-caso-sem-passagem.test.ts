@@ -114,7 +114,7 @@ type Resposta = ReturnType<typeof texto> | ReturnType<typeof ferramentas>;
  * roteiro. Guarda os prompts do agente e quantas vezes o classificador foi chamado.
  */
 function modelo(roteiro: Resposta[]) {
-  const estado = { prompts: [] as string[], classificacoes: 0, resultados: [] as string[] };
+  const estado = { prompts: [] as string[], classificacoes: 0, vereditos: [] as boolean[], resultados: [] as string[] };
   const fake = async (options: { prompt: unknown }) => {
     const prompt = JSON.stringify(options.prompt);
     if (prompt.includes("prometeuRetornoHumano")) {
@@ -122,6 +122,7 @@ function modelo(roteiro: Resposta[]) {
       const msgs = options.prompt as Array<{ role: string; content?: unknown }>;
       const candidata = JSON.stringify(msgs[msgs.length - 1]?.content ?? "").toLowerCase();
       const retorno = candidata.includes("te retorno");
+      estado.vereditos.push(retorno);
       return texto(
         JSON.stringify({
           isPromise: false,
@@ -328,6 +329,10 @@ describe("(a) o turno que abre o caso e diz 'já te retorno'", () => {
     await turno(fake);
 
     expect(enviados, estado.resultados.join("\n")).toEqual([MARINA_1]);
+    // Camada semântica LIGADA, como na produção (a instalação lê true): o classificador
+    // foi chamado para a frase da Marina e respondeu "promessa de retorno". A mensagem sai
+    // porque o caso foi aberto neste turno, não porque o sinal estava neutro.
+    expect(estado.vereditos, "o classificador semântico não respondeu 'promessa'").toEqual([true]);
     expect(estado.prompts.some((p) => p.includes(VETO)), "a mensagem voltou ao modelo").toBe(false);
     expect(await casos()).toEqual([{ source: "agent", status: "awaiting_human" }]);
     expect(await silencio()).toEqual({ forceHuman: false, silenciada: false, emHandoff: false });
@@ -342,6 +347,9 @@ describe("(a) o turno que abre o caso e diz 'já te retorno'", () => {
     await turno(fake, { mensagem: "e o valor?" });
 
     expect(enviados).toEqual([MARINA_2]);
+    // Mesmo sinal semântico ("promessa"), com o caso aberto antes do turno.
+    expect(primeiro.estado.vereditos).toEqual([true]);
+    expect(estado.vereditos, "o classificador semântico não respondeu 'promessa'").toEqual([true]);
     expect(estado.prompts.some((p) => p.includes(VETO))).toBe(false);
     expect(await casos()).toHaveLength(1);
   });

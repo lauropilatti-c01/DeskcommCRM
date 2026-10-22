@@ -266,7 +266,9 @@ import {
   RECUSA_DEPOIS_DA_VERIFICACAO,
   RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM,
   RETORNO_DO_CASO_SEM_PASSAGEM,
+  notaDoFailSafeNoCasoAberto,
   registrarDuvidaNoCasoAberto,
+  registrarNotaNoCasoAberto,
   TITULO_DO_CASO_POR_ORCAMENTO,
   TRANSPARENCIA_SYSTEM_BLOCK_SEM_PASSAGEM,
 } from '@/lib/c01/passagem-desligada';
@@ -698,6 +700,40 @@ export const MAX_VETOS_DE_ESTILO = 2;
  */
 export const FRASE_DE_ESPERA_PADRAO =
   'Para te responder direitinho, vou pedir ajuda à equipe. Uma pessoa continua a conversa com você por aqui.';
+
+/**
+ * (C01, revisão da junção da 1.86.0, achado 1) O caso dos fail-safes. Com um caso já
+ * aberto na conversa (`case_already_open`), o resumo novo (o texto vetado, o motivo)
+ * entra como nota nele — antes o fail-safe seguia como se tivesse aberto e o resumo se
+ * perdia. O caso que esperava o cliente volta à equipe (`registrarNotaNoCasoAberto`). Se
+ * o caso fechou entre a recusa e a nota, tenta abrir de novo, uma vez. O retorno é o do
+ * `openCase`: quem chama segue tratando `case_already_open` como pessoa acionada. A nota
+ * que falha fica no log e não derruba o fail-safe (o caso existe).
+ */
+export async function abrirCasoDoFailSafe(
+  pool: pg.Pool,
+  ids: Parameters<typeof openCase>[1],
+  input: Parameters<typeof openCase>[2],
+  log?: { warn(msg: string, fields?: Record<string, unknown>): void },
+): ReturnType<typeof openCase> {
+  const caso = await openCase(pool, ids, input);
+  if (caso.ok || caso.error.code !== 'case_already_open') return caso;
+  try {
+    const noCaso = await registrarNotaNoCasoAberto(
+      pool,
+      ids.tenantId,
+      ids.conversationId,
+      notaDoFailSafeNoCasoAberto(input),
+    );
+    if (noCaso !== null) return caso;
+  } catch (err) {
+    log?.warn('fail-safe: a nota no caso já aberto não foi gravada', {
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+    });
+    return caso;
+  }
+  return openCase(pool, ids, input);
+}
 
 /**
  * (C01, -c01.3, rodada 3) O que a abertura do turno diz quando o índice de notas ou os
@@ -1629,7 +1665,7 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
   try {
     // O caso ANTES da frase, como nos outros fail-safes: sem pessoa acionada não há
     // frase de espera honesta.
-    const caso = await openCase(
+    const caso = await abrirCasoDoFailSafe(
       pool,
       { tenantId, conversationId: ctx.conversationId, agentId: marca.agentId },
       {
@@ -1638,6 +1674,7 @@ async function passarAoHumanoPelaFalhaNaPreparacao(
         blocker: textos.bloqueio,
         source: 'guardrail_autofallback',
       },
+      log,
     );
     if (!caso.ok && caso.error.code !== 'case_already_open') {
       log.error('fail-safe da falha na preparação sem caso — o job morre com o erro original', {
@@ -5662,7 +5699,7 @@ async function executarTurnoDoAgente(
               'fail-safe do gate de vocabulário interno: texto vetado não sai — caso aberto e frase de espera enviada',
               { vetos: internalVocabularyVetoCount },
             );
-            const caso = await openCase(
+            const caso = await abrirCasoDoFailSafe(
               pool,
               {
                 tenantId,
@@ -5688,6 +5725,7 @@ async function executarTurnoDoAgente(
                 source: 'guardrail_autofallback',
                 contextSnapshot: buildCaseContextSnapshot(),
               },
+              runLog,
             );
             if (!caso.ok && caso.error.code !== 'case_already_open') {
               // Sem pessoa acionada não há frase de espera honesta: o erro sobe e o job
@@ -6462,7 +6500,7 @@ async function executarTurnoDoAgente(
     // O caso ANTES da frase, como no fail-safe de vocabulário interno: sem pessoa
     // acionada não há frase de espera honesta. Sem caso (e não é "já havia um"), o
     // job falha e re-tenta pela fila — o cliente não fica mudo, fica atrasado, com rastro.
-    const caso = await openCase(
+    const caso = await abrirCasoDoFailSafe(
       pool,
       { tenantId, conversationId: input.conversationId, agentId: agentConfig?.agentId ?? null },
       {
@@ -6472,6 +6510,7 @@ async function executarTurnoDoAgente(
         source: 'guardrail_autofallback',
         contextSnapshot: buildCaseContextSnapshot(),
       },
+      runLog,
     );
     if (!caso.ok && caso.error.code !== 'case_already_open') {
       throw new Error(`fail-safe do turno sem resposta (${fim.motivo}) sem caso: ${caso.error.code}`);
