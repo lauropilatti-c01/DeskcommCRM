@@ -7297,6 +7297,11 @@ async function executarTurnoDoAgente(
           messages: [...openingMessages, ...turn.result.responseMessages, pedidoDeCorrecao],
           tools,
           maxSteps: Math.min(maxSteps, 3),
+          // (C01, junção da 1.86.0) O teto de saída do turno (AGENT_MAX_OUTPUT_TOKENS),
+          // não o padrão de 4096 do autor para a chamada que não diz teto.
+          ...(deps.knobs.maxOutputTokens !== undefined
+            ? { maxOutputTokens: deps.knobs.maxOutputTokens }
+            : {}),
           ...(agentConfig !== null
             ? {
                 model: agentConfig.model,
@@ -7548,6 +7553,11 @@ async function executarTurnoDoAgente(
             leadId: leadId || null,
             jobId: job?.id,
             purpose: 'checkpoint',
+            // (C01, junção da 1.86.0) O fechamento usa o teto de saída do turno
+            // (AGENT_MAX_OUTPUT_TOKENS, padrão 8.000), não o padrão de 4096 do autor.
+            ...(deps.knobs.maxOutputTokens !== undefined
+              ? { maxOutputTokens: deps.knobs.maxOutputTokens }
+              : {}),
             ...(agentConfig !== null
               ? {
                   model: agentConfig.model,

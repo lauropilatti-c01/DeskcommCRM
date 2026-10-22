@@ -23,6 +23,7 @@ import { turnKnobsFromEnv } from "@/lib/agent-engine/agent/turn-knobs";
 import { loadEnv } from "@/lib/agent-engine/env";
 import {
   pararPorTetoDeTokens,
+  TETO_DE_SAIDA_PADRAO,
   runModelCall,
   tokensDasEtapas,
 } from "@/lib/agent-engine/edge/llm/run-model-call";
@@ -162,5 +163,38 @@ describe("(C01) o token_budget conta só o que é novo (saída + entrada fora do
       { registry: modelo.registry },
     );
     expect(r.corte).toMatchObject({ motivo: "corte_por_teto_de_tokens", teto: 50_000, gastos: 60_600, etapas: 2 });
+  });
+});
+
+describe("(C01, junção da 1.86.0) o fechamento e a correção do turno mudo usam o teto do turno, não o padrão de 4096", () => {
+  // A 1.86 pôs um teto padrão (`TETO_DE_SAIDA_PADRAO`, 4096) em toda chamada que não diz
+  // o seu. Até a -c01.16 o fechamento (checkpoint) e a correção do turno mudo saíam sem
+  // teto; com o padrão, um fechamento longo cortaria em 4096. Os dois passam o knob do
+  // turno (AGENT_MAX_OUTPUT_TOKENS, 8.000), como a chamada principal. Os classificadores
+  // (promessa, jailbreak, etapa) ficam com o 4096 do autor: devolvem JSON curto.
+  const turno = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
+  const chamadaDe = (marca: string) => {
+    const i = turno.indexOf(marca);
+    expect(i, marca).toBeGreaterThan(-1);
+    return turno.slice(i, i + 900);
+  };
+
+  it("a fiação: o fechamento (`purpose: 'checkpoint'`) passa o knob do turno", () => {
+    expect(chamadaDe("purpose: 'checkpoint',")).toMatch(/maxOutputTokens:\s*deps\.knobs\.maxOutputTokens/);
+  });
+
+  it("a fiação: a correção do turno mudo (até 3 etapas) passa o knob do turno", () => {
+    expect(chamadaDe("maxSteps: Math.min(maxSteps, 3),")).toMatch(/maxOutputTokens:\s*deps\.knobs\.maxOutputTokens/);
+  });
+
+  it("pelo seam: com o teto do turno a chamada sem ferramentas recebe 8.000; sem teto, o padrão do autor (4096)", async () => {
+    const fechamento = { tenantId: ORG, purpose: "checkpoint", messages: [{ role: "user" as const, content: "feche" }] };
+    const comTeto = modeloQueConsulta([]);
+    await runModelCall(poolDoModelo(), cfg, { ...fechamento, maxOutputTokens: 8_000 }, { registry: comTeto.registry });
+    expect(comTeto.estado.maxOutputTokens).toEqual([8_000]);
+
+    const semTeto = modeloQueConsulta([]);
+    await runModelCall(poolDoModelo(), cfg, fechamento, { registry: semTeto.registry });
+    expect(semTeto.estado.maxOutputTokens).toEqual([TETO_DE_SAIDA_PADRAO]);
   });
 });
