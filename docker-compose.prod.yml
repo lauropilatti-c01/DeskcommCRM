@@ -463,7 +463,14 @@ services:
     # `caddy-sites` (#2724): rede só entre o Caddy e os serviços extras que o
     # operador publica por caddy-sites/. O serviço de terceiro entra nela, e
     # não na `internal`, para não alcançar os serviços internos do CRM.
-    networks: [internal, caddy-sites]
+    networks:
+      # (C01, junção da 1.86.0) A rota padrão do Caddy sai pela `internal`. Sem prioridade,
+      # o Docker escolhe pela ordem alfabética e a `caddy-sites` (sem sub-rede fixa) vira a
+      # rota padrão: o tráfego para o host (172.17.0.1:8797, o /piloto-motor) sai com IP
+      # dela, o ufw barra e a rota cai. Medido no Docker local pelo verificador.
+      internal:
+        gw_priority: 1
+      caddy-sites: {}
 
 volumes:
   waha-data:
