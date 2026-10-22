@@ -83,6 +83,9 @@ export function notaDaDuvidaNova(duvida: { title: string; summary: string; block
  * o fechamento, o estado é relido e o caso fechado não recebe nota (revisão independente da
  * -c01.16: sem a trava, a leitura via o caso ainda aberto e a dúvida caía num caso resolvido). Devolve o id do caso, ou null se nenhum caso estava aberto (fechou entre a
  * recusa e a nota): aí o chamador tenta abrir de novo.
+ *
+ * Caso em `awaiting_lead` (a equipe esperava o cliente) volta a `awaiting_human` no mesmo
+ * statement: a dúvida nova é pendência da equipe (revisão da junção da 1.86.0, achado 2).
  */
 export async function registrarDuvidaNoCasoAberto(
   db: Queryable,
@@ -98,6 +101,16 @@ export async function registrarDuvidaNoCasoAberto(
         order by c.opened_at desc
         limit 1
         for update
+     ),
+     -- (Revisão da junção da 1.86.0, achado 2) O caso que esperava o cliente volta à
+     -- equipe: há uma pergunta nova dele sem resposta. Mesma transição do
+     -- provide_case_update (awaiting_lead -> awaiting_human), que a fila e o painel de
+     -- resposta contam como pendência. Caso que já esperava a equipe não muda.
+     volta_a_equipe as (
+       update agent_cases c
+          set status = 'awaiting_human', updated_at = now()
+         from aberto
+        where c.id = aberto.id and c.status = 'awaiting_lead'
      )
      insert into agent_case_events (organization_id, case_id, kind, actor_kind, body)
      select $1::uuid, aberto.id, 'agent_noted', 'agent', $3::text

@@ -157,5 +157,28 @@ describe("(C01, -c01.16) dúvida nova com o caso já aberto", () => {
     );
     await pool.query(`update agent_cases set status = 'awaiting_lead' where id = $1`, [rows[0]!.id]);
     expect(await registrarDuvidaNoCasoAberto(pool, ORG, CONV, PRIMEIRA)).toBe(rows[0]!.id);
+    // (Revisão da junção da 1.86.0, achado 2) A dúvida nova devolve o caso à equipe: ele
+    // estava esperando o cliente e agora há uma pergunta dele sem resposta. Como o
+    // `provide_case_update`, o caso volta a `awaiting_human` (o estado que a fila e o
+    // painel de resposta contam como pendência).
+    const { rows: depois } = await pool.query<{ status: string }>(
+      `select status from agent_cases where id = $1`,
+      [rows[0]!.id],
+    );
+    expect(depois[0]!.status, "o caso ficou esperando o cliente com uma dúvida nova dele").toBe("awaiting_human");
+    const ev = await eventos(rows[0]!.id);
+    expect(ev.at(-1)).toMatchObject({ kind: "agent_noted", actor_kind: "agent" });
+    expect(ev.at(-1)!.body).toContain(PRIMEIRA.title);
+  });
+
+  it("com o caso já esperando a equipe (awaiting_human), a nota entra e o estado não muda", async () => {
+    const { rows } = await pool.query<{ id: string; status: string }>(
+      `select id, status from agent_cases where conversation_id = $1 and status = any($2::text[])`,
+      [CONV, ["awaiting_human", "awaiting_lead"]],
+    );
+    await pool.query(`update agent_cases set status = 'awaiting_human' where id = $1`, [rows[0]!.id]);
+    expect(await registrarDuvidaNoCasoAberto(pool, ORG, CONV, SEGUNDA)).toBe(rows[0]!.id);
+    const { rows: depois } = await pool.query<{ status: string }>(`select status from agent_cases where id = $1`, [rows[0]!.id]);
+    expect(depois[0]!.status).toBe("awaiting_human");
   });
 });
