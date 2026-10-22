@@ -179,6 +179,10 @@ async function turno(
 }
 
 /** Casos humanos abertos na conversa — o que os cenários de falha medem. */
+// C01: `FRASE_DE_ESPERA_PADRAO` de inbound-turn.ts (o módulo é importado depois do ambiente).
+const FRASE_DE_ESPERA_C01 =
+  "Para te responder direitinho, vou pedir ajuda à equipe. Uma pessoa continua a conversa com você por aqui.";
+
 async function contarCasos(conversa: string): Promise<number> {
   const { rows } = await pool.query<{ n: number }>(
     `select count(*)::int as n from agent_cases where organization_id = $1 and conversation_id = $2`,
@@ -322,7 +326,10 @@ describe("o turno de resposta que terminou sem mensagem ao cliente", () => {
     const conversa = crypto.randomUUID();
     await turno(fake, { sessao: SESSION_CASOS, conversa });
 
-    expect(enviados).toEqual([]);
+    // C01 (junção da 1.86.0): a saída cortada no teto (`teto_de_saida`) sem envio volta em
+    // `turn.corte` e segue o fail-safe da rodada 8 (-c01.3, item 1c) antes da correção do
+    // turno mudo: UM caso e a frase de espera ao cliente, que não fica sem resposta.
+    expect(enviados).toEqual([FRASE_DE_ESPERA_C01]);
     expect(await contarCasos(conversa), "truncamento sem envio não virou caso").toBe(1);
   });
 
@@ -332,8 +339,12 @@ describe("o turno de resposta que terminou sem mensagem ao cliente", () => {
     const { fake } = modelo([cortado("Claro, o seu pedido fica"), texto("(nada)")]);
     await turno(fake);
 
-    expect(enviados).toEqual([]);
-    expect(await contarCasos(CONV), "caso abriu com casos desligados").toBe(0);
+    // C01 (junção da 1.86.0): o fail-safe da rodada 8 manda a frase de espera também aqui,
+    // e a frase promete uma pessoa: o caso abre com casos desligados, como na -c01.16 (o
+    // fail-safe nunca leu `casesEnabled`). A régua do autor vale para o caso dele, que aqui
+    // não chega a rodar.
+    expect(enviados).toEqual([FRASE_DE_ESPERA_C01]);
+    expect(await contarCasos(CONV), "o fail-safe da C01 abre o caso que a frase promete").toBe(1);
   });
 
   it("a correção que TAMBÉM trunca é sinal de falha — abre caso", async () => {

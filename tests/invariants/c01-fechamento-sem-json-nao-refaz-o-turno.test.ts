@@ -29,7 +29,8 @@ import type * as ObsLogger from "@/lib/agent-engine/obs/logger";
  *     Central, com o Operador desligado E ligado (ligado, qualquer ferramenta dele conta
  *     como dono e dispensaria o aviso dele). Sem a correção: duas mensagens;
  *   - fechamento vazio e depois JSON: uma mensagem, o checkpoint do modelo;
- *   - turno que não falou com o lead: o job volta à fila como antes.
+ *   - turno que não falou com o lead: com as duas chamadas de fechamento sem JSON (a
+ *     segunda é a correção do autor, desde a 1.86), o job volta à fila como antes.
  */
 
 const container = process.env.TEST_DB_CONTAINER;
@@ -109,14 +110,17 @@ function texto(t: string) {
 }
 
 function pedeCheckpoint(opts: { prompt?: unknown }): boolean {
+  // (Junção da 1.86) A segunda chamada de fechamento leva, depois do pedido de
+  // checkpoint, a resposta recusada e a correção do autor (`correcaoDoFechamento`):
+  // o pedido deixa de ser a última mensagem, então vale qualquer mensagem do usuário.
   const msgs = (opts.prompt ?? []) as Array<{ role: string; content?: unknown }>;
-  const ultima = msgs[msgs.length - 1];
-  return (
-    ultima?.role === "user" &&
-    Array.isArray(ultima.content) &&
-    (ultima.content as Array<Record<string, unknown>>).some(
-      (p) => p.type === "text" && p.text === m.turno.CHECKPOINT_INSTRUCTION,
-    )
+  return msgs.some(
+    (msg) =>
+      msg.role === "user" &&
+      Array.isArray(msg.content) &&
+      (msg.content as Array<Record<string, unknown>>).some(
+        (p) => p.type === "text" && p.text === m.turno.CHECKPOINT_INSTRUCTION,
+      ),
   );
 }
 
@@ -440,13 +444,15 @@ describe("(C01) fechamento sem JSON depois da resposta ao lead: o turno não é 
 
 describe("(C01) o que não muda", () => {
   it("o turno que não falou com o lead e fecha sem JSON volta à fila como antes", async () => {
-    const mod = modelo("cala", [""]);
+    // (Junção da 1.86) Sem resposta ao lead, a correção do autor também é pedida: só
+    // a falha das DUAS chamadas de fechamento devolve o turno à fila.
+    const mod = modelo("cala", ["", ""]);
     const r = await rodaPelaFila(montaHandler(mod.doGenerate), 3, 1);
 
     expect(enviados).toEqual([]);
     expect(r.erros).toEqual(["fechamento do turno sem JSON de checkpoint — run re-tentado pela fila"]);
     expect(r.status).toBe("pending");
-    expect(mod.estado.fechamentos).toBe(1);
+    expect(mod.estado.fechamentos).toBe(2);
     expect(await checkpointsDoJob(r.jobId)).toEqual([]);
   });
 
