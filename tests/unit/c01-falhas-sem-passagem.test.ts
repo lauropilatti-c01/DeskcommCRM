@@ -209,7 +209,7 @@ describe("(C01, -c01.15, revisão) com mensagem do turno já no lead, o fail-saf
       "const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera | 'sem_frase'> => {",
       "return desfecho;\n  };",
     );
-    const caso = fim.indexOf("await openCase(");
+    const caso = fim.indexOf("await abrirCasoDoFailSafe("); // achado 1 da revisão da junção da 1.86.0
     const semFrase = fim.indexOf("if (semPassagem && (leadTemResposta || corposEnviados.length > 0)) {");
     const frase = fim.indexOf("body: fraseDoFailSafe,");
     expect(caso).toBeGreaterThan(-1);
@@ -242,7 +242,7 @@ describe("(C01, -c01.15, P3) os fail-safes sem passagem não gravam a passagem",
       "return desfecho;\n  };",
     );
     expect(fim).toMatch(/textosDoFimSemResposta\(fim, \{ semPassagem \}\)/);
-    const caso = fim.indexOf("await openCase(");
+    const caso = fim.indexOf("await abrirCasoDoFailSafe("); // achado 1 da revisão da junção da 1.86.0
     const frase = fim.indexOf("body: fraseDoFailSafe,");
     const volta = fim.indexOf("if (semPassagem) {");
     const passagem = fim.indexOf("await gravarPassagemComNovaTentativa(");

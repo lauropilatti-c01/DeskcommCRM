@@ -250,7 +250,8 @@ describe("(C01) a ligação pelo código", () => {
     expect(ini).toBeGreaterThan(-1);
     const bloco = TURNO.slice(ini, TURNO.indexOf("\n  };\n", ini));
     // Caso ANTES da frase, com a origem do fail-safe; sem caso (e não é "já havia") o job falha.
-    expect(bloco).toMatch(/const caso = await openCase\(/);
+    // (Revisão da junção da 1.86.0, achado 1) O caso dos fail-safes passa por `abrirCasoDoFailSafe`.
+    expect(bloco).toMatch(/const caso = await abrirCasoDoFailSafe\(/);
     expect(bloco).toMatch(/title: textos\.tituloDoCaso,/);
     expect(bloco).toMatch(/source: 'guardrail_autofallback',/);
     expect(bloco).toMatch(

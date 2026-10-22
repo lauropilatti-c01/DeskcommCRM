@@ -241,7 +241,7 @@ describe("(C01) a ligação no turno, pelo código", () => {
     const ini = TURNO.indexOf("const passarAoHumanoSemResposta = async (fim: FimSemResposta): Promise<DesfechoDaFraseDeEspera | 'sem_frase'> => {");
     expect(ini).toBeGreaterThan(-1);
     const corpo = TURNO.slice(ini, TURNO.indexOf("\n  };\n", ini));
-    const caso = corpo.indexOf("const caso = await openCase(");
+    const caso = corpo.indexOf("const caso = await abrirCasoDoFailSafe("); // achado 1 da revisão da junção da 1.86.0
     const frase = corpo.indexOf("send: enviarFraseDeEspera,");
     const passagem = corpo.indexOf("await gravarPassagemComNovaTentativa(");
     expect(caso).toBeGreaterThan(-1);

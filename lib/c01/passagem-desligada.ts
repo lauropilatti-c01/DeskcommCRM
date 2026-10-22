@@ -93,6 +93,28 @@ export async function registrarDuvidaNoCasoAberto(
   conversationId: string,
   duvida: { title: string; summary: string; blocker: string },
 ): Promise<string | null> {
+  return registrarNotaNoCasoAberto(db, tenantId, conversationId, notaDaDuvidaNova(duvida));
+}
+
+/** O texto da nota de um fail-safe que achou o caso já aberto, no formato do caso. */
+export function notaDoFailSafeNoCasoAberto(caso: { title: string; summary: string; blocker: string }): string {
+  return `De novo, com o caso já aberto: ${caso.title}\n${caso.summary}\nBloqueio: ${caso.blocker}`;
+}
+
+/**
+ * (Revisão da junção da 1.86.0, achado 1) A nota no caso aberto mais recente da conversa,
+ * com a mesma trava e a mesma volta à equipe da dúvida nova (abaixo). Os fail-safes que
+ * abrem caso (vocabulário interno, turno sem resposta, falha na preparação) achavam o caso
+ * antigo (`case_already_open`), seguiam como se tivessem aberto e o resumo novo (o texto
+ * vetado, o motivo) se perdia: a pessoa via o caso antigo, sem o que travou agora.
+ * Devolve o id do caso, ou null se nenhum caso estava aberto.
+ */
+export async function registrarNotaNoCasoAberto(
+  db: Queryable,
+  tenantId: string,
+  conversationId: string,
+  nota: string,
+): Promise<string | null> {
   const { rows } = await db.query<{ case_id: string }>(
     `with aberto as (
        select c.id
@@ -116,7 +138,7 @@ export async function registrarDuvidaNoCasoAberto(
      select $1::uuid, aberto.id, 'agent_noted', 'agent', $3::text
        from aberto
      returning case_id`,
-    [tenantId, conversationId, notaDaDuvidaNova(duvida), ESTADOS_DE_CASO_ABERTO],
+    [tenantId, conversationId, nota, ESTADOS_DE_CASO_ABERTO],
   );
   return rows[0]?.case_id ?? null;
 }
