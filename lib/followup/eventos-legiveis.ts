@@ -91,6 +91,8 @@ const STATUS: Record<string, { rotulo: string; tom: TomDoStatus }> = {
   agendada: { rotulo: "Agendada", tom: "info" },
   "concluída": { rotulo: "Concluída", tom: "neutral" },
   cancelada: { rotulo: "Cancelada", tom: "neutral" },
+  // Desligada porque a empresa estava parada (scheduler: last_error=org_nao_operante).
+  "não disparada": { rotulo: "Não disparada", tom: "warning" },
 };
 
 export function rotuloDoStatus(status: string, t: (texto: string) => string = (texto) => texto): string {
@@ -134,6 +136,9 @@ const TIPO_DO_NO: Record<FlowNode["type"], string> = {
   action: "Mensagem",
   // #1540 — não é "Mensagem": é o passo que NÃO fala com o cliente.
   internal_task: "Lembrete interno",
+  // #2065 — as duas ações que também não falam com o cliente.
+  move_lead: "Mover no funil",
+  edit_lead_tag: "Editar tag",
   end: "Fim",
 };
 
@@ -202,6 +207,15 @@ export function resumoDoNo(node: FlowNode): NoDoDossie {
       const prazo = node.config.vence_em_dias === 0 ? "hoje" : `em ${node.config.vence_em_dias} dia(s)`;
       return { ...base, resumo: `cria a tarefa "${node.config.titulo}" para ${prazo} — sem mensagem ao cliente` };
     }
+    case "move_lead":
+      return { ...base, resumo: "move o card para outra etapa do funil — sem mensagem ao cliente" };
+    case "edit_lead_tag":
+      return {
+        ...base,
+        resumo: node.config.tags.length
+          ? `grava a(s) tag(s) ${node.config.tags.join(", ")} no lead — sem mensagem ao cliente`
+          : "grava tag no lead, ainda sem destino escolhido — sem mensagem ao cliente",
+      };
     case "end":
       return { ...base, resumo: `encerra — ${DESFECHO[node.config.outcome] ?? node.config.outcome}` };
   }
@@ -416,6 +430,40 @@ export function descreveEvento(
         ...motor,
       };
     }
+    case "condition_revalidated": {
+      // O operador tem de ler ISTO e não "o fluxo parou": o envio não saiu
+      // porque a condição que ele desenhou deixou de valer enquanto a espera
+      // corria. Sem a linha, o passo lê como defeito onde houve obediência.
+      return {
+        titulo: "Não enviou: a condição deixou de valer na hora do envio",
+        detalhe:
+          p.esperado === true
+            ? "o caminho tinha sido o «Sim» e a regra agora responde «Não»"
+            : "o caminho tinha sido o «Não» e a regra agora responde «Sim»",
+        ...motor,
+      };
+    }
+    case "turn_discarded": {
+      // Duas origens, um event_type: a suspensão da CONTA (migration 0501) e o
+      // descarte durante a PAUSA da INSCRIÇÃO (#2262). O motivo decide a frase
+      // — uma linha que aponta a causa errada é pior que uma linha genérica,
+      // porque não parece errada.
+      if (texto(p.motivo) === "inscricao_pausada") {
+        return {
+          titulo: "O envio deste passo foi descartado porque a inscrição está pausada",
+          detalhe: "sai num envio novo quando a inscrição for retomada",
+          ...motor,
+        };
+      }
+      // A suspensão da conta tirou o turno da fila antes de ele rodar
+      // (migration 0501). Sem esta linha o dossiê mostrava um código cru logo
+      // antes de um segundo "Pediu ao agente para escrever a mensagem".
+      return {
+        titulo: "O envio deste passo foi descartado porque a conta foi suspensa",
+        detalhe: "sai num envio novo quando a conta for reativada",
+        ...motor,
+      };
+    }
     case "held_by_return": {
       // Como o adiamento pela janela: segurar NÃO é falhar. Sem esta linha o
       // operador veria o fluxo parado por dias sem saber que ele está esperando
@@ -448,6 +496,15 @@ export function descreveEvento(
       return { titulo: "O fluxo parou de tentar", detalhe: texto(p.reason), ...motor };
     case "node_failed":
       return { titulo: "Falhou neste passo", detalhe: texto(p.error), ...motor };
+    case "move_lead_failed":
+      // O card NÃO andou: o motor foi recusado ao mover (ex.: etapa de perda
+      // sem motivo) e o fluxo seguiu. Sem esta linha a trilha mostrava só o
+      // avanço e quem montou o fluxo lia "concluído" com o negócio aberto.
+      return {
+        titulo: "Não conseguiu mover o card para a etapa escolhida",
+        detalhe: texto(p.error) ?? texto(p.codigo),
+        ...motor,
+      };
     case "inbound_woke":
       return { titulo: "O cliente respondeu — o fluxo acordou na hora", detalhe: null, ...cliente };
     case "reactivity_replied":

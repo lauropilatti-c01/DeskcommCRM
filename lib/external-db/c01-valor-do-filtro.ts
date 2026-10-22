@@ -17,7 +17,8 @@
  * `contem` e `comeca_com` comparam o texto da coluna (`cast(... as text)`) e
  * `nulo`/`nao_nulo` não levam valor: ficam de fora.
  */
-import type { FiltroDeLeitura } from "./types";
+import type { ColunasDaTabela } from "./introspeccao";
+import type { FiltroDeLeitura, TabelaExterna } from "./types";
 
 const TIPOS_INTEIROS = new Set(["smallint", "integer", "bigint"]);
 const TIPOS_DECIMAIS = new Set(["numeric", "decimal", "real", "double precision", "money"]);
@@ -149,3 +150,18 @@ export const MENSAGEM_VALOR_INVALIDO_DO_BANCO =
 
 export const MENSAGEM_INDISPONIVEL =
   "banco externo indisponível agora; tente de novo uma vez. Sem o dado, não o invente.";
+
+/**
+ * (Junção da 1.86) As colunas liberadas pelo dialeto, com o tipo de cada uma em
+ * `tipos` (o `data_type` da descrição da tabela). Vale para todo motor: os tipos
+ * que a conversão não conhece (os do MySQL, por exemplo) seguem como vieram.
+ */
+export function comTiposDasColunas(
+  nomes: Set<string> | null,
+  descricao: TabelaExterna | null,
+): ColunasDaTabela | null {
+  if (nomes === null || descricao === null) return nomes;
+  const comTipos: ColunasDaTabela = nomes;
+  comTipos.tipos = new Map(descricao.colunas.map((c) => [c.nome, c.tipo]));
+  return comTipos;
+}

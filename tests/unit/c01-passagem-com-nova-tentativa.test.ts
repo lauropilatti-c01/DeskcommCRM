@@ -154,7 +154,8 @@ describe("(C01) a ligação no fail-safe e os fatos do autor que fazem a nova te
     const inicio = PASSAGEM.indexOf("export async function isLeadInHandoff(");
     expect(inicio).toBeGreaterThan(-1);
     const corpo = PASSAGEM.slice(inicio, PASSAGEM.indexOf("export interface HandoffIds", inicio));
-    expect(corpo).toMatch(/c\.force_human\s*or exists \(/);
+    // Junção da 1.86: entre os dois, a marca permanente do autor (`c.ai_opt_out`).
+    expect(corpo).toMatch(/c\.force_human\s*(?:--[^\n]*\n\s*)*(?:or c\.ai_opt_out\s*)?or exists \(/);
     expect(corpo).toMatch(/v\.bot_silenced_until is not null and v\.bot_silenced_until > now\(\)/);
   });
 

@@ -30,12 +30,13 @@
  * quem desenha passa por `t()`/`traduzir()`.
  */
 import type { Role } from "@/lib/auth/types";
-import { MODULOS_OPCIONAIS, MODULOS_OPCIONAIS_POR_FLAG, type ModuloOpcional } from "@/lib/instalacao/modulos";
+import { MODULOS_OPCIONAIS, MODULOS_OPCIONAIS_POR_FLAG, MODULOS_SO_DA_INSTALACAO, type ModuloOpcional } from "@/lib/instalacao/modulos";
 import { NAV_CATALOG, type NavMetadata } from "@/lib/navigation/catalogo";
 import { vendaPeloCanalLigada } from "@/lib/conversoes/venda-pelo-canal";
 import { lerConfigDoJev } from "@/lib/ai/decisao/config";
 import { capacidadesLigadas, type CapacidadeDaOrganizacao } from "@/lib/organizacao/capacidades";
 import { conversaFicaComQuemAtendeu } from "@/lib/schemas/routing";
+import { configAssinatura } from "@/lib/messaging/assinatura";
 
 /** Quem decide: o servidor inteiro, a empresa, cada agente, ou o arquivo do servidor. */
 export type NivelDoRecurso = "instalacao" | "organizacao" | "agente" | "servidor";
@@ -120,6 +121,22 @@ const TEXTO_DO_MODULO: Record<ModuloOpcional, { nome: string; oQueFaz: string }>
   honorarios: {
     nome: "Honorários",
     oQueFaz: "Contratos de honorários com parcelas e o controle do que já foi pago.",
+  },
+  // #1907 item 4 — a linha do catálogo de recursos opcionais (#1876): a
+  // comanda, o caixa e as comissões. Módulo de tabela, então o `href` do mapa
+  // (`MODULOS_OPCIONAIS_POR_FLAG`) já aponta para `/admin/modulos`.
+  financeiro: {
+    nome: "Comandas",
+    oQueFaz: "A comanda do atendimento: itens, forma de pagamento, comissões e fidelidade.",
+  },
+  cobranca: {
+    nome: "Cobrança dos seus clientes",
+    oQueFaz: "Você cria planos e cobra as empresas desta instalação, com teste grátis e suspensão de quem não paga.",
+  },
+  login_codex: {
+    nome: "Login do Codex por assinatura",
+    oQueFaz:
+      "Conecta a assinatura do ChatGPT (o mesmo login do Codex): cada empresa conecta a própria conta, em Credenciais, com a chave de API da mesma empresa como reserva. Desligado por padrão.",
   },
 };
 
@@ -261,6 +278,25 @@ const DO_SERVIDOR: RecursoOpcional[] = [
     ler: peloServidor("voz_whatsapp"),
   },
   {
+    // Entra aqui pelo review do #2441: a feature passa a ser visível ao dono
+    // do servidor do mesmo jeito que a voz — `JITSI_SERVER_URL` no `.env`,
+    // liga ou não, sem rebuild. A linha existe mesmo o teste não cobrando
+    // recurso que vive só em env: quem chega nesta tela é justamente para
+    // saber o que está ligado, e a videochamada não pode ser a uma que só
+    // aparece quando alguém lembra do `.env`.
+    id: "videochamada_jitsi",
+    nome: "Videochamada (Jitsi Meet)",
+    oQueFaz:
+      "Abrir sala de vídeo no header da conversa: o contato entra pelo link no chat, sem instalar nada.",
+    nivel: "servidor",
+    padrao: "desligado",
+    quemDecide: "dono_do_servidor",
+    href: null,
+    comoLigar:
+      "No arquivo de ambiente, JITSI_SERVER_URL apontando para a origem da sala (ex.: https://meet.jit.si). Vazio = o botão Vídeo não aparece.",
+    ler: peloServidor("videochamada_jitsi"),
+  },
+  {
     id: "telefonia_sip",
     nome: "Telefonia por SIP",
     oQueFaz: "Atender e ligar por telefone de verdade, com agente de voz.",
@@ -347,6 +383,19 @@ const DA_EMPRESA: RecursoOpcional[] = [
     quemDecide: "manager",
     href: "/app/settings/atendimento",
     ler: peloSettings((s) => s.visibility_mode === "own" || s.visibility_mode === "own_and_unassigned"),
+  },
+  {
+    id: "assinatura_do_emissor",
+    nome: "Quem fala aparece na mensagem",
+    oQueFaz: "Põe o nome do atendente ou da IA em negrito na linha de cima da mensagem ao cliente.",
+    nivel: "organizacao",
+    padrao: "desligado",
+    quemDecide: "manager",
+    href: "/app/settings/atendimento",
+    ler: peloSettings((s) => {
+      const c = configAssinatura(s);
+      return c.humanos || c.ia;
+    }),
   },
   {
     id: "etapa_move_o_card",
@@ -519,6 +568,16 @@ const DA_EMPRESA: RecursoOpcional[] = [
     },
   },
   {
+    id: "mapas",
+    nome: "Endereço aproximado do pino",
+    oQueFaz: "Com uma chave do Google, o pino de localização do cliente chega com rua e cidade aproximadas.",
+    nivel: "organizacao",
+    padrao: "desligado",
+    quemDecide: "admin",
+    // A chave mora em `map_provider_credentials`, e esta lista não lê chave: o estado fica na tela.
+    href: "/app/ai/providers",
+  },
+  {
     id: "teto_de_gasto",
     nome: "Teto de gasto de IA",
     oQueFaz: "Teto mensal, aviso, e se a IA para ao chegar nele.",
@@ -566,6 +625,17 @@ const DA_EMPRESA: RecursoOpcional[] = [
 
 const DE_CADA_AGENTE: RecursoOpcional[] = [
   {
+    id: "passagem_por_assunto_juridico",
+    nome: "Passagem por assunto jurídico",
+    oQueFaz:
+      "Por agente e decidido pelo admin: passar a conversa para uma pessoa quando o cliente falar de assunto jurídico (Procon, advogado, processo). Desligada, assunto jurídico passa a ser o trabalho normal deste agente e não é, sozinho, motivo de passagem — quem pede para falar com uma pessoa continua sendo passado. É OUTRA chave: a \"chamar uma pessoa\" de \"Ajustes de cada agente\" liga e desliga a ferramenta inteira; esta só tira a passagem por assunto jurídico.",
+    nivel: "agente",
+    padrao: "ligado",
+    quemDecide: "admin",
+    href: "/app/ai/agents",
+    ler: varia,
+  },
+  {
     id: "ajustes_do_agente",
     nome: "Ajustes de cada agente",
     oQueFaz:
@@ -596,6 +666,15 @@ export const RECURSOS_OPCIONAIS: readonly RecursoOpcional[] = [
   ...DA_EMPRESA,
   ...DE_CADA_AGENTE,
 ];
+
+/**
+ * Os módulos que a EMPRESA vê em Configurações › Recursos opcionais: todos os da
+ * instalação, menos os que são decisão só de quem administra o servidor
+ * (`MODULOS_SO_DA_INSTALACAO`).
+ */
+export const MODULOS_DA_EMPRESA: readonly RecursoOpcional[] = RECURSOS_OPCIONAIS.filter(
+  (r) => r.nivel === "instalacao" && !!r.modulo && !MODULOS_SO_DA_INSTALACAO.includes(r.modulo),
+);
 
 /**
  * O estado de um recurso. NUNCA lança: leitura que explode vira `nao_lido`,

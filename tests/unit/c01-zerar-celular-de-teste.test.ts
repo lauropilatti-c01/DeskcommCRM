@@ -33,6 +33,10 @@ vi.mock("@/lib/leads/nascimento-do-lead", () => ({
   }),
 }));
 vi.mock("@/lib/dev/kick-local-pipeline", () => ({
+  // (Junção da 1.86) A ingestão do autor também acelera o follow-up e drena os eventos do inbound.
+  acelerarFollowupDoInbound: vi.fn(async () => {}),
+  drenarEventosDoInbound: vi.fn(async () => {}),
+  enviarTextoFixoPendente: vi.fn(async () => {}),
   acelerarPipelineDeEventos: vi.fn(async () => {}),
   kickLocalPipeline: vi.fn(async () => {}),
 }));

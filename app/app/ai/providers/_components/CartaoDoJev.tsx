@@ -40,8 +40,10 @@ import { useT } from "@/hooks/i18n/useT";
 import { descreverErroDeValidacao } from "@/lib/ai/credenciais/erro-de-validacao";
 import type { EstadoDaTarefa } from "@/lib/ai/decisao/config";
 import { PROVEDOR_DO_JEV } from "@/lib/ai/decisao/credencial";
-import { TAREFA_DO_CLIMA, TAREFAS_DO_JEV, tarefaPodeDecidir } from "@/lib/ai/decisao/tarefas";
+import type { OrigemDoJev } from "@/lib/ai/decisao/origem";
+import { ROTEADOR_SOB_DEMANDA, ROTEADOR_SOB_DEMANDA_SEM_IA, TAREFA_DO_CLIMA, TAREFAS_DO_JEV, tarefaPodeDecidir } from "@/lib/ai/decisao/tarefas";
 import { O_QUE_FAZER_DO_JEV } from "@/lib/ai/decisao/textos";
+import type { ProvedorComChave } from "@/lib/ai/pontos/provedores";
 
 /** O corpo de `GET /api/v1/ai/jev` (`app/api/v1/ai/jev/route.ts`). */
 export interface DadosDoJev {
@@ -56,6 +58,7 @@ export interface DadosDoJev {
   config: {
     ligado: boolean;
     modo: "observacao" | "decide";
+    modo_roteador?: "comparacao" | "sob_demanda";
     aceite: { em: string; por: string } | null;
   };
   tarefas: Array<{ id: string; rotulo: string; oQueOJevFaz: string }>;
@@ -66,6 +69,12 @@ export interface DadosDoJev {
    */
   por_tarefa?: TarefaNoCartao[];
   tem_ia_de_sempre: boolean;
+  /**
+   * A IA de sempre do ROTEADOR, a mesma pergunta que o turno faz antes de deixar
+   * o Jev rotear sozinho (`temIaDeSempre`). Ausente (imagem anterior) vale `false`:
+   * sem saber, o cartão não oferece o modo que dispensaria a reserva.
+   */
+  roteador_tem_ia_de_sempre?: boolean;
   numeros: {
     dias: number;
     decisoes: number;
@@ -89,6 +98,20 @@ export interface DadosDoJev {
   };
   /** `tarefa`: o rótulo da tarefa que falhou. Ausente na imagem anterior. */
   ultima_falha: { motivo: string | null; em: string; tarefa?: string | null } | null;
+  /**
+   * DE ONDE O JEV RESPONDE hoje (`@/lib/ai/decisao/origem`): a TypeSafe direto,
+   * ou via OpenRouter. Ausente na resposta da imagem anterior (a página aberta
+   * durante um rollback) e vale o caminho de sempre — TypeSafe direto, que é o
+   * único que aquela imagem conhece.
+   */
+  origem?: OrigemDoJev;
+  /**
+   * O que a empresa já tem na OpenRouter, para o cartão oferecer REAPROVEITAR
+   * em vez de exigir uma chave TypeSafe separada. `disponivel` é a credencial
+   * OpenRouter validada da empresa; `rotulo` é o nome que ela deu à credencial.
+   * Ausente na imagem anterior: sem ele, não se oferece nada.
+   */
+  openrouter?: { disponivel: boolean; rotulo: string | null };
   pode_editar: boolean;
 }
 
@@ -320,6 +343,26 @@ function fraseDecidindo(d: DadosDoJev, t: (texto: string) => string): string {
  * estado da tarefa dele. Decidindo, a linha é a da tarefa (`aoDecidirNoPonto`):
  * "o modelo abaixo é a reserva" só é verdade no clima.
  */
+/**
+ * O modo do roteador que VALE: sob demanda só onde a empresa tem a IA de sempre
+ * (decisão B do doc 89). Sem ela o turno compara, e o cartão diz o mesmo.
+ */
+function roteadorSobDemanda(d: DadosDoJev): boolean {
+  return d.config.modo_roteador === "sob_demanda" && d.roteador_tem_ia_de_sempre === true;
+}
+
+/** A origem que a resposta diz — ausente (imagem anterior) é o caminho de sempre. */
+const origemDoCartao = (d: DadosDoJev): OrigemDoJev => d.origem ?? "typesafe";
+
+/**
+ * O provedor da credencial que ESTA origem consome (`lib/ai/decisao/origem`): a
+ * chave do Jev na TypeSafe, ou a credencial OpenRouter da empresa. É o que a
+ * frase de recusa e o diálogo de colar a chave precisam saber para apontar a
+ * conta certa — via OpenRouter, "cadastre na TypeSafe" pediria a coisa errada.
+ */
+const provedorDaCredencialDoCartao = (d: DadosDoJev): ProvedorComChave =>
+  origemDoCartao(d) === "openrouter" ? "openrouter" : PROVEDOR_DO_JEV;
+
 export function jevNoPonto(
   d: DadosDoJev | null,
   pontoId: string,
@@ -330,7 +373,8 @@ export function jevNoPonto(
   // A IA de sempre é a do clima (`tem_ia_de_sempre`), e só o clima decide sem ela (DEC-012 #5).
   if (!d.tem_ia_de_sempre && tarefa.id === TAREFA_DO_CLIMA.id) return "sozinho";
   if (tarefa.estado !== "decidindo") return "observacao";
-  const frase = doRegistro(tarefa.id)?.aoDecidirNoPonto;
+  const frase = tarefa.id === "roteador" && roteadorSobDemanda(d)
+    ? ROTEADOR_SOB_DEMANDA : doRegistro(tarefa.id)?.aoDecidirNoPonto;
   return frase === undefined ? null : { decide: frase };
 }
 
@@ -427,14 +471,30 @@ export function CartaoDoJev({
         <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{t(dados.provedor.quandoUsar)}</p>
       </div>
 
+      {/* DEC-012 #2: quem é da área da saúde manda dado sensível (LGPD), e o
+          contrato da TypeSafe precisa cobrir isso. O produto não guarda o nicho
+          como categoria, então o aviso aparece para todos em forma condicional.
+          A ida para os EUA já está no consentimento, mais abaixo. */}
+      <p className="mt-3 rounded-md bg-warning-bg p-3 text-sm text-warning-fg" data-testid="jev-aviso-area-saude">
+        {t(
+          "Se a sua empresa é da área da saúde: as mensagens que o Jev lê podem conter dado de saúde, que a LGPD trata como sensível. Antes de ligar, confira com quem cuida da LGPD da empresa se o contrato da TypeSafe cobre esse tipo de dado.",
+        )}
+      </p>
+
       {/* Depois de colar a chave nada confirmava que ela FUNCIONA: esta linha é
-          o resultado do teste, dito em palavras (o ✓ é enfeite). */}
+          o resultado do teste, dito em palavras (o ✓ é enfeite). O nome do
+          provedor acompanha a origem: via OpenRouter, quem conferiu foi a
+          OpenRouter, e a chave é a mesma da conversa. */}
       {dados.chave.validada && (
         <p className="mt-3 flex items-center gap-1.5 text-xs text-success-fg" data-testid="jev-chave-conferida">
           <span aria-hidden>✓</span>
-          {t("Chave conferida com a TypeSafe")}
+          {origemDoCartao(dados) === "openrouter"
+            ? t("Chave conferida na OpenRouter")
+            : t("Chave conferida com a TypeSafe")}
         </p>
       )}
+
+      <DeOndeResponde dados={dados} recarregar={recarregar} />
 
       {estado === "sem_chave" && <SemChave dados={dados} recarregar={recarregar} />}
 
@@ -470,15 +530,120 @@ function SeloDoEstado({ estado, emParte }: { estado: Estado; emParte: boolean })
   return <Badge variant="neutral">{t("Desligado")}</Badge>;
 }
 
+/**
+ * DE ONDE O JEV RESPONDE (`lib/ai/decisao/origem`).
+ *
+ * O Jev é o mesmo modelo nos dois caminhos, e o que muda é o ENDEREÇO, o NOME do
+ * modelo e a CHAVE: a TypeSafe direto, com uma chave só para ele, ou via
+ * OpenRouter, reaproveitando a credencial OpenRouter que a empresa já cadastrou
+ * para a conversa — sem segunda conta e sem segunda chave (issue #2947).
+ *
+ * A troca é um PATCH com `origem`, e a rota só a aceita com a credencial da
+ * origem nova já validada: sem isto, trocar para OpenRouter numa empresa sem
+ * chave de lá deixaria o Jev mudo. A recusa da rota já vem escrita para leigo, e
+ * é ela que explica o que falta.
+ */
+function DeOndeResponde({ dados, recarregar }: { dados: DadosDoJev; recarregar: () => Promise<void> }) {
+  const t = useT();
+  const { mudar, enviando } = useMudarOJev(recarregar);
+  const origem = origemDoCartao(dados);
+  const podeReaproveitar = dados.openrouter?.disponivel === true;
+  // O aceite gravado nomeava só a TypeSafe AI: ir para a OpenRouter pede o
+  // aceite de novo antes do PATCH (a rota recusa sem ele).
+  const [confirmandoOpenRouter, setConfirmandoOpenRouter] = useState(false);
+  const [concordo, setConcordo] = useState(false);
+  const escolher = (nova: string) => {
+    if (nova === "openrouter" && dados.config.aceite !== null) {
+      setConcordo(false);
+      setConfirmandoOpenRouter(true);
+      return;
+    }
+    setConfirmandoOpenRouter(false);
+    void mudar({ origem: nova }, t("Origem do Jev salva."));
+  };
+
+  return (
+    <div className="mt-4 space-y-1" data-testid="jev-origem">
+      <label htmlFor="jev-origem-escolha" className="block text-xs font-medium">
+        {t("De onde o Jev responde")}
+      </label>
+      <select
+        id="jev-origem-escolha"
+        className="block w-full max-w-md rounded-md border bg-background p-2 text-sm"
+        value={confirmandoOpenRouter ? "openrouter" : origem}
+        disabled={!dados.pode_editar || enviando}
+        onChange={(e) => escolher(e.target.value)}
+      >
+        <option value="typesafe">{t("TypeSafe AI (chave própria)")}</option>
+        <option value="openrouter">{t("OpenRouter (reaproveita a credencial OpenRouter)")}</option>
+      </select>
+      {confirmandoOpenRouter && (
+        <div className="max-w-2xl rounded-md border border-border p-3 text-sm" data-testid="jev-origem-aceite">
+          <div className="flex items-start gap-2">
+            <input
+              id="jev-origem-aceite"
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]"
+              checked={concordo}
+              onChange={(e) => setConcordo(e.target.checked)}
+            />
+            <label htmlFor="jev-origem-aceite" className="text-sm">
+              {t(
+                "Concordo com o envio de cada mensagem dos clientes, uma de cada vez e sem o resto da conversa, para a TypeSafe AI, pela OpenRouter, nos Estados Unidos.",
+              )}
+            </label>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={!concordo || enviando}
+              onClick={() => {
+                setConfirmandoOpenRouter(false);
+                void mudar({ origem: "openrouter", aceite_lgpd: true }, t("Origem do Jev salva."));
+              }}
+            >
+              {t("Trocar para a OpenRouter")}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setConfirmandoOpenRouter(false)}>
+              {t("Cancelar")}
+            </Button>
+          </div>
+        </div>
+      )}
+      {origem === "openrouter" ? (
+        <p className="max-w-2xl text-xs text-muted-foreground" data-testid="jev-origem-openrouter">
+          {podeReaproveitar
+            ? t(
+                "O Jev responde pela OpenRouter usando a credencial OpenRouter desta empresa — a mesma chave da conversa, sem segunda conta e sem segunda chave.",
+              )
+            : t(
+                "Para o Jev responder pela OpenRouter, cadastre a chave da OpenRouter em Credenciais. É a mesma chave que a sua IA de conversa usa.",
+              )}
+        </p>
+      ) : (
+        <p className="max-w-2xl text-xs text-muted-foreground" data-testid="jev-origem-typesafe">
+          {t("O Jev responde direto na TypeSafe AI, com a chave dele cadastrada em Credenciais.")}
+        </p>
+      )}
+      {podeReaproveitar && origem === "typesafe" && (
+        <p className="max-w-2xl text-xs text-muted-foreground" data-testid="jev-origem-pode-reaproveitar">
+          {t("Esta empresa já tem uma credencial OpenRouter conferida: dá para o Jev usá-la sem cadastrar chave nova.")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SemChave({ dados, recarregar }: { dados: DadosDoJev; recarregar: () => Promise<void> }) {
   const t = useT();
   const [colando, setColando] = useState(false);
+  const pelaOpenRouter = origemDoCartao(dados) === "openrouter";
 
   return (
     <div className="mt-4 flex flex-wrap items-center gap-3">
       <Button asChild size="sm" variant="outline">
         <a href={dados.provedor.ondePegarAChave} target="_blank" rel="noreferrer">
-          {t("Pegar a chave na TypeSafe")}
+          {pelaOpenRouter ? t("Pegar a chave na OpenRouter") : t("Pegar a chave na TypeSafe")}
         </a>
       </Button>
       {dados.pode_editar ? (
@@ -489,7 +654,7 @@ function SemChave({ dados, recarregar }: { dados: DadosDoJev; recarregar: () => 
           <AddCredentialDialog
             open={colando}
             onOpenChange={setColando}
-            providerInicial={PROVEDOR_DO_JEV}
+            providerInicial={provedorDaCredencialDoCartao(dados)}
             aoSalvar={() => {
               void recarregar();
               // O teste da chave roda depois da resposta (ver a rota de criar), com
@@ -506,10 +671,17 @@ function SemChave({ dados, recarregar }: { dados: DadosDoJev; recarregar: () => 
         </p>
       )}
       {/* O Jev é pago à parte, numa conta da TypeSafe: sem esta frase a pessoa
-          só descobria o crédito pela falha. */}
+          só descobria o crédito pela falha. Via OpenRouter, quem cobra é a
+          OpenRouter, pela chave que a empresa já tem — e a frase muda. */}
       <p className="w-full text-xs text-muted-foreground" data-testid="jev-como-pegar-a-chave">
-        {t(
-          "Para pegar a chave, você cria uma conta na TypeSafe AI e põe crédito: cada mensagem medida custa uma fração de centavo de dólar, cobrada lá. A chave começa com",
+        {pelaOpenRouter ? (
+          t(
+            "Não precisa de uma segunda conta: o Jev via OpenRouter usa a credencial OpenRouter desta empresa, e quem cobra o uso é a própria OpenRouter. A chave começa com",
+          )
+        ) : (
+          t(
+            "Para pegar a chave, você cria uma conta na TypeSafe AI e põe crédito: cada mensagem medida custa uma fração de centavo de dólar, cobrada lá. A chave começa com",
+          )
         )}{" "}
         <span className="font-mono">{dados.provedor.prefixoDaChave}</span>
       </p>
@@ -520,7 +692,11 @@ function SemChave({ dados, recarregar }: { dados: DadosDoJev; recarregar: () => 
 function ProblemaDaChave({ dados, recarregar }: { dados: DadosDoJev; recarregar: () => Promise<void> }) {
   const t = useT();
   const [testando, setTestando] = useState(false);
-  const erro = descreverErroDeValidacao(dados.chave.erro_de_validacao, PROVEDOR_DO_JEV);
+  // O nome na frase de recusa acompanha a origem: via OpenRouter, quem recusou
+  // foi a OpenRouter (issue #2947) — dizer "a TypeSafe recusou" à chave errada
+  // mandaria a pessoa conferir a conta errada.
+  const pelaOpenRouter = origemDoCartao(dados) === "openrouter";
+  const erro = descreverErroDeValidacao(dados.chave.erro_de_validacao, provedorDaCredencialDoCartao(dados));
   const motivo = !dados.chave.existe
     ? t("O Jev está ligado, mas sem chave ativa: enquanto isso, ele não mede nada.")
     : !dados.chave.erro_de_validacao
@@ -570,7 +746,8 @@ function ProblemaDaChave({ dados, recarregar }: { dados: DadosDoJev; recarregar:
             {testando ? t("Testando…") : t("Testar de novo")}
           </Button>
         )}
-        {/* "Gere uma nova" precisa de caminho: a chave recusada leva à TypeSafe. */}
+        {/* "Gere uma nova" precisa de caminho: a chave recusada leva ao provedor
+            DA ORIGEM — via OpenRouter, à OpenRouter. */}
         {erro.chaveErrada && (
           <a
             className="text-xs underline underline-offset-4"
@@ -578,7 +755,7 @@ function ProblemaDaChave({ dados, recarregar }: { dados: DadosDoJev; recarregar:
             target="_blank"
             rel="noreferrer"
           >
-            {t("Pegar uma chave nova na TypeSafe")}
+            {pelaOpenRouter ? t("Pegar uma chave nova na OpenRouter") : t("Pegar uma chave nova na TypeSafe")}
           </a>
         )}
         <Link className="text-xs underline underline-offset-4" href="/app/ai/credentials">
@@ -736,9 +913,14 @@ function ProntoParaLigar({ dados, recarregar }: { dados: DadosDoJev; recarregar:
 
       <div className="rounded-md border border-border p-3 text-sm">
         <p>
-          {t(
-            "Ao ligar, cada mensagem que o cliente manda vai para a TypeSafe AI, nos Estados Unidos, uma de cada vez e sem o resto da conversa, para o Jev avaliar. Antes de sair, o sistema apaga CPF, telefone e e-mail do texto. Com o Jev desligado, nada é enviado.",
-          )}
+          {/* O aceite nomeia QUEM recebe: via OpenRouter a mensagem passa por ela antes da TypeSafe. */}
+          {origemDoCartao(dados) === "openrouter"
+            ? t(
+                "Ao ligar, cada mensagem que o cliente manda vai para a TypeSafe AI, pela OpenRouter, nos Estados Unidos, uma de cada vez e sem o resto da conversa, para o Jev avaliar. Antes de sair, o sistema apaga CPF, telefone e e-mail do texto. Com o Jev desligado, nada é enviado.",
+              )
+            : t(
+                "Ao ligar, cada mensagem que o cliente manda vai para a TypeSafe AI, nos Estados Unidos, uma de cada vez e sem o resto da conversa, para o Jev avaliar. Antes de sair, o sistema apaga CPF, telefone e e-mail do texto. Com o Jev desligado, nada é enviado.",
+              )}
         </p>
         {aceite === null ? (
           <div className="mt-3 flex items-start gap-2">
@@ -751,9 +933,13 @@ function ProntoParaLigar({ dados, recarregar }: { dados: DadosDoJev; recarregar:
               disabled={!dados.pode_editar}
             />
             <label htmlFor="jev-aceite" className="text-sm">
-              {t(
-                "Concordo com o envio de cada mensagem dos clientes, uma de cada vez e sem o resto da conversa, para a TypeSafe AI, nos Estados Unidos.",
-              )}
+              {origemDoCartao(dados) === "openrouter"
+                ? t(
+                    "Concordo com o envio de cada mensagem dos clientes, uma de cada vez e sem o resto da conversa, para a TypeSafe AI, pela OpenRouter, nos Estados Unidos.",
+                  )
+                : t(
+                    "Concordo com o envio de cada mensagem dos clientes, uma de cada vez e sem o resto da conversa, para a TypeSafe AI, nos Estados Unidos.",
+                  )}
             </label>
           </div>
         ) : (
@@ -844,7 +1030,8 @@ function Ligado({
       <ul className="divide-y divide-border rounded-md border border-border" data-testid="jev-tarefas">
         {tarefasDoCartao(dados).map((tarefa) => {
           const registro = doRegistro(tarefa.id);
-          const aoDecidir = registro?.aoDecidir;
+          const aoDecidir = tarefa.id === "roteador" && roteadorSobDemanda(dados)
+            ? ROTEADOR_SOB_DEMANDA : registro?.aoDecidir;
           const avisa = avisaAEquipe(tarefa.id);
           const climaSozinho = estado === "sozinho" && tarefa.id === TAREFA_DO_CLIMA.id;
           const climaSemIa = tarefa.id === TAREFA_DO_CLIMA.id && !dados.tem_ia_de_sempre;
@@ -1058,6 +1245,25 @@ function Ligado({
                 )}
               </div>
             )}
+            {tarefa.id === "roteador" && tarefa.estado === "decidindo" && rodando && (
+              <div className="mt-2 space-y-1 text-xs" data-testid="jev-modo-roteador">
+                <label htmlFor="jev-router-mode" className="block font-medium">{t("Como o roteador consulta as IAs")}</label>
+                <select id="jev-router-mode" className="block rounded-md border bg-background p-2 text-sm"
+                  value={roteadorSobDemanda(dados) ? "sob_demanda" : "comparacao"} disabled={!dados.pode_editar || enviando}
+                  onChange={(e) => void mudar({ modo_roteador: e.target.value }, t("Modo do roteador salvo."))}>
+                  <option value="comparacao">{t("Comparar o Jev e a IA de sempre")}</option>
+                  <option value="sob_demanda" disabled={dados.roteador_tem_ia_de_sempre !== true}>{t("Jev; IA de sempre só como reserva")}</option>
+                </select>
+                {dados.roteador_tem_ia_de_sempre !== true ? (
+                  <p className="text-muted-foreground" data-testid="jev-modo-roteador-sem-ia">{t(ROTEADOR_SOB_DEMANDA_SEM_IA)}</p>
+                ) : (
+                  <p className="text-muted-foreground">{roteadorSobDemanda(dados)
+                    ? t("A IA de sempre só é chamada se o Jev falhar ou estiver inseguro.")
+                    : t("As duas IAs respondem; a escolha do Jev decide.")}</p>
+                )}
+                <Link href="/app/ai/runs?tab=roteamento" className="underline underline-offset-4">{t("Ver resultados do roteamento")}</Link>
+              </div>
+            )}
             {dados.pode_editar && rodando && tarefa.estado === "desligada" && climaSemIa && (
               <p className="text-xs text-muted-foreground" data-testid="jev-religar-clima-sozinho">
                 {t(
@@ -1141,6 +1347,7 @@ function Ligado({
       </div>
 
       <ConfirmarDecidir
+        modoRoteador={roteadorSobDemanda(dados) ? "sob_demanda" : "comparacao"}
         pedido={aConfirmar}
         aoFechar={() => setAConfirmar((p) => p && { ...p, aberto: false })}
         aoConfirmar={(tarefa) =>
@@ -1160,17 +1367,20 @@ function Ligado({
  * o caminho de volta.
  */
 function ConfirmarDecidir({
+  modoRoteador,
   pedido,
   aoFechar,
   aoConfirmar,
 }: {
+  modoRoteador?: "comparacao" | "sob_demanda";
   pedido: { tarefa: TarefaNoCartao; aberto: boolean } | null;
   aoFechar: () => void;
   aoConfirmar: (tarefa: TarefaNoCartao) => void;
 }) {
   const t = useT();
   const tarefa = pedido?.tarefa ?? null;
-  const efeito = tarefa ? doRegistro(tarefa.id)?.aoConfirmarDecidir : undefined;
+  const efeito = tarefa?.id === "roteador" && modoRoteador === "sob_demanda"
+    ? ROTEADOR_SOB_DEMANDA : tarefa ? doRegistro(tarefa.id)?.aoConfirmarDecidir : undefined;
   const avisa = tarefa !== null && avisaAEquipe(tarefa.id);
   return (
     <AlertDialog open={pedido?.aberto === true} onOpenChange={(aberto) => !aberto && aoFechar()}>

@@ -138,6 +138,7 @@ describe("(C01, -c01.8) a ligação no turno, pelo código", () => {
     // O envio pendente nasce no 1º veto de estilo e morre em qualquer tentativa nova.
     expect(TURNO).toMatch(/if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*envioVetadoPorEstilo = \{/);
     // (-c01.14) o `execute` recebe também as opções do passo (`opcoes.messages`, o que o modelo leu).
-    expect(TURNO).toMatch(/execute: async \(\{ body, produto_codigo \}(?:, opcoes)?\) => \{\s*\/\/ \(C01, -c01\.8\)[^\n]*\n\s*envioVetadoPorEstilo = null;/);
+    // Junção da 1.86: antes, a contagem de tentativas e a formatação do autor (`formatarParaWhatsApp`).
+    expect(TURNO).toMatch(/execute: async \(\{ body(?:: corpoDoModelo)?, produto_codigo \}(?:, opcoes)?\) => \{[\s\S]{0,600}?\/\/ \(C01, -c01\.8\)[^\n]*\n\s*envioVetadoPorEstilo = null;/);
   });
 });

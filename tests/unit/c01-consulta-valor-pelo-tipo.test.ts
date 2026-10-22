@@ -13,26 +13,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/external-db/acesso", () => ({ abrirAcesso: vi.fn() }));
-vi.mock("@/lib/external-db/introspeccao", () => ({
-  listarTabelas: vi.fn(),
-  colunasDaTabela: vi.fn(),
-}));
-vi.mock("@/lib/external-db/leitura", async () => {
-  const real = (await vi.importActual("@/lib/external-db/leitura")) as Record<string, unknown>;
-  return { ...real, lerTabela: vi.fn() };
-});
 
 import { abrirAcesso } from "@/lib/external-db/acesso";
 import { converterValoresDosFiltros, erroDeValorDoBanco } from "@/lib/external-db/c01-valor-do-filtro";
-import { colunasDaTabela, listarTabelas, type ColunasDaTabela } from "@/lib/external-db/introspeccao";
-import { lerTabela } from "@/lib/external-db/leitura";
+import type { Dialeto } from "@/lib/external-db/dialeto";
+import type { ColunasDaTabela } from "@/lib/external-db/introspeccao";
 import type { ConexaoExterna } from "@/lib/external-db/types";
 import { crmQueryExternalData, motivoDoVazioExterno } from "@/lib/mcp/tools/dados-externos";
 import type { McpContext } from "@/lib/mcp/types";
 
+// Junção da 1.86: a leitura passa pelo dialeto da conexão (`abrirAcesso` o devolve).
+const dialeto = {
+  listarTabelas: vi.fn(),
+  colunasDaTabela: vi.fn(),
+  lerTabela: vi.fn(),
+  catalogoCompleto: vi.fn(),
+} satisfies { [K in keyof Dialeto]: ReturnType<typeof vi.fn> };
+const listarTabelas = dialeto.listarTabelas;
+const colunasDaTabela = dialeto.colunasDaTabela;
+const lerTabela = dialeto.lerTabela;
+
 const CONEXAO: ConexaoExterna = {
   id: "conn-1",
   organizationId: "org-1",
+  dbType: "postgres",
   label: "Base",
   host: "db.exemplo.com",
   port: 5432,
@@ -43,6 +47,9 @@ const CONEXAO: ConexaoExterna = {
   maxRows: 200,
   maxFilters: 20,
   maxResponseBytes: 30_000,
+  chaveDoCliente: null,
+  sourceMode: "all",
+  fontes: [],
   versao: "2026-10-15T00:00:00.000Z",
 };
 
@@ -87,7 +94,7 @@ async function consultar(filtros: Filtro[]): Promise<Record<string, unknown>> {
 }
 
 function filtrosLidos(): Array<{ coluna: string; operador: string; valor?: unknown }> {
-  return vi.mocked(lerTabela).mock.calls[0]![1].filtros;
+  return vi.mocked(lerTabela).mock.calls[0]![0].filtros;
 }
 
 function erroDoPostgres(code: string, message: string): Error & { code: string } {
@@ -99,7 +106,7 @@ beforeEach(() => {
   vi.mocked(colunasDaTabela).mockReset();
   vi.mocked(listarTabelas).mockReset();
   vi.mocked(lerTabela).mockReset();
-  vi.mocked(abrirAcesso).mockResolvedValue({ ok: true, conexao: CONEXAO, pool: {} as never });
+  vi.mocked(abrirAcesso).mockResolvedValue({ ok: true, conexao: CONEXAO, dialeto: dialeto as unknown as Dialeto });
   vi.mocked(colunasDaTabela).mockResolvedValue(colunas());
   vi.mocked(lerTabela).mockResolvedValue({
     colunas: ["cargo"],

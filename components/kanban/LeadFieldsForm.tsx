@@ -14,14 +14,22 @@ import { useEditLead } from "@/hooks/kanban/useUpdateLead";
 import type { Lead } from "@/lib/types/leads";
 import { updateLeadSchema, type UpdateLeadInput } from "@/lib/schemas/leads";
 import { MOEDA_PADRAO, parseReaisToCents, simboloDaMoeda } from "@/lib/money";
+import { soChavesAlteradas } from "@/lib/leads/custom-fields-so-diff";
 import { CustomFieldsEditor, type CustomFieldDef } from "@/components/contacts/CustomFieldsEditor";
+import { ContactTagsEditor } from "@/components/inbox/ContactTagsEditor";
 import { EcoDoValor } from "./EcoDoValor";
 
+/**
+ * As etiquetas do negócio SAÍRAM deste formulário (#2979): quem as edita é o
+ * `ContactTagsEditor`, que grava na hora em `crm_leads.tags`. Manter um
+ * `tagsRaw` aqui seria pior do que redundância — "Salvar" reenviaria a lista
+ * carregada na abertura do dossiê e DESFARIA em silêncio a etiqueta que a
+ * pessoa acabou de criar no editor.
+ */
 interface FormShape {
   title: string;
   description: string;
   valueReais: string;
-  tagsRaw: string;
   expected_close_date: string;
 }
 
@@ -57,13 +65,18 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
   const moedaDoValor = lead.currency ?? org?.currency ?? MOEDA_PADRAO;
   const edit = useEditLead(pipelineId);
   const [customFields, setCustomFields] = useState<Record<string, unknown>>(lead.custom_fields ?? {});
+  // A RÉGUA do diff (issue #2132): o valor carregado ao abrir. Só o que a
+  // pessoa mudar daqui vai viajar — devolver o objeto inteiro sobrescrevia o
+  // que outra pessoa (ou o MCP `crm_update_lead`) mudou com a ficha aberta.
+  const [camposCarregados, setCamposCarregados] = useState<Record<string, unknown>>(
+    lead.custom_fields ?? {},
+  );
 
   const form = useForm<FormShape>({
     defaultValues: {
       title: lead.title,
       description: lead.description ?? "",
       valueReais: centsToReais(lead.value_cents),
-      tagsRaw: (lead.tags ?? []).join(", "),
       expected_close_date: lead.expected_close_date ?? "",
     },
   });
@@ -73,19 +86,14 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
       title: lead.title,
       description: lead.description ?? "",
       valueReais: centsToReais(lead.value_cents),
-      tagsRaw: (lead.tags ?? []).join(", "),
       expected_close_date: lead.expected_close_date ?? "",
     });
     setCustomFields(lead.custom_fields ?? {});
+    setCamposCarregados(lead.custom_fields ?? {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lead.id]);
 
   async function onSubmit(values: FormShape) {
-    const tags = values.tagsRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
     const reais = values.valueReais.trim();
     let valueCents: number | null = null;
     if (reais.length > 0) {
@@ -100,9 +108,11 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
       title: values.title.trim(),
       description: values.description.trim() ? values.description.trim() : null,
       value_cents: valueCents,
-      tags,
       expected_close_date: values.expected_close_date || null,
-      ...(fieldDefs.length > 0 ? { custom_fields: customFields } : {}),
+      // Só o que a pessoa alterou (issue #2132) — o merge continua do servidor.
+      ...(fieldDefs.length > 0
+        ? { custom_fields: soChavesAlteradas(camposCarregados, customFields) }
+        : {}),
     };
 
     const parsed = updateLeadSchema.safeParse(patch);
@@ -117,6 +127,9 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
         leadId: lead.id,
         patch: parsed.data as UpdateLeadInput,
       });
+      // O que acabou de gravar vira a nova régua: o segundo salvamento não
+      // reenvia o primeiro, e uma limpeza alheia no intervalo não é atropelada.
+      setCamposCarregados({ ...customFields });
       toast.success(t("Lead atualizado"));
       onSaved?.();
     } catch {
@@ -169,8 +182,18 @@ export function LeadFieldsForm({ lead, pipelineId, fieldDefs = [], onSaved, onCa
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="tagsRaw">{t("Tags (separadas por vírgula)")}</Label>
-          <Input id="tagsRaw" placeholder="vip, recompra" {...form.register("tagsRaw")} />
+          {/* A etiqueta do NEGÓCIO (#2979): o MESMO editor do Inbox, gravando
+              na OUTRA caixa — `crm_leads.tags` por `PATCH /api/v1/leads/{id}`,
+              nunca o perfil do contato. Ele grava na hora; por isso o dossiê
+              não carrega mais o campo de texto livre que substituía a lista. */}
+          <p className="text-sm font-medium">{t("Tags do negócio")}</p>
+          <ContactTagsEditor
+            entityType="lead"
+            entityId={lead.id}
+            pipelineId={pipelineId}
+            orgId={org?.orgId ?? ""}
+            tags={lead.tags ?? []}
+          />
         </div>
 
         {fieldDefs.length > 0 && (

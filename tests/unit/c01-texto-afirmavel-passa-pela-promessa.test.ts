@@ -152,7 +152,12 @@ describe("(C01, CRM-089 D4) a trava semântica de promessa com o texto afirmáve
       expect(sem.veredito.code).toBe("promise_semantic");
       const com = await avaliar(texto, [consulta([fato(texto, true, assunto)])]);
       expect(com.veredito.pass, texto).toBe(true);
-      expect(com.classificacao).toEqual({ isPromise: false, suspectPhrase: null });
+      expect(com.classificacao).toEqual({
+        isPromise: false,
+        suspectPhrase: null,
+        prometeuRetornoHumano: false,
+        retornoSoDoAssistente: false,
+      });
       expect(com.lidos).toEqual([]);
     }
   });
@@ -276,7 +281,8 @@ describe("(C01, CRM-089 D4) a ligação no turno, pelo código", () => {
   const TURNO = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
 
   it("o classificador do turno passa pela exceção, com os textos afirmáveis da promessa deste turno", () => {
-    const i = TURNO.indexOf("const semanticClassifier = camadaLigada(");
+    // Junção da 1.86: o memo virou `classificadorMemoizado`; o `semanticClassifier` do autor o envolve.
+    const i = TURNO.indexOf("const classificadorMemoizado = camadaLigada(");
     expect(i).toBeGreaterThan(-1);
     const bloco = TURNO.slice(i, TURNO.indexOf(": undefined;", i));
     expect(bloco).toMatch(

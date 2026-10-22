@@ -167,6 +167,10 @@ function bancoFalso() {
       const m = messages.find((x) => x.idempotency_key === key);
       return { rows: m ? [{ id: m.id, status: m.status }] : [], rowCount: m ? 1 : 0 };
     }
+    // (Junção da 1.86) O turno autônomo do autor é corrente enquanto a execução for a dona.
+    if (s.includes("fn_autonomous_turn_revoked")) {
+      return { rows: [{ current: ehDono(p[1], p[4], p[5]) }], rowCount: 1 };
+    }
     if (s.includes("from job_queue where id=$1 and status='running'")) {
       const dono = ehDono(p[0], p[1], p[2]);
       return { rows: dono ? [{ lease: 1 }] : [], rowCount: dono ? 1 : 0 };

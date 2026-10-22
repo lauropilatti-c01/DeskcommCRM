@@ -28,6 +28,7 @@ import { scheduleCronJob } from "@/lib/agent-engine/cron/scheduler";
 import type { JobRow, Queryable } from "@/lib/agent-engine/queue/queue";
 import {
   JobLeasePerdidoError,
+  StaleServiceBoundaryError,
   type CurrentServiceBoundary,
 } from "@/lib/atendimento/fronteira";
 import {
@@ -104,12 +105,19 @@ function filaFalsa() {
   /** Quando ligado, a posse muda logo DEPOIS de a conferência responder "é dono". */
   const corrida = { trocarAposConferir: false };
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
-    if (sql.includes("from job_queue where id=$1 and status='running'")) {
-      const dono = ehDono(params[0], params[1], params[2]);
+    // (Junção da 1.86) O turno autônomo do autor (`requireCurrentAutonomousTurn`) é
+    // corrente enquanto a execução for a dona do lease (nenhuma pessoa assumiu aqui).
+    // É a ÚLTIMA conferência de posse antes do efeito: a corrida troca o dono depois dela.
+    if (sql.includes("fn_autonomous_turn_revoked")) {
+      const dono = ehDono(params[1], params[4], params[5]);
       if (dono && corrida.trocarAposConferir) {
         corrida.trocarAposConferir = false;
         pegar("w2");
       }
+      return { rows: [{ current: dono }], rowCount: 1 };
+    }
+    if (sql.includes("from job_queue where id=$1 and status='running'")) {
+      const dono = ehDono(params[0], params[1], params[2]);
       return { rows: dono ? [{ lease: 1 }] : [], rowCount: dono ? 1 : 0 };
     }
     if (sql.includes("from conversations c")) return { rows: [fronteira], rowCount: 1 };
@@ -138,12 +146,12 @@ function filaFalsa() {
   };
 }
 
-function jobDe(worker: string | null, adquiridoEm: string | null): JobRow {
+function jobDe(worker: string | null, adquiridoEm: string | null, kind = "inbound_turn"): JobRow {
   return {
     id: JOB,
     organization_id: ORG,
     contact_id: LEAD,
-    kind: "inbound_turn",
+    kind,
     payload: { service_boundary: fronteira },
     locked_by: worker,
     ...(adquiridoEm === null ? {} : { claim_acquired_at: adquiridoEm }),
@@ -250,12 +258,13 @@ describe("(C01) execução substituída não produz efeito", () => {
     fila.reaper();
     const claimDoW2 = fila.pegar("w2")!;
 
-    // A primeira execução (w1) tenta: nada.
-    await withServiceJob(fila.db, jobDe("w1", fila.claimInicial), async () => {
-      const { chamadas, executar } = ferramentasCercadas();
-      await expect(executar("send_message")).rejects.toBeInstanceOf(JobLeasePerdidoError);
-      expect(chamadas).toEqual([]);
-    });
+    // A primeira execução (w1) tenta: nada. (Junção da 1.86) O autor já a recusa na
+    // entrada (`requireCurrentAutonomousTurn`): o turno nem começa.
+    const corpoDaW1 = vi.fn();
+    await expect(withServiceJob(fila.db, jobDe("w1", fila.claimInicial), corpoDaW1)).rejects.toBeInstanceOf(
+      StaleServiceBoundaryError,
+    );
+    expect(corpoDaW1).not.toHaveBeenCalled();
     // A segunda (w2), mesmo muito depois no relógio, é dona: tudo passa.
     fila.relogio.agora += 5 * 60_000;
     await withServiceJob(fila.db, jobDe("w2", claimDoW2), async () => {
@@ -287,7 +296,9 @@ describe("(C01) execução substituída não produz efeito", () => {
 
   it("job sem claim (execução fora da fila) não consulta posse e grava pelo caminho antigo", async () => {
     const fila = filaFalsa();
-    await withServiceJob(fila.db, jobDe(null, null), async () => {
+    // (Junção da 1.86) Turno autônomo sem claim o autor recusa (`requireCurrentAutonomousTurn`):
+    // o caminho fora da fila é o de um job que não é turno autônomo (o Operador).
+    await withServiceJob(fila.db, jobDe(null, null, "operator_turn"), async () => {
       const { chamadas, executar } = ferramentasCercadas();
       await executar("send_message");
       await insertCheckpoint(fila.db, { tenantId: ORG, leadId: LEAD, jobId: JOB, content: checkpoint });

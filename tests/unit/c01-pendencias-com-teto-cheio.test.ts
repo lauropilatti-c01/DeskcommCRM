@@ -717,13 +717,14 @@ describe("(C01) a ligação no turno, no envio com fotos e no ledger", () => {
     );
     // send_message: o plano depois das fotos, a recusa sem nada conhecido, e o `send` que manda só as conhecidas.
     expect(TURNO).toMatch(
-      /const retomada = tetoCheio\(\) \? await planejarRetomada\(body, fotosDoProduto\) : null;\s*if \(retomada !== null && retomada\.conhecidas\.length === 0\) return recusaPorTeto\(\);/,
+      // Junção da 1.86: dentro do `try` da reserva em voo do autor (`dupTrava`), que é liberada antes da recusa.
+      /retomada = tetoCheio\(\) \? await planejarRetomada\(body, fotosDoProduto\) : null;\s*if \(retomada !== null && retomada\.conhecidas\.length === 0\) \{\s*dupTrava\.liberar\(body\);\s*return recusaPorTeto\(\);\s*\}/,
     );
     expect(TURNO).toMatch(
       /if \(retomada !== null\) return enviarSoAsConhecidas\(retomada\.conhecidas, \{ enviar, sleep, jitter \}\);/,
     );
     // O plano vem DEPOIS de preparar as fotos: elas entram nele.
-    expect(TURNO.indexOf("const retomada = tetoCheio()")).toBeGreaterThan(
+    expect(TURNO.indexOf("retomada = tetoCheio()")).toBeGreaterThan(
       TURNO.indexOf("fotosQueFaltaram = preparadas.tinha - preparadas.fotos.length;"),
     );
     // E o modelo é avisado do que ficou de fora.

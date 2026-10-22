@@ -23,12 +23,15 @@ import {
   currentExecutionJob,
   guardServiceEffect,
 } from "@/lib/atendimento/fronteira-server";
+import { extrairJsonDoTexto } from "@/lib/agent-engine/texto/extrair-json-do-texto";
 
 import { claimOfJob } from "../../queue/claim";
 import type { Queryable } from "../../queue/queue";
 import {
   DECLARACAO_INSTRUCTION,
   declaracaoDoTurnoSchema,
+  intencaoSchema,
+  promessaSchema,
   type DeclaracaoDoTurno,
 } from "../declaracao";
 
@@ -85,7 +88,7 @@ export const CHECKPOINT_INSTRUCTION =
   'Feche o turno AGORA. Responda SOMENTE com um JSON válido no formato ' +
   '{"commitments": string[], "objections": string[], "next_action": string|null, "rolling_summary": string} ' +
   '— compromissos assumidos, objeções do lead, próxima ação e o resumo acumulado ' +
-  'da conversa até aqui (inclua o que o resumo anterior já dizia). ' +
+  'da conversa até aqui (preserve o que continua válido do resumo anterior; substitua fatos superados pelos resultados das ações concluídas neste turno). ' +
   // ⚠️ O REFERENCIAL DE `next_action`, e ele não é zelo de redação.
   //
   // Este JSON é escrito no FECHO do turno: a pergunta já saiu, a resposta ainda
@@ -159,47 +162,59 @@ export async function insertCheckpoint(
 }
 
 /**
- * (C01) O fechamento respondeu, mas sem um checkpoint utilizável: sem JSON, JSON
- * inválido ou shape inválido. Classe própria para `conteudoDoFechamento` separar
- * esta falha da chamada que LANÇA (provedor, prazo, lease, fronteira), que segue o
- * caminho de sempre. As mensagens são as de antes: o `last_error` da fila e os
- * logs continuam dizendo o mesmo.
+ * O fechamento veio fora do contrato. `problemas` diz O QUE falhou — caminho e
+ * código de cada problema do Zod, ou a ausência de JSON —, nunca o texto do
+ * modelo, que pode carregar PII da conversa: é o que vai para o log.
+ * `paraOModelo` acrescenta os nomes dos campos que não existem e só volta ao
+ * próprio modelo, na correção (`fecharOTurno`).
  */
-export class FechamentoSemCheckpointError extends Error {
-  constructor(mensagem: string) {
-    super(mensagem);
-    this.name = 'FechamentoSemCheckpointError';
+export class FechamentoRecusado extends Error {
+  constructor(
+    message: string,
+    readonly problemas: string,
+    readonly paraOModelo: string = problemas,
+  ) {
+    super(message);
+    this.name = 'FechamentoRecusado';
   }
 }
 
 /**
- * Extrai e valida o JSON do fechamento. Tolerante a cerca de código e prosa em
- * volta (pega do primeiro '{' ao último '}'); inválido → erro SEM o texto do
+ * (C01) O fechamento respondeu, mas sem um checkpoint utilizável: sem JSON, JSON
+ * inválido ou shape inválido. Desde a 1.86 é a recusa do autor (`FechamentoRecusado`,
+ * com os problemas para a correção), com o nome que `conteudoDoFechamento` e os nossos
+ * testes conhecem. A chamada que LANÇA (provedor, prazo, lease, fronteira) segue o
+ * caminho de sempre. As mensagens são as de antes: o `last_error` da fila e os logs
+ * continuam dizendo o mesmo.
+ */
+export class FechamentoSemCheckpointError extends FechamentoRecusado {}
+
+/**
+ * Extrai e valida o JSON do fechamento. Tolerante a cerca de código, prosa em
+ * volta e repetição (`extrairJsonDoTexto`); inválido → erro SEM o texto do
  * modelo na mensagem (pode carregar PII da conversa) — o job re-tenta.
  */
 export function parseCheckpointText(text: string): CheckpointContent {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start === -1 || end <= start) {
+  const bruto = extrairJsonDoTexto(text);
+  if (bruto === null) {
     throw new FechamentoSemCheckpointError(
       'fechamento do turno sem JSON de checkpoint — run re-tentado pela fila',
+      'a resposta não tinha um objeto JSON válido',
     );
   }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text.slice(start, end + 1));
-  } catch {
-    throw new FechamentoSemCheckpointError(
-      'JSON de checkpoint inválido no fechamento do turno — run re-tentado pela fila',
-    );
-  }
-  const parsed = checkpointContentSchema.safeParse(raw);
+  const parsed = checkpointContentSchema.safeParse(bruto);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join('.') || '(raiz)'}: ${i.code}`)
+    const onde = (i: (typeof parsed.error.issues)[number]) => `${i.path.join('.') || '(raiz)'}: ${i.code}`;
+    const issues = parsed.error.issues.map(onde).join('; ');
+    const paraOModelo = parsed.error.issues
+      .map((i) =>
+        i.code === 'unrecognized_keys' ? `${onde(i)} (campos que não existem: ${i.keys.join(', ')})` : onde(i),
+      )
       .join('; ');
     throw new FechamentoSemCheckpointError(
       `checkpoint do fechamento com shape inválido (${issues}) — run re-tentado pela fila`,
+      issues,
+      paraOModelo,
     );
   }
   return parsed.data;
@@ -215,9 +230,9 @@ export function parseCheckpointText(text: string): CheckpointContent {
  * fechamentos (~6%) pararam sem o JSON — o modelo escreveu uma mensagem ao lead ou
  * devolveu texto vazio — e os 7 turnos mandaram uma mensagem a mais.
  *
- * Com resposta ao lead neste job: UMA nova chamada de fechamento, igual à primeira;
- * sem JSON de novo, o checkpoint MÍNIMO e o turno conclui. O mínimo é o do turno
- * anterior (compromissos, objeções e resumo, o que validar) com a pendência DESTE
+ * Com resposta ao lead neste job: UMA nova chamada de fechamento (desde a 1.86, a
+ * correção do autor, `correcaoDoFechamento`); sem JSON de novo, o checkpoint MÍNIMO e
+ * o turno conclui. O mínimo é o do turno anterior (compromissos, objeções e resumo, o que validar) com a pendência DESTE
  * turno, que ninguém registrou: o que a resposta prometeu ("te chamo amanhã às
  * 10h") se perdeu com o fechamento. Por isso a declaração não fica ausente — com
  * ela nula, `promessasEmAberto` dá zero e a apuração de responsável do Operador
@@ -227,29 +242,44 @@ export function parseCheckpointText(text: string): CheckpointContent {
  * dela, retomar pela última resposta (`PROXIMA_ACAO_DO_FECHAMENTO_FALHO`). O aviso
  * na Central abre sempre que o mínimo é gravado (`inbound-turn.ts`).
  *
- * Sem resposta ao lead, nada muda: o erro sobe na primeira chamada e a fila refaz o
- * turno, que ainda não falou. Só a falha do PARSE entra aqui; a chamada que lança
- * sobe como antes, na primeira e na nova tentativa.
+ * Sem resposta ao lead, a correção também é pedida (autor, 1.86); se ela falhar, o
+ * erro sobe e a fila refaz o turno, que ainda não falou. Só a falha do PARSE entra
+ * aqui; a chamada que lança sobe como antes, na primeira e na nova tentativa.
  */
 export async function conteudoDoFechamento<T>(opcoes: {
-  /** A chamada de fechamento: o texto do modelo (já tratado) e o resultado dela. */
-  fechar: () => Promise<{ texto: string; chamada: T }>;
+  /**
+   * A chamada de fechamento: o texto do modelo (já tratado) e o resultado dela.
+   * `correcao` (junção da 1.86) vem vazia na primeira e, na segunda, leva a resposta
+   * recusada e a correção do autor (`correcaoDoFechamento`).
+   */
+  fechar: (correcao: Array<{ role: 'assistant' | 'user'; content: string }>) => Promise<{ texto: string; chamada: T }>;
   /** O lead já recebeu (ou vai receber) mensagem deste job: refazer o turno mandaria outra. */
   leadTemResposta: boolean;
   /** O checkpoint do turno anterior; lido só se o mínimo for preciso. */
   anterior: () => Promise<unknown>;
+  log?: { warn(msg: string, fields?: Record<string, unknown>): void };
 }): Promise<{ content: CheckpointContent; chamada: T; minimo: boolean }> {
-  const primeira = await opcoes.fechar();
+  const primeira = await opcoes.fechar([]);
+  let recusa: FechamentoRecusado;
   try {
     return { content: parseCheckpointText(primeira.texto), chamada: primeira.chamada, minimo: false };
   } catch (err) {
-    if (!opcoes.leadTemResposta || !(err instanceof FechamentoSemCheckpointError)) throw err;
+    if (!(err instanceof FechamentoRecusado)) throw err;
+    recusa = err;
   }
-  const segunda = await opcoes.fechar();
+  // (Junção da 1.86) A segunda chamada é a correção do autor (`fecharOTurno`), com ou
+  // sem resposta ao lead: ela custa menos que refazer o turno inteiro.
+  opcoes.log?.warn('fechamento do turno recusado — pedindo uma correção antes de re-tentar o turno', {
+    problemas: recusa.problemas,
+  });
+  const segunda = await opcoes.fechar([
+    { role: 'assistant', content: primeira.texto },
+    { role: 'user', content: correcaoDoFechamento(recusa.paraOModelo) },
+  ]);
   try {
     return { content: parseCheckpointText(segunda.texto), chamada: segunda.chamada, minimo: false };
   } catch (err) {
-    if (!(err instanceof FechamentoSemCheckpointError)) throw err;
+    if (!opcoes.leadTemResposta || !(err instanceof FechamentoSemCheckpointError)) throw err;
   }
   return { content: checkpointMinimo(await opcoes.anterior()), chamada: segunda.chamada, minimo: true };
 }
@@ -290,4 +320,79 @@ function checkpointMinimo(anterior: unknown): CheckpointContent {
       nada_a_declarar: false,
     },
   };
+}
+
+/**
+ * A correção pedida ao modelo quando o fechamento volta fora do contrato. Diz o
+ * problema — com os campos que não existem — e os nomes CERTOS; o `.strict()`
+ * da declaração continua valendo: campo a mais é ERRO DE ENSINO, e ensinar é
+ * dizer ao modelo o que ele errou, nunca apagar o campo em silêncio
+ * (`../declaracao.ts`).
+ *
+ * ⚠️ Medido com GPT-5.6 Luna (29/09/2026, 20–30 fechamentos por variante,
+ * conversa em espanhol): o erro é TRADUZIR os nomes — "intenciones" no lugar de
+ * `intencoes`, "promesas" no lugar de `promessas` —, em 25–47% dos fechamentos.
+ * - Correção genérica ("sem nenhum campo a mais"): corrigiu 1 de 5.
+ * - Esta, que nomeia os campos errados e lista os certos: corrigiu 14 de 14.
+ * - Uma frase na instrução do fechamento pedindo "nunca os traduza" PIOROU a
+ *   primeira tentativa (9 de 20 contra 15 de 20 sem ela). Por isso o aviso vive
+ *   só aqui, depois do erro, e não em `CHECKPOINT_INSTRUCTION`.
+ *
+ * Os nomes saem dos schemas, para o texto e o parser mudarem juntos.
+ */
+export function correcaoDoFechamento(problemas: string): string {
+  const campos = (schema: { shape: object }) => Object.keys(schema.shape);
+  const lista = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} e ${xs.at(-1)}`);
+  const declaracao = campos(declaracaoDoTurnoSchema);
+  const itens: Record<string, string[]> = {
+    intencoes: campos(intencaoSchema),
+    promessas: campos(promessaSchema),
+  };
+  const dentro = declaracao
+    .map((c) => (itens[c] ? `${c} (cada item com ${lista(itens[c])})` : c));
+  return (
+    `O JSON do fechamento foi recusado: ${problemas}. ` +
+    'Os nomes dos campos são fixos e ficam em português, exatamente assim: ' +
+    `${lista(campos(checkpointContentSchema))}; dentro de declaracao: ${lista(dentro)}. ` +
+    'Responda de novo SOMENTE com o JSON, com estes nomes e nenhum outro. Sem texto fora do JSON.'
+  );
+}
+
+/**
+ * O fechamento do turno, com UMA correção antes de desistir.
+ *
+ * ⚠️ POR QUE EXISTE, medido em produção (27/09/2026): com um modelo barato no
+ * ponto `checkpoint`, a declaração às vezes vinha com uma chave a mais
+ * (`declaracao: unrecognized_keys`). O parse recusava, o job falhava e a fila
+ * re-tentava o TURNO INTEIRO — a chamada principal do agente incluída, que é a
+ * cara: 2 de 10 turnos com 3 tentativas, até 30¢ numa mensagem, para economizar
+ * ~1¢ no fechamento. A resposta ao cliente já tinha saído; o que faltava era só
+ * o JSON.
+ *
+ * Agora a recusa vira uma segunda chamada de FECHAMENTO (barata), com a resposta
+ * recusada e o problema. Só se ela também vier fora do contrato o erro sobe como
+ * antes, e a fila re-tenta o turno. Falha do fornecedor (rede, 5xx, teto) não é
+ * recusa: sobe na hora, sem segunda chamada, como sempre subiu.
+ */
+export async function fecharOTurno<R extends { text: string; callId?: string | null }>(opcoes: {
+  pedir: (extra: Array<{ role: 'assistant' | 'user'; content: string }>) => Promise<R>;
+  /** Ajuste do texto antes do parse (hoje: tirar o link da reunião). */
+  ajustar?: (text: string) => string;
+  log?: { warn(msg: string, fields?: Record<string, unknown>): void };
+}): Promise<{ content: CheckpointContent; resposta: R; corrigido: boolean }> {
+  const ajustar = opcoes.ajustar ?? ((t: string) => t);
+  const primeira = await opcoes.pedir([]);
+  try {
+    return { content: parseCheckpointText(ajustar(primeira.text)), resposta: primeira, corrigido: false };
+  } catch (err) {
+    if (!(err instanceof FechamentoRecusado)) throw err;
+    opcoes.log?.warn('fechamento do turno recusado — pedindo uma correção antes de re-tentar o turno', {
+      problemas: err.problemas,
+    });
+    const segunda = await opcoes.pedir([
+      { role: 'assistant', content: primeira.text },
+      { role: 'user', content: correcaoDoFechamento(err.paraOModelo) },
+    ]);
+    return { content: parseCheckpointText(ajustar(segunda.text)), resposta: segunda, corrigido: true };
+  }
 }

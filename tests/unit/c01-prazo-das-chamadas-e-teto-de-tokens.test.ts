@@ -72,7 +72,8 @@ const job = {
 /** Banco da execução: a fronteira está em pé e o lease é SEMPRE desta execução. */
 const dbDaExecucao = {
   query: async (sql: string) => {
-    if (sql.includes("from job_queue")) return { rows: [{ lease: 1 }], rowCount: 1 };
+    // `current`: o turno autônomo não foi revogado (`requireCurrentAutonomousTurn`, autor, 1.86).
+    if (sql.includes("from job_queue")) return { rows: [{ lease: 1, current: true }], rowCount: 1 };
     if (sql.includes("from conversations c")) return { rows: [fronteira], rowCount: 1 };
     return { rows: [], rowCount: 0 };
   },
@@ -233,7 +234,8 @@ describe("(C01) prazo das chamadas de modelo menor que o lease", () => {
     expect(worker).toMatch(/withServiceJob\(pool, job, [^;]*\{\s*leaseMs:\s*env\.QUEUE_VISIBILITY_TIMEOUT_MS,?\s*\}/s);
     const seam = readFileSync("lib/agent-engine/edge/llm/run-model-call.ts", "utf8");
     expect(seam).toMatch(/combinarSinais\(input\.abortSignal,\s*sinalDaExecucao\(\)\)/);
-    expect(seam).toMatch(/abortSignal\?\.throwIfAborted\(\);\s*(?:\/\/[^\n]*\n\s*)*result = await generateText\(/);
+    // Junção da 1.86: a chamada passa pelo `chamarCom` do autor (assinatura e reserva).
+    expect(seam).toMatch(/abortSignal\?\.throwIfAborted\(\);\s*(?:\/\/[^\n]*\n\s*)*try \{\s*result = await chamarCom\(/);
   });
 });
 

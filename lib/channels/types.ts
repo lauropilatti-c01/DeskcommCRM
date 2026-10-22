@@ -177,8 +177,10 @@ export interface OutboundEnvelope extends ChannelTenantScope {
 export type OutboundInteractive = { type: string } & Record<string, unknown>;
 
 /**
- * Uma conversão (hoje, a venda) no vocabulário neutro que o canal traduz — ver
- * `ChannelAdapter.reportConversion`.
+ * Uma conversão no vocabulário neutro que o canal traduz — ver
+ * `ChannelAdapter.reportConversion`. A venda (`Purchase`) e os eventos de ETAPA
+ * da Meta que o canal sabe repassar (`InitiateCheckout`, `LeadSubmitted`,
+ * `AddToCart`), que saem sem valor.
  */
 export interface ChannelConversionInput extends ChannelTenantScope {
   sessionRef: string;
@@ -186,11 +188,12 @@ export interface ChannelConversionInput extends ChannelTenantScope {
   providerConversationId: string | null;
   /** Só dígitos (E.164 sem `+`). Reforço de casamento, nunca o único. */
   phone: string | null;
-  event: "Purchase";
+  event: "Purchase" | "InitiateCheckout" | "LeadSubmitted" | "AddToCart";
   /** Chave de deduplicação na plataforma: o mesmo id nunca conta duas vezes. */
   eventId: string;
   occurredAt: Date;
-  valueCents: number;
+  /** `null` no evento de etapa, que sai sem valor. */
+  valueCents: number | null;
   currency: string;
 }
 
@@ -260,6 +263,28 @@ export interface ChannelAdapter {
   echoExternalIds?(input: { externalId: string; recipient: string }): string[];
 
   /**
+   * A forma CANÔNICA de gravar `messages.external_id` de uma mensagem que este
+   * canal acabou de aceitar — a mesma que o `unique (organization_id,
+   * external_id)` usa para recusar a segunda linha.
+   *
+   * Existe porque a resposta de envio e o webhook do eco podem devolver PONTAS
+   * DIFERENTES do mesmo id (a cauda × o id completo, no WhatsApp). Gravar um
+   * lado numa forma e o outro noutra é o defeito da issue #196: os dois lados
+   * escrevem strings diferentes do mesmo identificador, o unique fica mudo e a
+   * janela entre o `SELECT` do dedup e o `INSERT` nasce a segunda linha com a
+   * mesma frase. Normalizar no PONTO DE ESCRITA fecha a janela sem migration e
+   * sem backfill — quem lê (`handleAck`, `echoExternalIds`) já procura as duas
+   * formas.
+   *
+   * É conhecimento do CANAL, não de quem envia — por isso mora aqui e não no
+   * handler, que é justamente o que o lint de canal impede.
+   *
+   * OPCIONAL: um canal cujo id já é único e simétrico não implementa, e quem
+   * chama grava o `externalId` exatamente como veio.
+   */
+  canonicalExternalId?(externalId: string): string;
+
+  /**
    * O telefone por trás de um identificador opaco, quando o canal souber.
    *
    * OPCIONAL: nem todo canal tem identidade opaca, e nem todo que tem sabe
@@ -273,6 +298,27 @@ export interface ChannelAdapter {
   resolvePhoneForIdentity?(
     input: ChannelTenantScope & { sessionRef: string; identity: string },
   ): Promise<string | null>;
+
+  /**
+   * O nome salvo na agenda do aparelho ligado a este canal, e o apelido do perfil.
+   *
+   * OPCIONAL: nem todo canal tem agenda. `null` significa que a pergunta nem
+   * saiu (transporte fora, canal sem o método). Um objeto com os dois campos
+   * nulos significa que o canal respondeu e não tinha nome — quem chama
+   * carimba e tenta de novo depois, em vez de perguntar a mesma pessoa para
+   * sempre.
+   *
+   * `agenda` é o nome que o dono do número GRAVOU no celular. `perfil` é o
+   * apelido que a própria pessoa pôs no WhatsApp. Quem chama não precisa saber
+   * QUAL canal guarda a agenda: testa a presença do método.
+   */
+  resolveAddressBookName?(
+    input: ChannelTenantScope & {
+      sessionRef: string;
+      phone: string | null;
+      lid: string | null;
+    },
+  ): Promise<{ agenda: string | null; perfil: string | null } | null>;
 
   /**
    * O número, em dígitos, pelo qual este canal REGISTRA um telefone — `null`

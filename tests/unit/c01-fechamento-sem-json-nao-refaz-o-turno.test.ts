@@ -176,14 +176,25 @@ describe("(C01) o que não muda", () => {
     expect(r.content.next_action).toBe("conferir se o pagamento entrou");
   });
 
-  it("sem resposta ao lead → o erro de sempre, uma chamada só (a fila refaz o turno, que ainda não falou)", async () => {
+  it("sem resposta ao lead → a correção do autor (1.86) e, se ela falhar, o erro de sempre (a fila refaz o turno, que ainda não falou)", async () => {
     const fechar = fechamentos("", "");
     const anterior = vi.fn(async () => ANTERIOR);
     await expect(conteudoDoFechamento({ fechar, leadTemResposta: false, anterior })).rejects.toThrow(
       "fechamento do turno sem JSON de checkpoint — run re-tentado pela fila",
     );
-    expect(fechar).toHaveBeenCalledTimes(1);
+    expect(fechar).toHaveBeenCalledTimes(2);
     expect(anterior).not.toHaveBeenCalled();
+  });
+
+  it("(junção da 1.86) a segunda chamada leva a resposta recusada e a correção do autor", async () => {
+    const fechar = fechamentos("não é JSON", JSON_OK);
+    const r = await conteudoDoFechamento({ fechar, leadTemResposta: false, anterior: vi.fn() });
+    expect(r.minimo).toBe(false);
+    expect(fechar.mock.calls[0]).toEqual([[]]);
+    const correcao = (fechar.mock.calls[1] as unknown as [Array<{ role: string; content: string }>])[0];
+    expect(correcao[0]).toEqual({ role: "assistant", content: "não é JSON" });
+    expect(correcao[1]!.role).toBe("user");
+    expect(correcao[1]!.content).toContain("O JSON do fechamento foi recusado");
   });
 
   it("a chamada de fechamento que lança sobe como antes, na primeira e na nova tentativa", async () => {
@@ -219,16 +230,18 @@ describe("(C01) o que não muda", () => {
     expect(fonte).toContain(
       "const terminal = err instanceof StaleServiceBoundaryError || ehVetoPermanenteDeNegocio(err);",
     );
-    expect(fonte).toContain(
-      "if (terminal) { await cancelJob(pool, job.id, workerId, errMsg(err), claimOfJob(job)?.acquired_at); }",
-    );
+    // Junção da 1.86: a disposição saiu para `disporJobAposFalha` (autor); o terminal cancela.
+    expect(fonte).toContain("await disporJobAposFalha(pool, job, workerId, err, terminal, log);");
+    const disposicao = readFileSync(join(process.cwd(), "workers/agent-worker/dispor-job-apos-falha.ts"), "utf8").replace(/\s+/gu, " ");
+    expect(disposicao).toMatch(/\} else if \(terminal\) \{ const reason = [^}]*await cancelJob\(pool, job\.id, workerId,/);
   });
 
   it("parseCheckpointText mantém as mensagens de erro (o last_error da fila e os logs as leem)", async () => {
     const { parseCheckpointText } = await import("@/lib/agent-engine/agent/abertura/checkpoint");
     expect(() => parseCheckpointText("")).toThrow("fechamento do turno sem JSON de checkpoint — run re-tentado pela fila");
     expect(() => parseCheckpointText("{x")).toThrow("fechamento do turno sem JSON de checkpoint — run re-tentado pela fila");
-    expect(() => parseCheckpointText("{x}")).toThrow("JSON de checkpoint inválido no fechamento do turno — run re-tentado pela fila");
+    // Junção da 1.86: o JSON que não é JSON vira "sem JSON" (`extrairJsonDoTexto`, do autor).
+    expect(() => parseCheckpointText("{x}")).toThrow("fechamento do turno sem JSON de checkpoint — run re-tentado pela fila");
     expect(() => parseCheckpointText('{"commitments": 1}')).toThrow(/^checkpoint do fechamento com shape inválido/);
   });
 });
