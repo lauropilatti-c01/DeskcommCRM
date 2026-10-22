@@ -396,3 +396,50 @@ describe("caso sem negócio aberto: rodízio entre as atendentes, sem tocar em n
     expect(paraQuemVe).not.toHaveBeenCalled();
   });
 });
+
+// A produção tem dois membros admin: o Lauro e a conta de serviço "Claude", que
+// os roteiros usam. Elegível ao rodízio é só o papel `agent` (convite aceito,
+// não revogada): a conta de serviço nunca recebe caso, nem com negócio nem sem.
+describe("conta de serviço (admin) nunca entra no rodízio", () => {
+  it("com atendentes: oito casos, com e sem negócio, nenhum para o Lauro nem para a conta Claude", async () => {
+    db.user_organizations = [membro("lauro", "admin"), membro("claude", "admin"), membro("priscila"), membro("maria")];
+    db.agent_cases = [];
+    db.conversations = [];
+    db.crm_leads = [];
+    for (let i = 1; i <= 8; i++) {
+      db.agent_cases.push(caso(`caso-${i}`, `c${i}`));
+      db.conversations.push({ id: `c${i}`, organization_id: ORG, contact_id: `k${i}` });
+      db.crm_leads.push(negocio(`L${i}`, `k${i}`, i % 2 === 0 ? { status: "won" } : {}));
+      await casoParaAtendenteHandler.handle(evento(`caso-${i}`));
+    }
+    const donos = db.crm_leads.filter((l) => l.status === "open").map((l) => l.owner_user_id);
+    const daVez = db.agent_cases.flatMap((c) => {
+      const v = (c.context_snapshot as Linha).c01_atendente as Linha | undefined;
+      return v ? [v.user_id] : [];
+    });
+    expect(donos).toHaveLength(4);
+    expect(daVez).toHaveLength(4);
+    for (const quem of [...donos, ...daVez]) expect(["priscila", "maria"]).toContain(quem);
+    const avisados = paraQuemVe.mock.calls.flatMap((c) => [...(c[3] ?? [])]);
+    expect(avisados).not.toContain("claude");
+    expect(avisados).not.toContain("lauro");
+  });
+
+  it("só o Lauro e a conta Claude (como na produção hoje), ou a conta como manager: ninguém recebe, só a Central", async () => {
+    db.crm_leads[0]!.status = "won";
+    for (const equipe of [
+      [membro("lauro", "admin"), membro("claude", "admin")],
+      [membro("lauro", "admin"), membro("claude", "manager")],
+    ]) {
+      db.user_organizations = equipe;
+      const r = await casoParaAtendenteHandler.handle(evento());
+      expect(r).toMatchObject({ status: "skipped", detail: "caso_sem_negocio:sem_atendente" });
+    }
+    db.crm_leads[0]!.status = "open";
+    expect((await casoParaAtendenteHandler.handle(evento())).detail).toBe("sem_atendente");
+    expect(db.crm_leads[0]!.owner_user_id).toBeNull();
+    expect((db.agent_cases[0]!.context_snapshot as Linha).c01_atendente).toBeUndefined();
+    expect(paraQuemVe).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  });
+});
