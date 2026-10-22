@@ -666,6 +666,22 @@ const schema = z.object({
    */
   VAPID_PUBLIC_KEY: z.string().optional().default(""),
   VAPID_PRIVATE_KEY: z.string().optional().default(""),
+
+  /**
+   * (C01, -c01.16) Para quem vai o push de mensagem de cliente: vazio ou
+   * `responsavel` = só quem responde pela conversa (atribuída a ela ou dona do
+   * negócio aberto); `equipe` = todos os aparelhos da organização (o do autor).
+   * `z.string()` pela mesma razão de `SIGNUP_MODE`. Regra em
+   * `lib/notifications/destino-do-push.ts`.
+   */
+  PUSH_DE_MENSAGEM: z.string().optional().default(""),
+
+  /**
+   * (C01, -c01.16) Caso aberto vai para a atendente da vez (papel `agent`) e
+   * ela recebe o push. Vazio = ligado; `desligado` = o do autor (só a Central).
+   * Regra em `lib/escalacao/caso-para-atendente.handler.ts`.
+   */
+  CASOS_PARA_ATENDENTES: z.string().optional().default(""),
 });
 
 let parsed = schema.safeParse(process.env);

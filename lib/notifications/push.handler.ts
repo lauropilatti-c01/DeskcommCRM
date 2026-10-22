@@ -10,6 +10,14 @@ import { vapidPronto } from "./vapid";
 import { pushDoAvisoDaCentral } from "./push-dos-avisos";
 import type { PushPayload } from "./push_payload";
 import { rotuloDoContato, SEM_NOME } from "@/lib/contacts/rotulo-do-contato";
+import {
+  casoEsperandoGente,
+  membrosAtivos,
+  modoDoPushDeMensagem,
+  pushDoCasoAtribuido,
+  responsaveisDaConversa,
+  type AdminDoPush,
+} from "./destino-do-push";
 
 export const WEB_PUSH_INBOUND_KEY = "web-push-inbound.v1";
 
@@ -32,8 +40,32 @@ async function handleInbound(row: EventRow): Promise<HandlerResult> {
   const type = typeof row.payload.type === "string" ? row.payload.type : "text";
   const body = type === "text" ? preview : "Mídia";
 
-  const marca = await marcaDaSaida(row.organization_id);
   const contactId = typeof row.payload.contact_id === "string" ? row.payload.contact_id : null;
+
+  // (C01, -c01.16) Só quem responde pela conversa recebe; sem responsável, a IA
+  // está atendendo e ninguém é tocado. Ver `./destino-do-push.ts`.
+  let destinatarios: string[] | null = null;
+  if (modoDoPushDeMensagem() === "responsavel") {
+    destinatarios = await responsaveisDaConversa(
+      createAdminClient() as unknown as AdminDoPush,
+      row.organization_id,
+      conversationId,
+      contactId,
+    );
+    if (destinatarios === null) {
+      return {
+        consumer_key: WEB_PUSH_INBOUND_KEY,
+        status: "retry",
+        retry_at: new Date(Date.now() + 60_000).toISOString(),
+        detail: "responsavel_ilegivel",
+      };
+    }
+    if (destinatarios.length === 0) {
+      return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "skipped", detail: "sem_responsavel" };
+    }
+  }
+
+  const marca = await marcaDaSaida(row.organization_id);
   let contactName: string | null = null;
   let icon: string | null = null;
   if (contactId) {
@@ -83,6 +115,17 @@ async function handleInbound(row: EventRow): Promise<HandlerResult> {
     contactName,
     icon,
   });
+  // (C01) Modo `responsavel`: a lista é a nossa, um push por pessoa, como na
+  // -c01.16. A trava do autor por visibilidade (`enviarPushAQuemVeAConversa`) não
+  // entra aqui: ver "Sobreposições" no relatório da junção da 1.86.0.
+  if (destinatarios !== null) {
+    let enviados = 0;
+    for (const userId of destinatarios) {
+      enviados += (await enviarPushAoUsuario(row.organization_id, userId, payload)).sent;
+    }
+    return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "ok", detail: `sent:${enviados}` };
+  }
+  // Modo `equipe`: a regra do autor (1.86), inteira.
   const destino = await destinatariosDoInbound(row.organization_id, conversationId, contactId);
   // Quem DEVE ser avisado (`destino`) nunca alarga quem PODE ver: nome e prévia
   // só saem para quem a RLS de `conversations` deixaria abrir a conversa.
@@ -273,6 +316,34 @@ export const webPushInboundHandler: EventHandler = {
 
     if (row.event_type === "lead.assigned") {
       const toUserId = typeof row.payload.to_user_id === "string" ? row.payload.to_user_id : lead.ownerUserId;
+      // (C01, -c01.16) Negócio atribuído com um caso esperando gente: o push diz
+      // que é um caso e abre o caso. Leitura do caso que falha cai no aviso de
+      // sempre. E só para quem é da equipe agora: negócio atribuído a alguém já
+      // revogado não leva o aviso ao celular dela.
+      if (toUserId) {
+        const ativos = await membrosAtivos(
+          createAdminClient() as unknown as AdminDoPush,
+          row.organization_id,
+          [toUserId],
+        );
+        if (ativos === null) {
+          return {
+            consumer_key: WEB_PUSH_INBOUND_KEY,
+            status: "retry",
+            retry_at: new Date(Date.now() + 60_000).toISOString(),
+            detail: "equipe_ilegivel",
+          };
+        }
+        if (!ativos.has(toUserId)) {
+          return { consumer_key: WEB_PUSH_INBOUND_KEY, status: "skipped", detail: "destinatario_fora_da_equipe" };
+        }
+        const caso = await casoEsperandoGente(
+          createAdminClient() as unknown as AdminDoPush,
+          row.organization_id,
+          leadId,
+        );
+        if (caso) return enviarParaUsuario(row.organization_id, toUserId, pushDoCasoAtribuido(caso));
+      }
       return enviarParaUsuario(row.organization_id, toUserId, {
         title: "Lead atribuído a você",
         body: truncar(lead.title),

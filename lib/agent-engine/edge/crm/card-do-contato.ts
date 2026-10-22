@@ -15,8 +15,16 @@
  * o mais recente de qualquer situação, para quem lê saber que o negócio está em
  * Ganho ou Perdido. Dois abertos empatados: nenhum (escolher seria chute, e gravar
  * no card errado é pior que não gravar).
+ *
+ * (C01, -c01.16) O card traz também a ordem dos campos definidos no funil dele
+ * (`ordemDoFunil`, de `crm_pipelines.settings.fields`, lida na MESMA consulta por
+ * junção com o funil do card). `camposCompactosDoCard` põe esses campos primeiro:
+ * sem isso, o corte seguia a ordem do `jsonb` (chave curta primeiro), e o lead
+ * antigo perdia campo de atendimento (`plano_oferecido`, `objecao_principal`)
+ * para carimbo técnico de nome curto.
  */
 import { resolveActiveLeadForContact, type LeadCandidate } from '@/lib/leads/active-lead';
+import { camposDoFunil } from '@/lib/leads/campos-do-funil';
 import type { LeadStatus } from '@/lib/types/leads';
 
 import type { Queryable } from '../../queue/queue';
@@ -29,6 +37,8 @@ export interface CardDoContato {
   etapa: string | null;
   campos: Record<string, unknown>;
   etiquetas: string[];
+  /** As chaves dos campos definidos no funil do card, na ordem do funil; `[]` = sem definição. */
+  ordemDoFunil: string[];
 }
 
 interface LinhaDoCard {
@@ -41,6 +51,7 @@ interface LinhaDoCard {
   custom_fields: unknown;
   tags: string[] | null;
   etapa: string | null;
+  campos_do_funil: unknown;
 }
 
 const iso = (v: Date | string | null): string | null =>
@@ -56,9 +67,10 @@ export async function lerCardDoContato(
 ): Promise<CardDoContato | null> {
   const { rows } = await db.query<LinhaDoCard>(
     `select l.id, l.organization_id, l.pipeline_id, l.status, l.last_activity_at, l.created_at,
-            l.custom_fields, l.tags, s.slug as etapa
+            l.custom_fields, l.tags, s.slug as etapa, p.settings -> 'fields' as campos_do_funil
        from crm_leads l
        left join crm_stages s on s.id = l.stage_id and s.organization_id = l.organization_id
+       left join crm_pipelines p on p.id = l.pipeline_id and p.organization_id = l.organization_id
       where l.organization_id = $1 and l.contact_id = $2`,
     [organizationId, contactId],
   );
@@ -95,6 +107,7 @@ export async function lerCardDoContato(
     etapa: escolhida.etapa,
     campos: objeto(escolhida.custom_fields),
     etiquetas: escolhida.tags ?? [],
+    ordemDoFunil: camposDoFunil({ fields: escolhida.campos_do_funil }).map((f) => f.key),
   };
 }
 
@@ -125,6 +138,19 @@ export const TETO_DO_VALOR_NO_CONTEXTO = 120;
 export const TETO_DE_CAMPOS_NO_CONTEXTO = 20;
 /** Teto do bloco serializado: ele disputa o orçamento de tokens com o histórico. */
 export const TETO_DO_BLOCO_NO_CONTEXTO = 800;
+/**
+ * (C01, -c01.16) Os tetos quando o funil define os campos: a ordem do funil decide
+ * quem entra, e os tetos maiores fazem caber o card de um lead antigo que entra
+ * pela campanha. Card sem definição no funil fica nos tetos de cima.
+ */
+export const TETO_DE_CAMPOS_COM_FUNIL = 40;
+export const TETO_DO_BLOCO_COM_FUNIL = 1600;
+/**
+ * (C01, -c01.16) Os campos que o próprio Deskcomm grava no card (a qualificação do
+ * agente), logo depois dos do funil: não são definidos no funil, e sem eles na frente
+ * o lead antigo os perdia para carimbo técnico.
+ */
+export const CAMPOS_NATIVOS_DO_CARD = ['next_action', 'need', 'timeline', 'budget', 'authority', 'reason'] as const;
 
 /**
  * Os campos do card como o modelo os lê: só valores curtos e legíveis.
@@ -136,19 +162,35 @@ export const TETO_DO_BLOCO_NO_CONTEXTO = 800;
  * não seja de valores simples. Lista simples vira texto separado por vírgula. Texto
  * passa de `TETO_DO_VALOR_NO_CONTEXTO`: cortado. O bloco inteiro respeita os dois
  * tetos acima, na ordem das chaves; o que não cabe fica de fora.
+ *
+ * (C01, -c01.16) Com `ordemDoFunil` (as chaves definidas no funil do card), esses
+ * campos vêm primeiro, na ordem do funil; depois os nativos (`CAMPOS_NATIVOS_DO_CARD`);
+ * depois os demais, na ordem de antes. Os tetos passam a `TETO_DE_CAMPOS_COM_FUNIL` e
+ * `TETO_DO_BLOCO_COM_FUNIL`. Sem
+ * definição no funil, tudo como antes. A projeção do prompt (`projetarRetornoDeTool`)
+ * continua depois daqui.
  */
 export function camposCompactosDoCard(
   campos: Record<string, unknown>,
+  ordemDoFunil: readonly string[] = [],
 ): Record<string, string | number | boolean> {
+  const comFunil = ordemDoFunil.length > 0;
+  const tetoDeCampos = comFunil ? TETO_DE_CAMPOS_COM_FUNIL : TETO_DE_CAMPOS_NO_CONTEXTO;
+  const tetoDoBloco = comFunil ? TETO_DO_BLOCO_COM_FUNIL : TETO_DO_BLOCO_NO_CONTEXTO;
+  const primeiro = comFunil ? [...ordemDoFunil, ...CAMPOS_NATIVOS_DO_CARD] : [];
+  const naOrdem = [
+    ...new Set([...primeiro.filter((k) => Object.prototype.hasOwnProperty.call(campos, k)), ...Object.keys(campos)]),
+  ];
   const saida: Record<string, string | number | boolean> = {};
   let tamanho = 2;
-  for (const [chave, valor] of Object.entries(campos)) {
-    if (Object.keys(saida).length >= TETO_DE_CAMPOS_NO_CONTEXTO) break;
+  for (const chave of naOrdem) {
+    const valor = campos[chave];
+    if (Object.keys(saida).length >= tetoDeCampos) break;
     if (chave.startsWith('_') || chave.trim() === '' || chaveEDadoPessoal(chave)) continue;
     const compacto = valorCompacto(valor);
     if (compacto === null) continue;
     const custo = JSON.stringify(chave).length + JSON.stringify(compacto).length + 2;
-    if (tamanho + custo > TETO_DO_BLOCO_NO_CONTEXTO) continue;
+    if (tamanho + custo > tetoDoBloco) continue;
     saida[chave] = compacto;
     tamanho += custo;
   }

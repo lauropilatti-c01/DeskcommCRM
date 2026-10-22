@@ -32,6 +32,13 @@ const carregarDestinatariosMock = vi.fn(
 vi.mock("./destinatarios-da-mensagem", () => ({
   carregarDestinatariosDaMensagem: (...args: unknown[]) => carregarDestinatariosMock(...args),
 }));
+// (C01) Estes testes são da regra do autor para a mensagem recebida, que na C01
+// vale com `PUSH_DE_MENSAGEM=equipe`. O padrão da C01 (`responsavel`) tem suíte
+// própria em `./destino-do-push.test.ts`.
+vi.mock("./destino-do-push", async (original) => ({
+  ...(await original<typeof import("./destino-do-push")>()),
+  modoDoPushDeMensagem: () => "equipe",
+}));
 vi.mock("@/lib/branding/saida", () => ({
   marcaDaSaida: async () => ({ nome: "Marca" }),
 }));

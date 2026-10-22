@@ -385,7 +385,7 @@ export async function getLeadContext(
     if (input.camposDoCard !== true) return {};
     try {
       const card = await lerCardDoContato(db, input.tenantId, input.leadId);
-      return card ? camposCompactosDoCard(card.campos) : {};
+      return card ? camposCompactosDoCard(card.campos, card.ordemDoFunil) : {};
     } catch (err) {
       logger.warn('lead-context: leitura do card falhou — contexto segue sem os campos', {
         organizationId: input.tenantId,

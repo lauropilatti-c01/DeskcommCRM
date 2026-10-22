@@ -23,6 +23,7 @@ import {
   AVISO_AO_MODELO_SEM_FRASE_SEM_PASSAGEM,
   estiloViraConteudo,
   FRASE_DE_VERIFICACAO,
+  notaDaDuvidaNova,
   passagemDesligada,
   RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM,
   RETORNO_DO_CASO_SEM_PASSAGEM,
@@ -76,8 +77,19 @@ describe("(C01, -c01.15, P2) o retorno do `open_human_case` ao modelo", () => {
     expect(semPassagem).toBeGreaterThan(-1);
     expect(semPassagem).toBeGreaterThan(ferramenta.indexOf("moverParaHandoffBestEffort('open_human_case');"));
     expect(semPassagem).toBeLessThan(ferramenta.indexOf("expectativaDeAtendimento("));
+    // (C01, -c01.16) o caso já aberto só vira sucesso DEPOIS de a dúvida entrar nele como nota;
+    // sem caso aberto na hora da nota, abre de novo (e o erro dessa nova tentativa volta ao modelo).
     expect(ferramenta).toMatch(
-      /if \(!res\.ok && semPassagem && res\.error\.code === 'case_already_open'\) \{\s*return \{ ok: true, message: RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM \};\s*\}\s*if \(!res\.ok\) return res;/,
+      /if \(!res\.ok && semPassagem && res\.error\.code === 'case_already_open'\) \{\s*const noCaso = await registrarDuvidaNoCasoAberto\(pool, tenantId, input\.conversationId, parsed\.data\);\s*if \(noCaso !== null\) return \{ ok: true, case_id: noCaso, message: RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM \};\s*res = await openCase\(/,
+    );
+    expect(ferramenta.indexOf("if (!res.ok) return res;")).toBeGreaterThan(ferramenta.indexOf("res = await openCase("));
+    expect(ferramenta).toMatch(/let res = await openCase\(/);
+  });
+
+  it("(-c01.16) o retorno do caso já aberto diz que a dúvida foi juntada; a nota leva título, resumo e bloqueio", () => {
+    expect(RETORNO_DO_CASO_JA_ABERTO_SEM_PASSAGEM).toMatch(/esta dúvida foi juntada a ele/);
+    expect(notaDaDuvidaNova({ title: "T", summary: "S", blocker: "B" })).toBe(
+      "Dúvida nova do lead (o caso já estava aberto): T\nS\nBloqueio: B",
     );
   });
 });
