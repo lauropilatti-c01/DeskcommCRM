@@ -278,6 +278,7 @@ import {
 import { diffCheckpoint } from '@/lib/leads/checkpoint-diff';
 import { CORRECAO_DO_TURNO_MUDO, turnoMudoPedeCorrecao } from './turno-mudo';
 import { criarTravaDeDuplicata } from './near-dup';
+import { corposDasPendentes, semAsRetomadas } from '@/lib/c01/memoria-sem-retomadas';
 import { vetoReason } from '@/lib/leads/veto-activity';
 import { corposEnviadosDesdeUltimaInbound } from './memoria-envio';
 import { emitAgentActivityForContact } from '@/lib/leads/agent-activity';
@@ -7021,8 +7022,15 @@ async function executarTurnoDoAgente(
           organizationId: tenantId,
           conversationId: input.conversationId,
         });
-        if (jaDito.length > 0) {
-          dupTrava.semear(jaDito);
+        // (C01, junção da 1.86.0) O pendente que esta re-execução vai retomar pela
+        // mesma chave (C54, `porRetomar`) não é repetição: sai da memória. Ver
+        // `lib/c01/memoria-sem-retomadas.ts`.
+        const memoria = semAsRetomadas(
+          jaDito,
+          porRetomar.size > 0 ? await corposDasPendentes(pool, tenantId, [...porRetomar]) : [],
+        );
+        if (memoria.length > 0) {
+          dupTrava.semear(memoria);
         }
       } catch (err) {
         runLog.warn('memória de duplicata não carregada — dedup cai só para o turno', {
