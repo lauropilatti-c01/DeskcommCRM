@@ -153,6 +153,19 @@ describe("(C01) os valores em dinheiro da mensagem", () => {
     expect(valoresNoResultado("Plano anual: 6.638,64").has(663864)).toBe(true);
   });
 
+  it("(revisão da junção da 1.86, achado 4) número com chave em centavos só vale em centavos: 199700 é R$ 1.997, nunca R$ 199.700", async () => {
+    const { valoresNoResultado } = await valores();
+    const achados = valoresNoResultado({ preco_centavos: 199700 });
+    expect([...achados]).toEqual([199700]);
+    const liberado = await armado({ resultado: { preco_centavos: 199700 } });
+    expect((await avaliar("O plano sai por R$ 1.997.", liberado)).pass).toBe(true);
+    expect((await avaliar("O plano sai por R$ 199.700.", liberado)).pass, "valor 100× liberado").toBe(false);
+    // Sem a chave de centavos, o número continua em reais: "preco": 1997 é R$ 1.997.
+    expect([...valoresNoResultado({ preco: 1997 })]).toEqual([199700]);
+    // Centavos com fração não é centavos: lido em reais, como antes.
+    expect([...valoresNoResultado({ amount_cents: 19.9 })]).toEqual([1990]);
+  });
+
   it("(revisão, N1) na fonte, número colado em letra, '_', ponto, vírgula ou hífen de id não é valor", async () => {
     const { valoresNoResultado } = await valores();
     const colado = valoresNoResultado({
