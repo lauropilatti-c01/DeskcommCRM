@@ -3,6 +3,7 @@ import { avancarEnrollmentAtivo, type AdminClient, type TickDeps } from "./engin
 import { decidirAcompanhamentoC01 } from "./c01-acompanhamento-runtime";
 import type { EnrollmentRow } from "./node-handlers";
 import type { FlowGraph } from "./graph-schema";
+import type { ConfigAcompanhamento, FatosAcompanhamento } from "./c01-acompanhamento";
 
 const policy = {
   version: 1 as const,
@@ -20,7 +21,10 @@ const row = {
   pointer_id: "pointer",
   started_at: "2026-10-23T12:00:00.000Z",
 } as EnrollmentRow;
-function rig(type: "action" | "move_lead" | "end" = "action") {
+function rig(
+  type: "action" | "move_lead" | "end" = "action",
+  config: ConfigAcompanhamento = policy,
+) {
   const node =
     type === "action"
       ? { id: "touch", type, config: { mode: "text", body: "Mensagem de teste" } }
@@ -28,7 +32,7 @@ function rig(type: "action" | "move_lead" | "end" = "action") {
         ? { id: "touch", type, config: { stage_id: "lost", lost_reason: "Sem resposta" } }
         : { id: "touch", type, config: { outcome: "exhausted" } };
   const graph = {
-    settings: { c01_acompanhamento: policy },
+    settings: { c01_acompanhamento: config },
     nodes: [node],
     edges: [],
   } as unknown as FlowGraph;
@@ -36,7 +40,7 @@ function rig(type: "action" | "move_lead" | "end" = "action") {
     loadFlowGraph: vi.fn(async () => graph),
     decidirAcompanhamentoC01: vi.fn(async () =>
       decidirAcompanhamentoC01(
-        policy,
+        config,
         { organizationId: "org", contactId: "contact", enrollmentId: "enrollment" },
         new Date("2026-10-23T15:00:00.000Z"),
       ),
@@ -103,6 +107,77 @@ describe("C01 no motor real", () => {
             ? { next_eval_at: decision.until }
             : { status: "cancelled", cancel_reason: decision.reason },
         ),
+      );
+    }
+  });
+  it("o despertar após 2h persiste o prazo calculado; execução tardia fica bloqueada", async () => {
+    const config: ConfigAcompanhamento = {
+      version: 1,
+      kind: "cronograma",
+      activated_at: "2026-10-22T11:00:00.000Z",
+      cronograma_timing: { minimum_wait_minutes: 120, window_margin_minutes: 15 },
+    };
+    const last = "2026-10-23T01:54:00.000Z"; // 22h54 de Brasília.
+    for (const [now, expected] of [
+      [
+        "2026-10-23T03:54:00.000Z",
+        { next_eval_at: "2026-10-23T23:59:00.000Z", last_error: "c01:ainda_nao_venceu" },
+      ],
+      [
+        "2026-10-24T00:05:00.000Z",
+        {
+          next_eval_at: null,
+          status: "paused_manual",
+          last_error: "c01:janela_do_cronograma_perdida",
+        },
+      ],
+    ] as const) {
+      const r = rig("action", config);
+      const f: FatosAcompanhamento = {
+        organizationId: "org",
+        contactId: "contact",
+        opportunityId: "deal",
+        anchor: { kind: "cronograma", at: last, delivered: true },
+        lastInboundAt: last,
+        hasNewReply: false,
+        offerAfterAnchor: false,
+        human: false,
+        optedOut: false,
+        restricted: false,
+        callbackPending: false,
+        anotherSequence: false,
+        purchase: {
+          source: "aplicada",
+          organizationId: "org",
+          contactId: "contact",
+          opportunityId: "deal",
+          checkedAt: now,
+          complete: true,
+          identity: "univoca",
+          result: "nao_comprou",
+        },
+        template: { approved: false, accountReady: false },
+        touches: [],
+      };
+      r.deps.clock = () => new Date(now);
+      r.db.decidirAcompanhamentoC01 = vi.fn(async (p, enrollment, at) =>
+        decidirAcompanhamentoC01(
+          p,
+          {
+            organizationId: enrollment.organization_id,
+            contactId: enrollment.contact_id,
+            enrollmentId: enrollment.id,
+          },
+          at,
+          async () => f,
+        ),
+      );
+      await avancarEnrollmentAtivo(r.deps, { ...row, started_at: last });
+      expect(r.enqueueJob).not.toHaveBeenCalled();
+      expect(r.db.updateEnrollment).toHaveBeenCalledWith(
+        "enrollment",
+        "org",
+        expect.objectContaining(expected),
       );
     }
   });

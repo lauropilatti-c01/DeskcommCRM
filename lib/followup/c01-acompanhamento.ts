@@ -5,6 +5,25 @@ export const c01AcompanhamentoSchema = z.strictObject({
   version: z.literal(1),
   kind: z.enum(["cronograma", "oferta"]),
   activated_at: z.string().datetime().nullable(),
+  /** Parâmetros candidatos, sem autorização de ativação implícita. */
+  cronograma_timing: z
+    .strictObject({
+      minimum_wait_minutes: z
+        .number()
+        .int()
+        .min(1)
+        .max(23 * 60),
+      window_margin_minutes: z
+        .number()
+        .int()
+        .min(1)
+        .max(23 * 60),
+    })
+    .refine(
+      (t) => t.minimum_wait_minutes + t.window_margin_minutes < 24 * 60,
+      "Espera mínima e margem precisam caber na janela de 24 horas",
+    )
+    .optional(),
 });
 export type ConfigAcompanhamento = z.infer<typeof c01AcompanhamentoSchema>;
 export type DecisaoAcompanhamento =
@@ -53,6 +72,12 @@ export interface FatosAcompanhamento {
   touches: Toque[];
 }
 const H = 3_600_000;
+const MIN = 60_000;
+/** Hipótese da candidata, ainda desligada; não muda oferta nem retorno combinado. */
+const HORARIO_CRONOGRAMA_CANDIDATO = {
+  minimum_wait_minutes: 120,
+  window_margin_minutes: 15,
+};
 const BLOQUEIOS_META = new Set(["131047", "131049", "132015"]);
 const valido = (value: string | null): value is string =>
   value !== null && Number.isFinite(Date.parse(value));
@@ -84,6 +109,25 @@ function janelaPermitida(at: number): number {
   local.setUTCHours(8, 0, 0, 0);
   return +local + 3 * H;
 }
+
+/** Último minuto entre 08h inclusive e 21h exclusive, sem ultrapassar o teto. */
+function ultimoMinutoPermitido(at: number): number {
+  const local = new Date(Math.floor(at / MIN) * MIN - 3 * H);
+  const hour = local.getUTCHours();
+  if (hour < 8) local.setUTCDate(local.getUTCDate() - 1);
+  if (hour < 8 || hour >= 21) local.setUTCHours(20, 59, 0, 0);
+  return +local + 3 * H;
+}
+
+function horarioDoCronograma(config: ConfigAcompanhamento, f: FatosAcompanhamento) {
+  const timing = config.cronograma_timing ?? HORARIO_CRONOGRAMA_CANDIDATO;
+  const inbound = Date.parse(f.lastInboundAt!);
+  const encerraEm = inbound + 24 * H - timing.window_margin_minutes * MIN;
+  const at = ultimoMinutoPermitido(Math.min(inbound + 23 * H, encerraEm - 1));
+  const minimoEm = Math.max(inbound, Date.parse(f.anchor.at)) + timing.minimum_wait_minutes * MIN;
+  return { at, minimoEm, encerraEm };
+}
+
 function adiar(at: number, reason: string): DecisaoAcompanhamento {
   return { kind: "defer", reason, until: new Date(at).toISOString() };
 }
@@ -132,6 +176,16 @@ export function avaliarAcompanhamento(
   )
     return bloqueio("relogio_incoerente");
   if (!valido(f.lastInboundAt)) return bloqueio("ultima_mensagem_desconhecida");
+
+  if (config.kind === "cronograma" && f.touches.length === 0) {
+    const horario = horarioDoCronograma(config, f);
+    if (horario.at < horario.minimoEm) return bloqueio("sem_intervalo_util_para_retomada");
+    if (+now < horario.at) return adiar(horario.at, "ainda_nao_venceu");
+    // Um worker atrasado não transforma a retomada interna em campanha de modelo.
+    // Se a próxima hora permitida perdeu a margem, interromper sem novo disparo.
+    if (+now >= horario.encerraEm || janelaPermitida(+now) >= horario.encerraEm)
+      return bloqueio("janela_do_cronograma_perdida");
+  }
 
   // Não adianta reler compras à noite e usar o resultado pela manhã: deferir
   // devolve ao consumidor a obrigação de carregar tudo de novo ao acordar.
@@ -186,10 +240,8 @@ export function avaliarAcompanhamento(
     if (+now < ultimo + 48 * H) return adiar(ultimo + 48 * H, "aguarda_48h_apos_entregas");
     return { kind: "lost", reason: "sem_resposta_apos_quatro_entregas" };
   }
-  const due =
-    config.kind === "cronograma"
-      ? Date.parse(f.lastInboundAt) + 23 * H
-      : Date.parse(f.anchor.at) + [2, 24, 72, 168][touches.length]! * H;
+  if (config.kind === "cronograma") return { kind: "send", touch: 1, transport: "text" };
+  const due = Date.parse(f.anchor.at) + [2, 24, 72, 168][touches.length]! * H;
   if (+now < due) return adiar(janelaPermitida(due), "ainda_nao_venceu");
   const aberta = +now - Date.parse(f.lastInboundAt) < 24 * H;
   if (!aberta && (!f.template.approved || !f.template.accountReady))

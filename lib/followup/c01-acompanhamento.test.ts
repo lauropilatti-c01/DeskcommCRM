@@ -232,3 +232,230 @@ describe("C01: acompanhamento só com prova, sem inferir silêncio de falha", ()
     });
   });
 });
+
+describe("C01: horário candidato da retomada respeita a janela e a espera útil", () => {
+  const cronograma = {
+    version: 1 as const,
+    kind: "cronograma" as const,
+    activated_at: "2026-10-21T11:00:00.000Z",
+    cronograma_timing: { minimum_wait_minutes: 120, window_margin_minutes: 15 },
+  };
+  const oferta = { ...cronograma, kind: "oferta" as const };
+  const iso = (local: string) => new Date(`${local}-03:00`).toISOString();
+  function noInstante(
+    last: string,
+    now: string,
+    kind: "cronograma" | "oferta" = "cronograma",
+    anchor = last,
+  ) {
+    const at = new Date(iso(now));
+    const f = fatos({
+      lastInboundAt: iso(last),
+      anchor: { kind, at: iso(anchor), delivered: true },
+    });
+    f.purchase = { ...f.purchase!, checkedAt: at.toISOString() };
+    return { f, at };
+  }
+
+  it.each([
+    ["2026-10-22T22:54:00", "2026-10-23T08:00:00", "2026-10-23T20:59:00"],
+    ["2026-10-22T10:00:00", "2026-10-22T12:00:00", "2026-10-23T09:00:00"],
+    ["2026-10-22T08:00:00", "2026-10-22T10:00:00", "2026-10-22T20:59:00"],
+    ["2026-10-22T09:00:00", "2026-10-23T07:59:00", "2026-10-23T08:00:00"],
+    ["2026-10-22T21:00:00", "2026-10-23T08:00:00", "2026-10-23T20:00:00"],
+  ])("entrada %s agenda no último minuto útil %s → %s", (last, now, expected) => {
+    const { f, at } = noInstante(last, now);
+    expect(avaliarAcompanhamento(cronograma, f, at)).toEqual({
+      kind: "defer",
+      reason: "ainda_nao_venceu",
+      until: iso(expected),
+    });
+  });
+
+  it.each([
+    ["2026-10-22T22:54:00", "2026-10-23T20:59:00"],
+    ["2026-10-22T09:00:00", "2026-10-23T08:00:00"],
+    ["2026-10-22T10:00:00", "2026-10-23T09:10:00"],
+  ])("envia dentro da faixa e da margem, incluindo atraso seguro: %s / %s", (last, now) => {
+    const { f, at } = noInstante(last, now);
+    expect(avaliarAcompanhamento(cronograma, f, at)).toEqual({
+      kind: "send",
+      touch: 1,
+      transport: "text",
+    });
+  });
+
+  it.each([
+    ["2026-10-22T22:54:00", "2026-10-23T21:00:00"],
+    ["2026-10-22T22:54:00", "2026-10-23T21:05:00"],
+    ["2026-10-22T10:00:00", "2026-10-23T09:45:00"],
+    ["2026-10-22T10:00:00", "2026-10-23T10:01:00"],
+  ])("atraso %s / %s não vira texto fora da janela nem nova tentativa amanhã", (last, now) => {
+    const { f, at } = noInstante(last, now);
+    f.template = { approved: true, accountReady: true };
+    expect(avaliarAcompanhamento(cronograma, f, at)).toEqual({
+      kind: "blocked",
+      reason: "janela_do_cronograma_perdida",
+    });
+  });
+
+  it("não antecipa logo após a entrega só porque a janela do contato está fechando", () => {
+    const { f, at } = noInstante(
+      "2026-10-22T08:00:00",
+      "2026-10-22T20:30:00",
+      "cronograma",
+      "2026-10-22T20:00:00",
+    );
+    expect(avaliarAcompanhamento(cronograma, f, at)).toEqual({
+      kind: "blocked",
+      reason: "sem_intervalo_util_para_retomada",
+    });
+  });
+
+  it("mínimo útil também conta do cliente e os parâmetros são candidatos explícitos", () => {
+    const { f, at } = noInstante("2026-10-22T08:00:00", "2026-10-22T20:30:00");
+    expect(
+      avaliarAcompanhamento(
+        {
+          ...cronograma,
+          cronograma_timing: { minimum_wait_minutes: 14 * 60, window_margin_minutes: 15 },
+        },
+        f,
+        at,
+      ),
+    ).toEqual({
+      kind: "blocked",
+      reason: "sem_intervalo_util_para_retomada",
+    });
+    const normal = noInstante("2026-10-22T10:00:00", "2026-10-22T12:00:00");
+    expect(
+      avaliarAcompanhamento(
+        {
+          ...cronograma,
+          cronograma_timing: { minimum_wait_minutes: 120, window_margin_minutes: 120 },
+        },
+        normal.f,
+        normal.at,
+      ),
+    ).toMatchObject({
+      kind: "defer",
+      until: iso("2026-10-22T20:59:00"),
+    });
+  });
+
+  it("resposta nova e retorno combinado cancelam antes de recalcular o horário", () => {
+    const { f, at } = noInstante("2026-10-22T22:54:00", "2026-10-23T20:59:00");
+    expect(
+      avaliarAcompanhamento(cronograma, { ...f, lastInboundAt: iso("2026-10-23T20:58:00") }, at),
+    ).toEqual({ kind: "cancel", reason: "respondeu" });
+    for (const c of [cronograma, oferta])
+      expect(avaliarAcompanhamento(c, { ...f, callbackPending: true }, at)).toEqual({
+        kind: "cancel",
+        reason: "retorno_combinado_tem_prioridade",
+      });
+  });
+
+  it.each([
+    ["2026-10-22T20:54:00", "2026-10-22T22:54:00", "2026-10-23T08:00:00"],
+    ["2026-10-22T22:54:00", "2026-10-23T00:54:00", "2026-10-23T08:00:00"],
+    ["2026-10-22T06:30:00", "2026-10-22T08:29:00", "2026-10-22T08:30:00"],
+  ])("oferta de %s mantém 2h; se for noite, espera %s → %s", (last, now, target) => {
+    const before = noInstante(last, now, "oferta");
+    expect(avaliarAcompanhamento(oferta, before.f, before.at)).toMatchObject({
+      kind: "defer",
+      until: iso(target),
+    });
+    const due = noInstante(last, target, "oferta");
+    expect(avaliarAcompanhamento(oferta, due.f, due.at)).toEqual({
+      kind: "send",
+      touch: 1,
+      transport: "text",
+    });
+  });
+
+  it.each([
+    ["2026-10-22T20:54:00", "2026-10-23T20:54:00", "2026-10-23T20:54:00"],
+    ["2026-10-22T22:54:00", "2026-10-23T22:54:00", "2026-10-24T08:00:00"],
+    ["2026-10-22T06:30:00", "2026-10-23T06:30:00", "2026-10-23T08:00:00"],
+  ])("D+1 de %s exige modelo em %s / %s, sem adiantar o dia", (last, nominal, target) => {
+    const due = noInstante(last, target, "oferta");
+    due.f.touches = [entregue(1, iso(last))];
+    if (nominal !== target) {
+      const earlier = noInstante(last, nominal, "oferta");
+      earlier.f.touches = due.f.touches;
+      expect(avaliarAcompanhamento(oferta, earlier.f, earlier.at)).toMatchObject({
+        kind: "defer",
+        until: iso(target),
+      });
+    }
+    expect(avaliarAcompanhamento(oferta, due.f, due.at)).toEqual({
+      kind: "blocked",
+      reason: "modelo_ou_conta_indisponivel",
+    });
+    due.f.template = { approved: true, accountReady: true };
+    expect(avaliarAcompanhamento(oferta, due.f, due.at)).toEqual({
+      kind: "send",
+      touch: 2,
+      transport: "template",
+    });
+  });
+
+  it("preserva parâmetros no schema do grafo e rejeita mínimo/margem inválidos", () => {
+    const graph = {
+      nodes: [
+        { id: "inicio", type: "trigger", label: "Início", position: { x: 0, y: 0 }, config: {} },
+        {
+          id: "fim",
+          type: "end",
+          label: "Fim",
+          position: { x: 0, y: 100 },
+          config: { outcome: "custom", note: "Sem envio" },
+        },
+      ],
+      edges: [{ id: "e", source: "inicio", target: "fim", condition: { type: "always" } }],
+      settings: { c01_acompanhamento: cronograma },
+    };
+    expect(flowGraphSchema.parse(graph).settings?.c01_acompanhamento).toEqual(cronograma);
+    for (const timing of [
+      { minimum_wait_minutes: 0, window_margin_minutes: 15 },
+      { minimum_wait_minutes: 120, window_margin_minutes: 0 },
+      { minimum_wait_minutes: 120, window_margin_minutes: 24 * 60 },
+    ])
+      expect(
+        flowGraphSchema.safeParse({
+          ...graph,
+          settings: { c01_acompanhamento: { ...cronograma, cronograma_timing: timing } },
+        }).success,
+      ).toBe(false);
+  });
+
+  it("não comprime a oferta de 2h para o fim do expediente", () => {
+    const { f, at } = noInstante("2026-10-22T20:54:00", "2026-10-22T20:59:00", "oferta");
+    expect(avaliarAcompanhamento(oferta, f, at)).toEqual({
+      kind: "defer",
+      reason: "ainda_nao_venceu",
+      until: iso("2026-10-23T08:00:00"),
+    });
+  });
+
+  it.each([
+    [3, 2, "2026-10-25T20:54:00"],
+    [7, 3, "2026-10-29T20:54:00"],
+  ] as const)("D+%s conserva o intervalo, exige modelo e conta apta", (_day, previous, target) => {
+    const { f, at } = noInstante("2026-10-22T20:54:00", target, "oferta");
+    f.touches = Array.from({ length: previous }, (_, i) =>
+      entregue(i + 1, iso("2026-10-22T20:54:00")),
+    );
+    for (const template of [
+      { approved: false, accountReady: true },
+      { approved: true, accountReady: false },
+    ])
+      expect(avaliarAcompanhamento(oferta, { ...f, template }, at)).toEqual({
+        kind: "blocked",
+        reason: "modelo_ou_conta_indisponivel",
+      });
+    expect(
+      avaliarAcompanhamento(oferta, { ...f, template: { approved: true, accountReady: true } }, at),
+    ).toEqual({ kind: "send", touch: previous + 1, transport: "template" });
+  });
+});
