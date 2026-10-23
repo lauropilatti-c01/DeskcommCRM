@@ -58,11 +58,13 @@ existente fecha o negócio no INSERT, e a dispensa de campos da captação não 
 contornar esse efeito. Encerramento e movimento existentes consomem a mesma
 validação de domínio.
 
-**Limite material:** esta candidata não contém escritor financeiro autenticado.
-Logo, Ganho nos funis protegidos fica indisponível até esse caminho ser concluído
-e provado. Não é autorização para desligar o campo obrigatório. Não foi criado
-um atalho por actor, segredo no corpo ou booleano de confiança. O sincronizador
-observacional de compras não vira escritor por causa desta mudança.
+**Limite material:** o [núcleo financeiro candidato](compra-verificada-2210.md)
+foi acrescentado depois desta primeira frente, com autenticação própria e prova
+transacional local. Continua sem rota, sem adaptador Guru/boleto validado e sem
+liberação. Logo, Ganho nos funis protegidos fica indisponível pelos caminhos
+genéricos. Não é autorização para desligar o campo obrigatório. Não foi criado
+um atalho por actor ou booleano de confiança. O sincronizador observacional de
+compras não vira escritor por causa desta mudança.
 
 Estas são proteções dos caminhos de aplicação cobertos, não uma política nova do
 Postgres contra escrita SQL direta. Acesso privilegiado ao banco, importações ou
@@ -111,7 +113,8 @@ A sessão principal atualiza `C01.md` e o inventário global, incluindo:
 - gravação: recibo obrigatório de `fn_lead_anotar_campos`;
 - financeiro: reserva da chave, recusas distintas, validação compartilhada antes
   de efeitos e criação direta em Ganho;
-- limite operacional: escritor financeiro ausente, candidato não publicado.
+- limite operacional: núcleo financeiro candidato, sem rota/adaptador validado,
+  ainda não publicado nem liberado.
 
 No guia, explicar que campo vazio conhecido é diferente de falha de leitura, e
 que o relato de pagamento não autoriza marcar Ganho. Mostrar a integração de
