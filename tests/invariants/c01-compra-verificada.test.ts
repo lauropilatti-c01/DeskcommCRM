@@ -931,6 +931,42 @@ describe("guarda financeira com banco real e as duas APIs", () => {
       complete: false,
     });
   });
+  it("recibo incompleto bloqueia o comprador correspondente, sem bloquear pessoa distinta", async () => {
+    const f = await readerFixture();
+    const row = {
+      id: "boleto-sem-valor",
+      org_id: f.org,
+      status: "entry_paid",
+      total_value: 100,
+      created_at: "2026-10-22T22:00:00Z",
+      customers: {
+        id: "cliente-ficticio",
+        org_id: f.org,
+        phone: "11999990002",
+        email: "outra@example.test",
+      },
+      products: { id: "produto-boleto", org_id: f.org },
+      payments: [
+        {
+          id: "parcela",
+          org_id: f.org,
+          status: "paid",
+          amount_paid: null,
+          paid_at: "2026-10-22T23:00:00Z",
+        },
+      ],
+    };
+    f.payments.push(row);
+    expect(await f.read()).toMatchObject({ status: "nao_comprou_confirmado", complete: true });
+    row.customers.phone = "11999990001";
+    row.customers.email = "pessoa@example.test";
+    expect(await f.read()).toMatchObject({
+      status: "revisao",
+      complete: false,
+      reason: "comprovante_financeiro_incompleto",
+    });
+    await untouched(f);
+  });
   it("boleto antigo com pagamento atual fica para revisão", async () => {
     const f = await readerFixture();
     f.payments.push({

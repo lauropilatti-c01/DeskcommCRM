@@ -64,13 +64,13 @@ export async function lerSituacaoFinanceira(input: {
       `select id from contacts where organization_id=$1 and not is_anonymized and is_merged_into is null and (($2::text is not null and phone_number=$2) or ($3::text is not null and email_normalized=$3))`,
       [input.organizationId, phone, email],
     );
-    if (unique.rows.length !== 1 || unique.rows[0].id !== input.contactId)
+    if (unique.rows.length !== 1 || unique.rows[0]?.id !== input.contactId)
       return answer("revisao", "identidade_compartilhada");
     const opportunities = await input.db.query(
       "select id from crm_leads where organization_id=$1 and contact_id=$2 and status='open'",
       [input.organizationId, input.contactId],
     );
-    if (opportunities.rows.length !== 1 || opportunities.rows[0].id !== input.leadId)
+    if (opportunities.rows.length !== 1 || opportunities.rows[0]?.id !== input.leadId)
       return answer("revisao", "oportunidade_encerrada_ou_ambigua");
     const from = new Date(row.created_at);
     if (!Number.isFinite(from.getTime()) || from > input.now)
@@ -84,7 +84,8 @@ export async function lerSituacaoFinanceira(input: {
           p.crmProductKey === input.productKey &&
           p.crmOfferKey === row.custom_fields?.plano_oferecido,
       );
-      if (maps.length !== 1) return answer("revisao", "produto_ou_oferta_sem_mapa_exato");
+      const map = maps.length === 1 ? maps[0] : undefined;
+      if (!map) return answer("revisao", "produto_ou_oferta_sem_mapa_exato");
       const records = await criarFonteFinanceira(cfg).scan(from, input.now, signal);
       for (const r of records) {
         const pm = !!phone && phone === r.phone,
@@ -95,16 +96,16 @@ export async function lerSituacaoFinanceira(input: {
            and (($2::text is not null and phone_number=$2) or ($3::text is not null and email_normalized=$3))`,
           [input.organizationId, r.phone, r.email],
         );
-        if (identities.rows.length !== 1 || identities.rows[0].id !== input.contactId)
+        if (identities.rows.length !== 1 || identities.rows[0]?.id !== input.contactId)
           return answer("revisao", "identificadores_apontam_para_pessoas_diferentes");
         if ((phone && r.phone && !pm) || (email && r.email && !em))
           return answer("revisao", "identificadores_financeiros_conflitantes");
-        if (r.productId !== maps[0].productId) continue;
-        if (r.offerId !== maps[0].offerId) return answer("revisao", "oferta_financeira_divergente");
+        if (r.productId !== map.productId) continue;
+        if (r.offerId !== map.offerId) return answer("revisao", "oferta_financeira_divergente");
         if (Date.parse(r.orderedAt) < from.getTime())
           return answer("revisao", "pedido_anterior_a_oportunidade");
         if (r.status === "review")
-          return answer("revisao", "pagamento_parcial_reembolsado_ou_ambiguo");
+          return answer("revisao", r.reviewReason ?? "pagamento_parcial_reembolsado_ou_ambiguo");
         if (r.status === "paid") paid = true;
       }
       references.push(
