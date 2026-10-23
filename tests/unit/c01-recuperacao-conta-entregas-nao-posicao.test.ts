@@ -362,7 +362,7 @@ describe("(C01) a ligação no turno", () => {
     expect(FONTE).toMatch(
       // (rodada 5) A contagem é por chave: `contaNoTeto` (ver `c01-recibo-retomado-conta-uma-vez`).
       // (-c01.3, rodada 3) Entre o envio e a contagem, a evidência de resposta.
-      /const falhada = falhadas\[0\];\s*const origemOferta = !preview && leadId && envio\.body && !opcoes\?\.fraseDeEspera\s*\? await origemDaOfertaEnviadaC01\(pool, tenantId, leadId, envio\.body, ofertasConsultadasC01\) : undefined;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, \.\.\.\(origemOferta \? \{ c01Origin: origemOferta \} : \{\}\), seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
+      /const falhada = falhadas\[0\];\s*const origemOferta = !preview && leadId && envio\.body && !opcoes\?\.fraseDeEspera\s*\? await origemDaOfertaEnviadaC01\(pool, tenantId, leadId, envio\.body, ofertasConsultadasC01\) : undefined;\s*const origemVideo = !origemOferta && !preview && leadId && !opcoes\?\.fraseDeEspera\s*\? await origemDoVideoEnviadoC01\(pool, tenantId, leadId, input\.conversationId, envio\.body \?\? '', envio\.media, videosConsultadosC01\) : undefined;\s*const origemC01 = origemOferta \?\? origemVideo;\s*const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, \.\.\.\(origemC01 \? \{ c01Origin: origemC01 \} : \{\}\), seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\s*if \(resultado\.kind !== 'already_sent'\) \{\s*if \(falhada === undefined\) posicao \+= 1;\s*else if \(await posicaoFalhadaFoiOcupada\(pool, \{ tenantId, jobId: liveJob\(\)\.id, \.\.\.falhada \}\)\) \{\s*falhadas\.shift\(\);\s*if \(falhada\.seq > posicao\) posicao = falhada\.seq;\s*\}\s*if \(contaNoTeto\(resultado\)\) seq \+= 1;\s*\}/,
     );
     expect(FONTE.match(/posicao \+= 1/g)).toHaveLength(1);
     expect(FONTE.match(/seq \+= 1/g)).toHaveLength(1);
@@ -399,9 +399,16 @@ describe("(C01) a ligação no turno", () => {
     // (-c01.3, rodada 3) A evidência é marcada logo depois do aceite do canal, antes de
     // qualquer outra espera (ver `tests/invariants/c01-aceite-antes-da-consulta.test.ts`).
     expect(FONTE).toMatch(
-      /const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, \.\.\.\(origemOferta \? \{ c01Origin: origemOferta \} : \{\}\), seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\n/,
+      /const resultado = await liveChannel\(\)\.send\(\{ \.\.\.envio, \.\.\.\(origemC01 \? \{ c01Origin: origemC01 \} : \{\}\), seq: falhada\?\.seq \?\? posicao \+ 1 \}\);\n(?: {4}\/\/.*\n)* {4}registrarRespostaAoLead\(resultado\.kind\);\n/,
     );
-    expect(FONTE.match(/registrarRespostaAoLead\(/g)).toHaveLength(2);
+    // T5 pode confirmar o recibo já existente sem um segundo envio físico.
+    // Só o resultado validado do helper entra aqui; não um "sent" inventado.
+    expect(FONTE).toMatch(
+      /if \(!finalBody\) \{\s*const prior = reciboDaMatriculaSuprimida\(matricula\);\s*registrarRespostaAoLead\(prior\.kind\);\s*return prior;\s*\}/,
+    );
+    expect(FONTE.match(/registrarRespostaAoLead\(resultado\.kind\)/g)).toHaveLength(2);
+    expect(FONTE.match(/registrarRespostaAoLead\(prior\.kind\)/g)).toHaveLength(1);
+    expect(FONTE.match(/registrarRespostaAoLead\(/g)).toHaveLength(3);
     expect(FONTE.match(/leadTemResposta = true/g)).toHaveLength(1);
     // (-c01.3) O quarto `maxSendsPerTurn - seq` é o que resta para a trava de texto longo.
     expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(4);

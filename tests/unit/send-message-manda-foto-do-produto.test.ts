@@ -43,7 +43,11 @@ describe("send_message leva a foto do produto", () => {
   });
 
   it("a foto sai de DENTRO do `send` do guardrail, com o corpo que a cadeia aprovou", () => {
-    const send = corpoDoSend.slice(corpoDoSend.indexOf("send: (finalBody: string) =>"));
+    const inicio = corpoDoSend.indexOf("send: async (finalBody: string, dbUnderLock: Queryable) =>");
+    const fim = corpoDoSend.indexOf("let chain = await cadeiaDeEnvio(", inicio);
+    expect(inicio).toBeGreaterThan(-1);
+    expect(fim).toBeGreaterThan(inicio);
+    const send = corpoDoSend.slice(inicio, fim);
     expect(send).toContain("enviarComFotos(finalBody, fotosDoProduto,");
   });
 });

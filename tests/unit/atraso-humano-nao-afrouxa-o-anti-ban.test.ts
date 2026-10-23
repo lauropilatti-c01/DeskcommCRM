@@ -121,6 +121,18 @@ const FONTE_INBOUND = fs.readFileSync(
   "utf8",
 );
 
+function corpoDoCallback(i: number): string {
+  expect(i).toBeGreaterThan(-1);
+  const abre = FONTE_INBOUND.indexOf("{", i);
+  let fim = abre;
+  for (let nivel = 0; fim < FONTE_INBOUND.length; fim++) {
+    if (FONTE_INBOUND[fim] === "{") nivel++;
+    else if (FONTE_INBOUND[fim] === "}" && --nivel === 0) break;
+  }
+  expect(fim).toBeLessThan(FONTE_INBOUND.length);
+  return FONTE_INBOUND.slice(i, fim + 1);
+}
+
 describe("fiação — o \"digitando…\" cobre o turno inteiro até a 1ª bolha", () => {
   it("acende no INÍCIO do trabalho (antes dos auxiliares e do modelo), só em turno que fala com o lead", () => {
     // Medido numa VPS real: 67s entre a mensagem do lead e a resposta. O sinal
@@ -143,10 +155,22 @@ describe("fiação — o \"digitando…\" cobre o turno inteiro até a 1ª bolha
 
   it("para de renovar antes de toda bolha sair e no `finally` do turno", () => {
     // Renovar depois da mensagem leria como uma segunda resposta a caminho.
-    const envios = FONTE_INBOUND.match(/send: \(finalBody: string\) => \{\n\s*pararDigitando\(\);/g) ?? [];
-    const todos = FONTE_INBOUND.match(/send: \(finalBody: string\) => \{/g) ?? [];
-    expect(todos.length).toBeGreaterThan(0);
-    expect(envios.length).toBe(todos.length);
+    // Template, mensagem (agora async, com T5) e aviso final: nenhum pode sumir
+    // da sonda só por passar a receber a conexão que já está sob lock.
+    const todos = [...FONTE_INBOUND.matchAll(/send: (?:async )?\(finalBody: string(?:, dbUnderLock: Queryable)?\) => \{/g)];
+    expect(todos.map((m) => m[0])).toEqual([
+      "send: (finalBody: string) => {",
+      "send: async (finalBody: string, dbUnderLock: Queryable) => {",
+      "send: (finalBody: string) => {",
+    ]);
+    for (const envio of todos) {
+      const callback = corpoDoCallback(envio.index);
+      const parar = callback.indexOf("pararDigitando();");
+      const canal = callback.indexOf("enviarPeloCanal(");
+      expect(parar).toBeGreaterThan(0);
+      expect(canal).toBeGreaterThan(parar);
+      expect(callback.slice(0, parar)).not.toMatch(/enviarPeloCanal\(|enviarComFotos\(|enviarVideoComLegenda\(|enviarSoAsConhecidas\(|sendInBubbles\(|\.send\(/);
+    }
     expect(FONTE_INBOUND).toMatch(/\} finally \{\n\s*\/\/[^\n]*\n\s*pararDigitando\(\);\n\s*await mcpCleanup\?\.\(\);/);
   });
 
@@ -184,18 +208,12 @@ describe("fiação — a espera humana é paga UMA vez por turno", () => {
     // O do `send_message` — o `send_template`, antes dele, tem um callback homônimo.
     const doSendMessage = FONTE_INBOUND.indexOf("send_message: tool({");
     expect(doSendMessage).toBeGreaterThan(-1);
-    const i = FONTE_INBOUND.indexOf("send: (finalBody: string) =>", doSendMessage);
+    const i = FONTE_INBOUND.indexOf("send: async (finalBody: string, dbUnderLock: Queryable) =>", doSendMessage);
     expect(i).toBeGreaterThan(-1);
     // (C01) A janela é o callback inteiro, pelas chaves, e não 2.400 caracteres fixos:
     // a identidade do envio no ledger e a retomada (C54) acrescentam linhas antes do
     // `sendInBubbles`. As proibições abaixo passam a valer para o callback todo.
-    const abre = FONTE_INBOUND.indexOf("{", i);
-    let fim = abre;
-    for (let nivel = 0; fim < FONTE_INBOUND.length; fim++) {
-      if (FONTE_INBOUND[fim] === "{") nivel++;
-      else if (FONTE_INBOUND[fim] === "}" && --nivel === 0) break;
-    }
-    const janela = FONTE_INBOUND.slice(i, fim + 1);
+    const janela = corpoDoCallback(i);
     expect(janela.length).toBeGreaterThan(500);
     // Os dois convivem: o jitter é throttle anti-ban entre mensagens físicas, o
     // atraso humano é a pausa do turno. Perder o primeiro é afrouxar o anti-ban.

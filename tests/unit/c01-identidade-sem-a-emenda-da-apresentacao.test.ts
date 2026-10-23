@@ -635,7 +635,7 @@ describe("(C01) a ligação no código", () => {
     );
   });
 
-  it("os fatos da cadeia que tornam a correção necessária — e a assinatura que ela NÃO mudou", () => {
+  it("os fatos da cadeia e o corpo final preservado junto da conexão sob lock", () => {
     // A emenda: o template na frente do corpo, separado por linha em branco.
     expect(CADEIA).toMatch(
       /return \{ pass: true, amendBody: prependDisclosure\(ctx\.body, template\) \};/,
@@ -647,8 +647,9 @@ describe("(C01) a ligação no código", () => {
     expect(CADEIA).toMatch(
       /const isFirstOutbound =\s*disclosure !== null \|\| args\.lgpd !== undefined\s*\? \(await countPriorAcceptedSends\(client, args\.tenantId, args\.leadId\)\) === 0\s*: false;/,
     );
-    // O `send` da cadeia recebe só o corpo final: a identidade é calculada por quem o monta.
-    expect(CADEIA).toMatch(/^  send: \(body: string\) => Promise<ChannelSendResult>;$/m);
-    expect(CADEIA).toMatch(/const outcome = await args\.send\(ctx\.body\);/);
+    // O `send` recebe o corpo final e a conexão sob lock (T5), nunca a identidade pronta.
+    // A identidade continua sendo calculada por quem monta o envio.
+    expect(CADEIA).toMatch(/^  send: \(body: string, dbUnderLock: Queryable\) => Promise<ChannelSendResult>;$/m);
+    expect(CADEIA).toMatch(/const outcome = await args\.send\(ctx\.body, client\);/);
   });
 });
