@@ -1,0 +1,1 @@
+A5 C01: resolvedor opt-in dos filtros de escolaridade/empresa/inscrição na busca de vídeos do canal. Usa o card confiável do contato do turno, conserva o isolamento e permite somente o fallback específico de inscrição após sucesso vazio. OFF por padrão, sem DDL ou mudança de prompt. Prova: docs/c01/filtros-do-card.md.

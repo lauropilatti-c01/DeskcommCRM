@@ -24,6 +24,7 @@
 import { z } from "zod";
 
 import { abrirAcesso } from "@/lib/external-db/acesso";
+import { resolverPerfilVideosC01 } from "@/lib/external-db/c01-perfil-do-card";
 import {
   converterValoresDosFiltros,
   erroDeValorDoBanco,
@@ -456,7 +457,7 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
           "Se o termo exato não existir, tente uma parte dele (ex.: \"CB\") para o agente ver as mais parecidas.",
       };
     }
-    const filtros = filtrosBrutos;
+    let filtros: FiltroDeLeitura[] = filtrosBrutos;
     if (filtros.length > acesso.conexao.maxFilters) {
       return {
         erro: "limite_de_filtros",
@@ -532,6 +533,15 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
       };
     }
 
+    const perfil = await resolverPerfilVideosC01(ctx, acesso.conexao.id, schema!, tabela, filtros);
+    if ('erro' in perfil) return perfil;
+    if (perfil.ativo) {
+      filtros = perfil.filtros;
+      if (filtros.length > acesso.conexao.maxFilters) return {
+        erro: "limite_de_filtros", mensagem: "Os filtros obrigatórios do perfil excedem o limite desta conexão. Não retire o perfil.",
+      };
+    }
+
     // C01: o valor do filtro é conferido e convertido pelo tipo da coluna ("Não" numa
     // coluna boolean vira `false`; "abc" numa de número volta como `valor_invalido`).
     // O filtro do cliente (autor, 1.86) não passa pela conversão: vem do contato.
@@ -552,15 +562,28 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
       filtros: [...valores.filtros, ...(filtroDoCliente ? [filtroDoCliente] : [])],
       ...(input.ordem ? { ordem: { coluna: input.ordem.coluna, desc: input.ordem.desc ?? false } } : {}),
       // O teto é o da conexão, não o que o modelo pediu.
-      limite: Math.min(input.limite, acesso.conexao.maxRows),
+      limite: Math.min(input.limite, acesso.conexao.maxRows, perfil.ativo ? 20 : Infinity),
       offset: 0,
     };
 
     let resultado;
+    let ampliouInscricao = false;
     try {
       resultado = await acesso.dialeto.lerTabela(pedido, permitidas, {
         limiteMax: acesso.conexao.maxRows,
       });
+      // Exceção restrita ao catálogo de vídeos aprovado: só após sucesso vazio,
+      // retirar a preferência de inscrito. Assunto, perfil e filtro do cliente ficam.
+      if (perfil.ativo && perfil.inscrito && resultado.linhas.length === 0) {
+        const semPreferencia = pedido.filtros.filter((f) =>
+          !(f.coluna === "so_inscrito_tp2026" && f.operador === "eq" && f.valor === true));
+        // Nunca retirar o filtro de isolamento, mesmo se uma conexão o nomear igual.
+        if (filtroDoCliente && !semPreferencia.includes(filtroDoCliente)) semPreferencia.push(filtroDoCliente);
+        resultado = await acesso.dialeto.lerTabela({ ...pedido, filtros: semPreferencia }, permitidas, {
+          limiteMax: acesso.conexao.maxRows,
+        });
+        ampliouInscricao = true;
+      }
     } catch (err) {
       if (err instanceof FonteNaoLiberadaError) return tabelaNaoAchada(acesso.conexao);
       if (err instanceof LeituraInvalidaError) {
@@ -614,6 +637,7 @@ export const crmQueryExternalData: McpToolDefinition<typeof consultarInputShape>
       linhas,
       linhas_devolvidas: linhas.length,
       limite_aplicado: resultado.limite,
+      ...(perfil.ativo ? { perfil_do_card: { aplicado: true, ampliou_inscricao: ampliouInscricao } } : {}),
       ...(truncadoPorBytes ? { truncado: true } : {}),
       ...(filtroSemResultado
         ? {
