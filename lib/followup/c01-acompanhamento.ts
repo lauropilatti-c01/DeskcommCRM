@@ -122,10 +122,11 @@ function ultimoMinutoPermitido(at: number): number {
 function horarioDoCronograma(config: ConfigAcompanhamento, f: FatosAcompanhamento) {
   const timing = config.cronograma_timing ?? HORARIO_CRONOGRAMA_CANDIDATO;
   const inbound = Date.parse(f.lastInboundAt!);
+  const tetoEm = inbound + 23 * H;
   const encerraEm = inbound + 24 * H - timing.window_margin_minutes * MIN;
-  const at = ultimoMinutoPermitido(Math.min(inbound + 23 * H, encerraEm - 1));
+  const at = ultimoMinutoPermitido(Math.min(tetoEm, encerraEm - 1));
   const minimoEm = Math.max(inbound, Date.parse(f.anchor.at)) + timing.minimum_wait_minutes * MIN;
-  return { at, minimoEm, encerraEm };
+  return { at, minimoEm, tetoEm, encerraEm };
 }
 
 function adiar(at: number, reason: string): DecisaoAcompanhamento {
@@ -182,8 +183,13 @@ export function avaliarAcompanhamento(
     if (horario.at < horario.minimoEm) return bloqueio("sem_intervalo_util_para_retomada");
     if (+now < horario.at) return adiar(horario.at, "ainda_nao_venceu");
     // Um worker atrasado não transforma a retomada interna em campanha de modelo.
+    // O teto de 23 h vale também na execução, com precisão de milissegundos.
     // Se a próxima hora permitida perdeu a margem, interromper sem novo disparo.
-    if (+now >= horario.encerraEm || janelaPermitida(+now) >= horario.encerraEm)
+    if (
+      +now > horario.tetoEm ||
+      +now >= horario.encerraEm ||
+      janelaPermitida(+now) >= horario.encerraEm
+    )
       return bloqueio("janela_do_cronograma_perdida");
   }
 

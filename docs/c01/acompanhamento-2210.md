@@ -95,6 +95,8 @@ O alvo é o último minuto entre 08h e 21h, não posterior à última entrada +2
 e estritamente anterior à última entrada +24h menos a margem. A resolução é
 um minuto: 20h59 é o último alvo do expediente. Se esse alvo não respeitar o
 mínimo após as duas referências, a retomada fica bloqueada; não há envio imediato.
+O teto de 23 h também é obrigatório na execução: o instante exato é permitido,
+mas qualquer atraso além dele bloqueia, sem tolerância adicional.
 
 | Última entrada, Brasília | Alvo candidato do cronograma |
 |---|---|
@@ -107,7 +109,10 @@ mínimo após as duas referências, a retomada fica bloqueada; não há envio im
 O horário é reavaliado na execução. No caso de 22h54, um worker que só chegar
 às 21h do dia seguinte bloqueia com `janela_do_cronograma_perdida`, sem reagendar
 para a manhã e sem trocar automaticamente para modelo. No caso de 10h, executar
-às 9h10 ainda cabe; às 9h45 já entrou na margem e bloqueia. Uma entrega de
+às 9h do dia seguinte são 23 h exatas e ainda cabe; às 9h00min00,001s,
+às 9h10 ou às 9h44 bloqueia, mesmo com modelo aprovado e margem restante.
+A precisão do teto conserva os milissegundos da entrada; a resolução de um
+minuto aplica-se apenas ao agendamento. Uma entrega de
 cronograma às 20h para alguém cuja última entrada foi às 8h não permite usar
 20h59: seriam apenas 59 minutos após a entrega, abaixo do mínimo candidato.
 
@@ -151,11 +156,19 @@ mensagens e preservação da política no painel. ESLint dos arquivos alterados
 passou. Typecheck e portões completos ficam para a integração da candidata; estes
 resultados não provam comportamento no WhatsApp de produção.
 
-No ajuste de horário das 23h: **271 testes em cinco arquivos passaram**, incluindo
+Na primeira revisão do ajuste de horário (`4618dc2a3`): **271 testes em cinco arquivos passaram**, incluindo
 44 decisões puras, o consumidor no motor, o sink, schema e publicação. ESLint dos
 três arquivos TypeScript alterados passou. Os avisos existentes do Vite sobre o
 carregador de configuração e do Node sobre localStorage não foram tratados como
 falha nem alterados nesta frente. Sem testes pagos ou alterações em produção.
+
+A revisão independente encontrou que o teto de 23 h limitava só o alvo e
+ainda aceitava uma execução às 9h10 para entrada às 10h. A correção foi feita
+com quatro contraprovas falhando antes e **50 testes do arquivo afetado passando
+depois**: inclui 23 h exatas, um milissegundo depois e horários 9h10/9h44.
+ESLint dos dois arquivos alterados passou. A suíte completa não foi repetida
+nesta correção; o portão da candidata integrada continua sendo responsabilidade
+da publicação, antes de qualquer liberação.
 
 Comando dos testes específicos:
 

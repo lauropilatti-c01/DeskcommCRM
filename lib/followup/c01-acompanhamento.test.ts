@@ -275,8 +275,10 @@ describe("C01: horário candidato da retomada respeita a janela e a espera útil
   it.each([
     ["2026-10-22T22:54:00", "2026-10-23T20:59:00"],
     ["2026-10-22T09:00:00", "2026-10-23T08:00:00"],
-    ["2026-10-22T10:00:00", "2026-10-23T09:10:00"],
-  ])("envia dentro da faixa e da margem, incluindo atraso seguro: %s / %s", (last, now) => {
+    ["2026-10-22T10:00:00", "2026-10-23T09:00:00"],
+    ["2026-10-22T10:00:00.123", "2026-10-23T09:00:00.123"],
+    ["2026-10-22T22:54:00", "2026-10-23T20:59:30"],
+  ])("envia dentro da faixa, da margem e do teto de 23 h: %s / %s", (last, now) => {
     const { f, at } = noInstante(last, now);
     expect(avaliarAcompanhamento(cronograma, f, at)).toEqual({
       kind: "send",
@@ -288,6 +290,10 @@ describe("C01: horário candidato da retomada respeita a janela e a espera útil
   it.each([
     ["2026-10-22T22:54:00", "2026-10-23T21:00:00"],
     ["2026-10-22T22:54:00", "2026-10-23T21:05:00"],
+    ["2026-10-22T10:00:00", "2026-10-23T09:00:00.001"],
+    ["2026-10-22T10:00:00.123", "2026-10-23T09:00:00.124"],
+    ["2026-10-22T10:00:00", "2026-10-23T09:10:00"],
+    ["2026-10-22T10:00:00", "2026-10-23T09:44:00"],
     ["2026-10-22T10:00:00", "2026-10-23T09:45:00"],
     ["2026-10-22T10:00:00", "2026-10-23T10:01:00"],
   ])("atraso %s / %s não vira texto fora da janela nem nova tentativa amanhã", (last, now) => {
