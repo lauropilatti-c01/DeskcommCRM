@@ -2,6 +2,7 @@ import { assertAgentOperationPg, type AgentOperationContext } from '@/lib/ai/age
 import { assertApprovedReplyPg, type ApprovedReplyContext } from '@/lib/ai/replies/delivery';
 import { assertMeetingDeliveryPg, type MeetingDeliveryContext } from '@/lib/agenda/meet-delivery';
 import type { JobClaim } from '../../queue/claim';
+import type { ChannelSendInput } from '../../channel-adapter';
 import { assertAgendaEffectPg } from '@/lib/agenda/efeito';
 import { AgendaDeferredError } from '@/lib/agenda/protecao-followup';
 import { StaleServiceBoundaryError } from '@/lib/atendimento/fronteira';
@@ -46,6 +47,7 @@ export class SendToolError extends Error {
 }
 
 export interface SendMessageInput {
+  c01Origin?: ChannelSendInput['c01Origin'];
   agentOperation?: AgentOperationContext;
   jobClaim?: JobClaim;
   tenantId: string;
@@ -213,6 +215,7 @@ export async function sendTurnMessage(
           approvedReply,
           agentOperation: input.agentOperation,
           internalMessageId: messageId,
+          ...(input.c01Origin ? { c01Origin: input.c01Origin } : {}),
         },
         corpoDoEnvio(input, idempotencyKey),
       );

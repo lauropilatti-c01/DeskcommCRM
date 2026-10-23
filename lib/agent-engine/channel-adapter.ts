@@ -16,6 +16,8 @@ import type { JobClaim } from './queue/claim';
 
 /** Uma mensagem de texto a enviar ao lead. Identidade da intenção = (jobId, seq). */
 export interface ChannelSendInput {
+  /** Origem interna autenticada; leadId aqui é a oportunidade, não o contato. */
+  c01Origin?: { kind: 'cronograma' | 'oferta'; leadId: string; productKey: string };
   agentOperation?: AgentOperationContext;
   jobClaim?: JobClaim;
   tenantId: string;

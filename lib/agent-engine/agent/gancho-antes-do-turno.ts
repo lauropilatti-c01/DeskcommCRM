@@ -484,7 +484,16 @@ export function assinaturaDoGancho(segredo: string, corpo: string, t: number): s
   return `t=${t},v1=${v1}`;
 }
 
-const itemTexto = z.object({ tipo: z.literal('texto'), texto: z.string().trim().min(1).max(4096) });
+const origemDoMaterial = z.object({
+  kind: z.enum(['cronograma', 'oferta']),
+  product_key: z.string().trim().min(1).max(200),
+}).strict().optional().catch(undefined);
+const itemTexto = z.object({
+  tipo: z.literal('texto'), texto: z.string().trim().min(1).max(4096),
+  // Metadado opcional do serviço confiável. Inválido: entrega o texto, sem
+  // gerar prova de origem. O cliente/LLM não participa deste contrato.
+  c01_origin: origemDoMaterial,
+});
 const itemInterativo = z.object({
   tipo: z.literal('interativo'),
   interactive: z.looseObject({ type: z.string().min(1) }),
@@ -627,6 +636,8 @@ type DecisaoAnotada =
       formulario: { mensagem_id: string; sent_at: string | null } | null;
       /** `max(created_at)` das entradas no momento da decisão, como texto do Postgres. */
       ate: string | null;
+      /** Negócio do pedido original: replay nunca usa outro card recém-criado. */
+      origem_lead_id?: string | null;
       /** A fonte foi um recibo opaco do piloto, conferido no pedido montado. */
       recibo_opaco?: true;
       /**
@@ -672,6 +683,7 @@ function decisaoAnotada(payload: Record<string, unknown> | null | undefined): De
         ? { mensagem_id: f.mensagem_id, sent_at: typeof f.sent_at === 'string' ? f.sent_at : null }
         : null,
     ate: typeof d.ate === 'string' ? d.ate : null,
+    origem_lead_id: z.string().uuid().safeParse(d.origem_lead_id).success ? String(d.origem_lead_id) : null,
     ...(d.recibo_opaco === true ? { recibo_opaco: true as const } : {}),
     ...(d.enviar_antes_feito === true ? { enviar_antes_feito: true as const } : {}),
   };
@@ -961,6 +973,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
     decisao = {
       situacao: 'decidido',
       resposta: chamada.resposta,
+      origem_lead_id: montado.card?.id ?? null,
       formulario: montado.formulario
         ? { mensagem_id: montado.formulario.pedido.mensagem_id, sent_at: montado.formulario.sentAt }
         : null,
@@ -1045,7 +1058,7 @@ export async function rodarGanchoAntesDoTurno(ctx: ContextoDoGancho): Promise<De
   }
   let enviadas = 0;
   for (const [i, item] of itens.entries()) {
-    const desfecho = await enviarItem(ctx, item, -(i + 1), canalInterativo === true, registrados[i] === true);
+    const desfecho = await enviarItem(ctx, item, -(i + 1), canalInterativo === true, registrados[i] === true, decisao.origem_lead_id);
     if (desfecho === 'ok') {
       enviadas += 1;
       continue;
@@ -1511,8 +1524,12 @@ async function enviarItem(
   seq: number,
   canalOficial: boolean,
   registrado: boolean,
+  origemLeadId?: string | null,
 ): Promise<DesfechoDoItem> {
   const { body, interactive } = conteudoDoItem(item);
+  const c01Origin = item.tipo === 'texto' && item.c01_origin && z.string().uuid().safeParse(origemLeadId).success
+    ? { kind: item.c01_origin.kind, leadId: origemLeadId!, productKey: item.c01_origin.product_key }
+    : undefined;
   const envio = (corpo: string, extra: { identidade?: string; interactive?: Record<string, unknown> & { type: string } }) =>
     ctx.channel.send({
       ...(ctx.agentOperation !== undefined ? { agentOperation: ctx.agentOperation } : {}),
@@ -1525,6 +1542,7 @@ async function enviarItem(
       body: corpo,
       ...extra,
       origem: ORIGEM_DO_GANCHO,
+      ...(c01Origin ? { c01Origin } : {}),
     });
   try {
     if (registrado) {
@@ -1640,7 +1658,7 @@ async function enviarAntesDoModelo(
     const desfecho: DesfechoDoItem | 'canal_sem_interativo' =
       item.tipo === 'interativo' && !registrados[i] && canalInterativo !== true
         ? 'canal_sem_interativo'
-        : await enviarItem(ctx, item, SEQ_DO_ENVIAR_ANTES - (i + 1), canalInterativo === true, registrados[i] === true);
+        : await enviarItem(ctx, item, SEQ_DO_ENVIAR_ANTES - (i + 1), canalInterativo === true, registrados[i] === true, decisao.origem_lead_id);
     if (desfecho !== 'ok') {
       ctx.log.warn('gancho antes do turno: enviar_antes parou — o turno segue para o modelo com o que saiu', {
         item: i + 1,
