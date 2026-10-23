@@ -84,6 +84,9 @@ const ENSINO_DE_ALVO: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 const agendarShape = {
+  consent_message_id: z.string().uuid().optional(),
+  consent_excerpt: z.string().min(1).max(2000).optional(),
+  offered_message_id: z.string().uuid().optional(),
   /** Preferido: o alvo é exato e a timeline nunca cai no negócio errado. */
   lead_id: z.string().uuid().optional(),
   contact_id: z.string().uuid().optional(),
@@ -120,6 +123,8 @@ export const crmScheduleFollowup: McpToolDefinition<typeof agendarShape> = {
     "Um retorno vivo por cliente: se já houver, a chamada devolve agendado=false com o motivo, " +
     "e não é erro — é para você seguir sem duplicar. Para alterar por pedido explícito, use replace_pending_id " +
     "com o ID existente e a nova data, sem cancelar primeiro. Só confirme após agendado=true. " +
+    "Na política C01, só vale confirmação da mensagem atual: dia e hora únicos, ou sim à proposta imediatamente anterior. " +
+    "Exemplo demonstrável: Posso te chamar amanhã às 10h? Se a ferramenta recusar, esclareça sem prometer. " +
     "ISTO NÃO É COMPROMISSO COM HORA MARCADA: é decisão interna nossa de voltar a falar. O cliente " +
     "não fica sabendo, e nada é reservado na agenda de ninguém. Se ele ESCOLHEU um horário para ser " +
     "atendido, é outra coisa — use a ferramenta de marcar compromisso, se você tiver uma; se não " +
@@ -162,6 +167,7 @@ export const crmScheduleFollowup: McpToolDefinition<typeof agendarShape> = {
 
     const resultado = await agendaRetornoNoCrm(
       {
+        sourceJobId: ctx.sourceJobId,
         admin: ctx.supabase,
         orgId: ctx.organizationId,
         actor: ctx.actor,
@@ -170,6 +176,7 @@ export const crmScheduleFollowup: McpToolDefinition<typeof agendarShape> = {
       },
       { leadId: input.lead_id ?? null, contactId: input.contact_id ?? null },
       {
+        consentimento: input,
         substituirRetornoId: input.replace_pending_id,
         motivo: input.reason,
         prometidoPara,

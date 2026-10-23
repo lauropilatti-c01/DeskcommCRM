@@ -981,9 +981,9 @@ export function validateFlowForPublish(
 ): PublishValidationResult {
   const { nodes, edges } = graph;
   const errors: PublishValidationError[] = [];
-  // Esta candidata conhece a política, mas ainda não tem leitor financeiro
-  // autoritativo aplicado. A existência de um rascunho não permite publicar.
-  if (graph.settings?.c01_acompanhamento) errors.push({
+  // Rascunho permanece desligado. O wrapper de publicação verifica fontes,
+  // mapas e origem no servidor antes do RPC; o frontend não atesta prontidão.
+  if (graph.settings?.c01_acompanhamento && !graph.settings.c01_acompanhamento.activated_at) errors.push({
     node_id: null, code: 'c01_integracao_pendente',
     message: 'Acompanhamento C01 bloqueado: faltam integração de compras aplicada e prova da origem e das entregas. Mantenha este fluxo pausado.',
   });

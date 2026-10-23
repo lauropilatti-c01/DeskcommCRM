@@ -1,3 +1,4 @@
+import type { ConsentimentoRetornoC01, ProvaRetornoC01 } from "./c01-retorno";
 /**
  * O RETORNO AGENDADO — a regra, num lugar só.
  *
@@ -42,6 +43,10 @@ export type SituacaoDoRetorno = "agendado" | "disparado" | "nao_disparado" | "ca
 
 /** O payload que viaja no `cron_jobs` e chega ao turno futuro do agente. */
 export interface PayloadDoRetorno {
+  scope?: "commercial";
+  lead_id?: string;
+  product_key?: string;
+  c01_callback?: ProvaRetornoC01;
   /** Por que voltar a falar — vai ao turno futuro e à timeline. Sem PII nova. */
   reason: string;
   /** O que foi prometido ao cliente, nas palavras do agente. */
@@ -75,6 +80,7 @@ export interface RetornoAgendado {
  * Supabase, e para os testes da REGRA não precisarem de Postgres.
  */
 export interface RetornoDb {
+  cederCadenciaComercial?(orgId: string, contactId: string): Promise<void>;
   /** Os adaptadores reais serializam a decisão inteira por organização/contato. */
   comExclusividade?<T>(
     orgId: string, contactId: string, executar: (db: RetornoDb) => Promise<T>,
@@ -164,6 +170,8 @@ export function validaInstanteDoRetorno(
 // ---------------------------------------------------------------------------
 
 export interface AgendaRetornoInput {
+  consentimento?: ConsentimentoRetornoC01;
+  comercial?: Pick<PayloadDoRetorno, "scope" | "lead_id" | "product_key" | "c01_callback">;
   /** Só em pedido explícito de mudança; nunca cancelar e criar em duas chamadas. */
   substituirRetornoId?: string;
   /** Autor confiável do runtime; nunca argumento do modelo. */
@@ -237,6 +245,7 @@ export async function agendaRetorno(
     return { ok: false, codigo: "horario_nao_permitido", janela: cfg.janela };
   }
   const payload: PayloadDoRetorno = {
+    ...input.comercial,
     reason: input.motivo,
     promise: input.promessa,
     promised_at: input.prometidoPara,
@@ -247,10 +256,12 @@ export async function agendaRetorno(
   if (vivo && input.substituirRetornoId && db.reagenda) {
     const alterado = await db.reagenda(ids.orgId, vivo, { quando, payload });
     if (!alterado) return { ok: false, codigo: "retorno_alterado", janela: cfg.janela };
+    if (payload.c01_callback) await db.cederCadenciaComercial?.(ids.orgId, ids.contactId);
     return { ok: true, retorno: alterado, substituiu: vivo };
   }
   const retorno = await db.insere(ids.orgId, { contactId: ids.contactId, quando, payload });
 
+  if (payload.c01_callback) await db.cederCadenciaComercial?.(ids.orgId, ids.contactId);
   return { ok: true, retorno };
 }
 

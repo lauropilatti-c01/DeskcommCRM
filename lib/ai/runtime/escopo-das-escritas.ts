@@ -36,6 +36,7 @@ export type DonoDoCampo =
   | "contato"
   /** `conversations.contact_id`. */
   | "conversa"
+  | "mensagem"
   /** `calendar_appointments.contact_id`. */
   | "compromisso"
   /** `cron_jobs.contact_id` (retorno: `kind='at'`, `job_kind='followup_turn'`). */
@@ -94,7 +95,7 @@ export const ESCOPO_DAS_ESCRITAS: Readonly<Record<string, Readonly<Record<string
   // ---- retorno ----
   // O ID da troca é um cron do próprio contato, como no cancelamento.
   // Não é configuração: precisa provar organização, contato e tipo do job.
-  crm_schedule_followup: { lead_id: "negocio", contact_id: "contato", replace_pending_id: "retorno" },
+  crm_schedule_followup: { lead_id: "negocio", contact_id: "contato", replace_pending_id: "retorno", consent_message_id: "mensagem", offered_message_id: "mensagem" },
   crm_cancel_followup: { followup_id: "retorno" },
   crm_enroll_followup_flow: { contact_id: "contato", flow_id: "configuracao" },
 
@@ -151,6 +152,8 @@ async function campoEhDoContato(
       return id.toLowerCase() === contato.toLowerCase();
     case "conversa":
       return existeDoContato(supabase, "conversations", organizationId, contato, id);
+    case "mensagem":
+      return existeDoContato(supabase, "messages", organizationId, contato, id);
     case "compromisso":
       return existeDoContato(supabase, "calendar_appointments", organizationId, contato, id);
     case "retorno":

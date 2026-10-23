@@ -1,3 +1,4 @@
+import { conferirPublicacaoC01 } from "./c01-publicacao";
 /**
  * Publish wrapper around the SQL function fn_publish_followup_flow_version
  * (migration 0056). Mirrors lib/ai/agents/publish.ts — insert version +
@@ -14,7 +15,7 @@ export interface PublishFlowOk {
 
 export interface PublishFlowFail {
   ok: false;
-  code: "pointer_not_found" | "internal_error";
+  code: "pointer_not_found" | "internal_error" | "validation_failed";
   message: string;
 }
 
@@ -24,10 +25,13 @@ export async function publishFollowupFlowVersion(
   admin: SupabaseClient,
   params: { orgId: string; pointerId: string; graph: FlowGraph; createdBy: string },
 ): Promise<PublishFlowResult> {
+  const graph = structuredClone(params.graph);
+  const blocked = await conferirPublicacaoC01(admin, { ...params, graph });
+  if (blocked) return { ok: false, code: "validation_failed", message: blocked };
   const { data, error } = await admin.rpc("fn_publish_followup_flow_version", {
     p_org: params.orgId,
     p_pointer: params.pointerId,
-    p_graph: params.graph,
+    p_graph: graph,
     p_created_by: params.createdBy,
   });
 

@@ -88,6 +88,7 @@ const followupConfigObjectSchema = z
     flow_pointer_ids: z.array(UUID).max(20).default([]),
     send_window: followupSendWindowSchema.nullable().optional().default(null),
     callback_enabled: z.boolean().optional(),
+    c01_callback: z.boolean().optional(),
   })
   .strict();
 

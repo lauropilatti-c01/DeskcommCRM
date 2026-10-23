@@ -92,6 +92,8 @@ const diasDeRetencao = (nome: string, padrao: number) =>
 
 const schema = z.object({
   // Módulo opcional de leitura. Ausência não afeta o app nem o atendimento.
+  // Ausência mantém acompanhamentos C01 desligados; JSON validado no módulo de origem.
+  C01_ACOMPANHAMENTO_INTEGRATION: z.string().optional(),
   C01_JORNADAS_URL: z.string().optional(),
   C01_JORNADAS_SECRET: z.string().optional(),
   // Node
