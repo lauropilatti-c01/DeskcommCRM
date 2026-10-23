@@ -15,6 +15,13 @@ const configSchema = z.strictObject({
   signingKey: z.string().min(32),
   offerConnectionId: z.uuid().optional(),
   allowedKinds: z.array(z.enum(["cronograma", "oferta"])).min(1),
+  /** Opcional e OFF: só um modelo revisado, na conexão exata, sem valores de IA. */
+  callbackTemplate: z.strictObject({
+    enabled: z.boolean(),
+    connectionId: z.uuid(),
+    templateId: z.uuid(),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).optional(),
 });
 export type ConfigOrigemC01 = z.infer<typeof configSchema>;
 export function configOrigemC01(): ConfigOrigemC01 | null {

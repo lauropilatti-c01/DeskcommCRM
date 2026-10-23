@@ -4,6 +4,8 @@ import type { Queryable } from "@/lib/agent-engine/queue/queue";
 import { hashDoCorpo } from "@/lib/api/idempotency";
 import { configOrigemC01 } from "./c01-origem";
 import type { LeitorFinanceiroC01 } from "./c01-acompanhamento-fatos";
+import { resolveModeloAprovado } from "@/lib/channels/meta/resolve-modelo-followup";
+import { conferirCallbackAntesDoTurno } from "@/lib/agent-engine/agent/callback-disparo";
 
 export const JANELA_RETORNO_C01 = {
   timezone: "America/Sao_Paulo",
@@ -85,6 +87,12 @@ const proofSchema = z.strictObject({
   offered_hash: z.string().nullable(),
   consented_at: z.iso.datetime(),
   promised_at: z.iso.datetime(),
+  callback_agent_id: z.uuid().optional(),
+  template: z.strictObject({
+    connection_id: z.uuid(),
+    template_id: z.uuid(),
+    content_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).optional(),
   signature: z.string().regex(/^[a-f0-9]{64}$/),
 });
 export type ProvaRetornoC01 = z.infer<typeof proofSchema>;
@@ -96,6 +104,7 @@ export async function prepararRetornoComercialC01(
     organizationId: string;
     contactId: string;
     leadId?: string | null;
+    agentId?: string | null;
     sourceJobId?: string;
     promisedAt: string;
     consent: ConsentimentoRetornoC01;
@@ -192,7 +201,8 @@ export async function prepararRetornoComercialC01(
   );
   if (!promised || promised !== new Date(input.promisedAt).toISOString())
     throw new Error("c01_callback_time_not_confirmed");
-  if (Date.parse(promised) - +new Date(message.sent_at) >= 24 * 3600000)
+  const requiresTemplate = Date.parse(promised) - +new Date(message.sent_at) >= 24 * 3600000;
+  if (requiresTemplate && !cfg.callbackTemplate?.enabled)
     throw new Error("c01_callback_template_required_before_promise");
   const promisedHour = new Date(Date.parse(promised) - 3 * 3600000).getUTCHours();
   if (promisedHour < 8 || promisedHour >= 21) throw new Error("c01_callback_outside_send_window");
@@ -207,7 +217,7 @@ export async function prepararRetornoComercialC01(
     throw new Error("c01_callback_opportunity_ambiguous");
   const state = (
     await db.query(
-      `select cv.last_inbound_at,cv.assignee_kind,cv.status,cv.bot_silenced_until,
+      `select cv.last_inbound_at,cv.assignee_kind,cv.status,cv.bot_silenced_until,cv.channel_session_id,
     c.is_blocked,c.ai_opt_out,c.force_human,c.is_anonymized,c.is_merged_into
     from conversations cv join contacts c on c.organization_id=cv.organization_id and c.id=cv.contact_id
     where cv.organization_id=$1 and cv.contact_id=$2 and cv.id=$3`,
@@ -230,6 +240,20 @@ export async function prepararRetornoComercialC01(
     (state.bot_silenced_until && +new Date(state.bot_silenced_until) > +checkedAt)
   )
     throw new Error("c01_callback_current_state_forbids_promise");
+  let template: ProvaRetornoC01["template"];
+  if (requiresTemplate) {
+    template = {
+      connection_id: cfg.callbackTemplate!.connectionId,
+      template_id: cfg.callbackTemplate!.templateId,
+      content_hash: cfg.callbackTemplate!.contentHash,
+    };
+    if (state.channel_session_id !== template.connection_id)
+      throw new Error("c01_callback_template_connection_mismatch");
+    if (!input.agentId) throw new Error("c01_callback_agent_missing");
+    const agent = await conferirCallbackAntesDoTurno(db, input.organizationId, input.agentId, new Date(promised), true);
+    if (agent.tipo !== "seguir") throw new Error("c01_callback_agent_not_authorized");
+    await resolverModeloDoRetornoC01(db, input.organizationId, template);
+  }
   const { lerSituacaoFinanceira } = await import("@/lib/leads/fonte-financeira");
   const financial = await lerSituacaoFinanceira({
     db,
@@ -255,6 +279,7 @@ export async function prepararRetornoComercialC01(
     offered_hash: offer ? hash(offer.body) : null,
     consented_at: new Date(message.sent_at).toISOString(),
     promised_at: promised,
+    ...(template ? { template, callback_agent_id: input.agentId! } : {}),
   };
   const proof = {
     ...body,
@@ -266,6 +291,23 @@ export async function prepararRetornoComercialC01(
     product_key: body.product_key,
     c01_callback: proof,
   };
+}
+
+/** Reutiliza o resolvedor do fluxo; não procura por nome, não preenche variáveis. */
+export async function resolverModeloDoRetornoC01(
+  db: Queryable,
+  organizationId: string,
+  binding: NonNullable<ProvaRetornoC01["template"]>,
+) {
+  const cfg = configOrigemC01();
+  const current = cfg?.callbackTemplate;
+  if (!cfg?.enabled || cfg.organizationId !== organizationId || !current?.enabled ||
+      current.connectionId !== binding.connection_id || current.templateId !== binding.template_id ||
+      current.contentHash !== binding.content_hash)
+    throw new Error("c01_callback_template_configuration_changed");
+  const result = await resolveModeloAprovado(db, organizationId, binding.connection_id, binding.template_id, binding.content_hash);
+  if (!result || result.tipo !== "modelo_aprovado") throw new Error("c01_callback_template_not_approved");
+  return result;
 }
 
 export function conferirProvaRetornoC01(raw: unknown): ProvaRetornoC01 | null {
@@ -313,13 +355,15 @@ export async function conferirRetornoNoEnvioC01(
     p.promised_at !== new Date(job.payload.promised_at).toISOString()
   )
     fail("scope_mismatch");
+  if (p.template && (!p.callback_agent_id || p.callback_agent_id !== job.payload.callback_agent_id))
+    fail("agent_mismatch");
   if (+now < Date.parse(p.promised_at)) fail("not_due");
   const hour = new Date(+now - 3 * 3600000).getUTCHours();
   if (hour < 8 || hour >= 21) fail("outside_send_window");
   const row = (
     await db.query(
       `/* c01:callback:state */ select m.body,m.sent_at,cv.last_inbound_at,
-    cv.status,cv.assignee_kind,cv.bot_silenced_until,c.is_blocked,c.ai_opt_out,c.force_human,
+    cv.status,cv.assignee_kind,cv.bot_silenced_until,cv.channel_session_id,c.is_blocked,c.ai_opt_out,c.force_human,
     c.is_anonymized,c.is_merged_into,l.custom_fields,l.status as lead_status
     from messages m join conversations cv on cv.organization_id=m.organization_id and cv.id=m.conversation_id
       and cv.contact_id=m.contact_id
@@ -355,9 +399,12 @@ export async function conferirRetornoNoEnvioC01(
     fail("human");
   if (!row.last_inbound_at || +new Date(row.last_inbound_at) > Date.parse(p.consented_at))
     fail("new_reply");
-  // Callback por IA ainda não escolhe modelo aprovado de forma determinística.
-  // Fora da janela, fica bloqueado; não transforma texto comum em template.
-  if (+now - +new Date(row.last_inbound_at) >= 24 * 3600000) fail("template_required");
+  if (p.template) {
+    if (row.channel_session_id !== p.template.connection_id) fail("template_connection_changed");
+    const agent = await conferirCallbackAntesDoTurno(db, scope.organizationId, p.callback_agent_id, now, true);
+    if (agent.tipo !== "seguir") fail("agent_not_authorized");
+    await resolverModeloDoRetornoC01(db, scope.organizationId, p.template);
+  } else if (+now - +new Date(row.last_inbound_at) >= 24 * 3600000) fail("template_required");
   if (p.offered_message_id) {
     const offer = (
       await db.query(

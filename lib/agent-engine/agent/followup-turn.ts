@@ -1,3 +1,5 @@
+import { resolveModeloAprovado } from "@/lib/channels/meta/resolve-modelo-followup";
+import { conferirProvaRetornoC01, conferirRetornoNoEnvioC01, resolverModeloDoRetornoC01 } from "@/lib/followup/c01-retorno";
 import { conferirCallbackAntesDoTurno } from "./callback-disparo";
 import {claimOfJob,type JobClaim} from "../queue/claim";
 import {resultadoDoEnvioDoFollowup} from "../edge/crm/send-ledger";
@@ -35,13 +37,9 @@ import {
 import { WahaChannelAdapter } from '../edge/channel/waha-adapter';
 import { applySendOutcome } from '../edge/crm/send-message';
 import { runBeforeSend } from '../guardrails/before-send';
-import { definicaoNaConexao } from '@/lib/channels/linha-do-espelho';
 import { estadoDaJanela } from '@/lib/channels/janela';
-import { renderTemplateBody } from '@/lib/channels/meta/render-template';
 import { contextoDoContato, renderizarTextoDeFollowup } from '@/lib/automation/texto-do-followup';
 import { classificarMidiaComLegenda } from '@/lib/messaging/media/midia-com-legenda';
-import { isStatusSendable } from '@/lib/channels/meta/template-binding';
-import { deriveTemplateContract } from '@/lib/channels/meta/template-contract';
 import { camadaLigada, lerCamadasDaOrg } from '../guardrails/camadas-da-org';
 import { classifyPromise } from '../guardrails/promise/semantic';
 import { scheduleCronJob } from '../cron/scheduler';
@@ -621,6 +619,26 @@ export function createFollowupTurnHandler(deps: FollowupTurnDeps) {
       return;
     }
 
+    // Um retorno C01 assina a escolha na criação. Reconferimos antes de qualquer
+    // IA; o sink relê novamente sob a trava compartilhada com compras e humano.
+    // Não há fallback para texto livre quando falta modelo ou o vínculo mudou.
+    if (payload.scope === 'commercial' || payload.c01_callback !== undefined) {
+      const { lerSituacaoFinanceira } = await import('@/lib/leads/fonte-financeira');
+      await conferirRetornoNoEnvioC01(pool, { organizationId: tenantId, contactId: leadId, jobId: job.id },
+        clock(), AbortSignal.timeout(10_000), lerSituacaoFinanceira);
+      const proof = conferirProvaRetornoC01(payload.c01_callback);
+      if (!proof || proof.organization_id !== tenantId || proof.contact_id !== leadId ||
+          proof.conversation_id !== target.conversationId ||
+          (proof.template && proof.template.connection_id !== target.channelSessionId)) {
+        throw new Error('c01_callback_scope_mismatch');
+      }
+      if (proof.template) {
+        const approved = await resolverModeloDoRetornoC01(pool, tenantId, proof.template);
+        await sendFixedOutbound(deps, job, pool, ctx, clock, target, approved.body, false, approved.modelo);
+        return;
+      }
+    }
+
     // F3-04: caminho determinístico ($0) — envia o template versionado direto pela
     // cadeia de guardrails, sem chamar o modelo. É um CAMINHO ADICIONAL: o run do
     // agente (abaixo) segue intocado quando o modo não é 'template'.
@@ -1035,63 +1053,6 @@ async function resolveFlowSendBody(
 }
 
 /**
- * Um modelo aprovado do canal (`meta_templates.id`), pronto para sair NESTA
- * conexão. `null` = o id não é de modelo do canal nesta organização.
- *
- * O id aponta uma linha, mas quem vale é a definição da conexão da conversa
- * (`definicaoNaConexao`, a mesma regra do `send_template` do agente): dois números
- * podem espelhar o mesmo nome, e disparar a linha de outra conta é recusa certa.
- *
- * O fluxo não tem de onde tirar valor para variável, então modelo com `{{1}}` é
- * recusado com o motivo — mandar o marcador cru ao cliente seria pior.
- */
-async function resolveModeloAprovado(
-  pool: pg.Pool,
-  tenantId: string,
-  channelSessionId: string,
-  metaTemplateId: string,
-): Promise<PassoSemIa | null> {
-  const { rows } = await pool.query<{ name: string; language: string }>(
-    `select name, language from meta_templates where organization_id = $1 and id = $2 limit 1`,
-    [tenantId, metaTemplateId],
-  );
-  const alvo = rows[0];
-  if (alvo === undefined) return null;
-  const linha = await definicaoNaConexao<{ components: unknown; parameter_format: string; status: string }>(
-    pool,
-    ['components', 'parameter_format', 'status'],
-    { organizationId: tenantId, name: alvo.name, language: alvo.language, channelSessionId },
-  );
-  if (linha === null) {
-    return { tipo: 'recusado', motivo: `O modelo "${alvo.name}" não existe no número desta conversa.` };
-  }
-  if (!isStatusSendable(linha.status)) {
-    return {
-      tipo: 'recusado',
-      motivo: `O modelo "${alvo.name}" está ${linha.status} na plataforma — só modelo aprovado pode ser enviado.`,
-    };
-  }
-  const meta = { name: alvo.name, language: alvo.language, parameterFormat: linha.parameter_format };
-  const contrato = deriveTemplateContract({
-    name: alvo.name,
-    language: alvo.language,
-    parameter_format: linha.parameter_format,
-    components: linha.components as never,
-  });
-  if (contrato.slots.length > 0) {
-    return {
-      tipo: 'recusado',
-      motivo: `O modelo "${alvo.name}" tem variáveis, e o fluxo não tem de onde tirar os valores. Use um modelo sem variáveis.`,
-    };
-  }
-  return {
-    tipo: 'modelo_aprovado',
-    body: renderTemplateBody(linha.components, {}, meta),
-    modelo: { name: alvo.name, language: alvo.language, values: {} },
-  };
-}
-
-/**
  * A janela de 24 h desta conversa está fechada? Mesmo insumo do gate da cadeia
  * (`readLastInboundAt` em before-send.ts: a conversa do contato NESTE número) e a
  * mesma conta (`estadoDaJanela`) — decidir aqui com outra régua faria o plano B
@@ -1175,11 +1136,12 @@ async function sendFixedOutbound(
   }
 
   // SEM gate near-dup AQUI (#2996, item 2 — pedido da triagem após medir os
-  // caminhos reais): follow-up de promessa NÃO passa por `sendFixedOutbound` —
-  // ele roda por `runAgentTurn` e cai no `send_message`, cujo gate em memória do
+  // caminhos reais): a promessa legada roda por `runAgentTurn` e cai no
+  // `send_message`, cujo gate em memória do
   // turno (com a janela desde a última inbound) já cobre a re-resposta quase
   // idêntica. Quem passa por aqui é texto fixo escrito pelo OPERADOR no passo do
-  // fluxo e o modelo da re-entrada: bloquear a 2ª/3ª bolha de um laço com
+  // fluxo, o modelo da re-entrada e o callback C01 com modelo assinado (que usa
+  // sua própria prova e ledger): bloquear a 2ª/3ª bolha de um laço com
   // `{{volta}}` ou a re-resposta de re-entrada sem resposta do lead seria sumir
   // com o follow-up sem aviso. Se um dia aparecer um caso concreto em que a
   // trava aqui é necessária, ele vira decisão de produto — não regra implícita.

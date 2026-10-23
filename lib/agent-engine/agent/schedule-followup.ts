@@ -101,7 +101,7 @@ export async function applyScheduleFollowup(
   // Um relógio só para decidir E para ensinar — ver o ⚠️ das mensagens abaixo.
   const agora = cfg.clock();
   const comercial = cfg.c01Callback ? await prepararRetornoComercialC01(db, {
-    organizationId: ids.tenantId, contactId: ids.leadId, sourceJobId: ids.sourceJobId, promisedAt: input.promised_at, consent: input,
+    organizationId: ids.tenantId, contactId: ids.leadId, sourceJobId: ids.sourceJobId, agentId: ids.agentId, promisedAt: input.promised_at, consent: input,
   }) : undefined;
   const horario = cfg.c01Callback ? JANELA_RETORNO_C01 : cfg.horario;
   const resultado = await agendaRetorno(

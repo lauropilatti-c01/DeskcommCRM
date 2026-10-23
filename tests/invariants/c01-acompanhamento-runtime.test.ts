@@ -36,6 +36,7 @@ import {
   cederCadenciaAoRetornoC01,
 } from "@/lib/followup/c01-retorno";
 import { criarDubleDoHandler } from "@/tests/helpers/duble-do-handler";
+import { hashDoCorpo } from "@/lib/api/idempotency";
 const port = Number(process.env.TEST_DB_PORT ?? 54329),
   user = process.env.C01_TEST_DB_USER ?? "postgres";
 const schema = `c01_acomp_${randomUUID().replaceAll("-", "")}`;
@@ -120,6 +121,9 @@ beforeAll(async () => {
  create table send_ledger(id uuid primary key default gen_random_uuid(),organization_id uuid,contact_id uuid,job_id uuid,crm_message_id uuid,status text,seq integer);
  create table ai_agents(id uuid,organization_id uuid,published_version_id uuid,paused_at timestamptz,archived_at timestamptz,operation_mode text);
  create table ai_agent_versions(id uuid,organization_id uuid,followup jsonb);
+ create table organizations(id uuid,timezone text);
+ create table channel_sessions(id uuid,organization_id uuid,provider text,meta_waba_id text);
+ create table meta_templates(id uuid,organization_id uuid,channel_session_id uuid,waba_id text,name text,language text,components jsonb,parameter_format text,status text);
  `);
 });
 beforeEach(async () => {
@@ -128,7 +132,7 @@ beforeEach(async () => {
   state.reads = 0;
   state.buyAt = 0;
   await pool.query(
-    "truncate contacts,conversations,crm_leads,demandas,messages,followup_flow_pointers,followup_flow_versions,followup_enrollments,followup_enrollment_events,cron_jobs,job_queue,send_ledger,ai_agents,ai_agent_versions",
+    "truncate contacts,conversations,crm_leads,demandas,messages,followup_flow_pointers,followup_flow_versions,followup_enrollments,followup_enrollment_events,cron_jobs,job_queue,send_ledger,ai_agents,ai_agent_versions,organizations,channel_sessions,meta_templates",
   );
   await pool.query("insert into contacts(id,organization_id) values($1,$2)", [contact, org]);
   await pool.query(
@@ -203,6 +207,63 @@ async function ready() {
   return { c, supabase, e };
 }
 describe("acompanhamento com SQL real e transporte falso", () => {
+  async function prepararModelo() {
+    const at = "2026-10-25T15:00:00.000Z";
+    const components = [{ type: "BODY", text: "Retorno fictício do laboratório." }];
+    const contentHash = hashDoCorpo({ name: "retorno_ficticio", language: "pt_BR", parameter_format: "POSITIONAL", components });
+    vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify({ ...cfg, callbackTemplate: { enabled: true, connectionId: agent, templateId: pointer, contentHash } }));
+    await pool.query("insert into organizations values($1,'America/Sao_Paulo')", [org]);
+    await pool.query("insert into channel_sessions values($1,$2,'meta','waba-ficticia')", [agent, org]);
+    await pool.query("insert into meta_templates values($1,$2,$3,'waba-ficticia','retorno_ficticio','pt_BR',$4,'POSITIONAL','APPROVED')", [pointer, org, agent, JSON.stringify(components)]);
+    await pool.query("update conversations set channel_session_id=$1", [agent]);
+    await pool.query("update ai_agent_versions set followup=$1", [{ c01_callback: true, callback_enabled: true }]);
+    await pool.query("insert into messages(id,organization_id,contact_id,conversation_id,direction,type,body,status,sent_at) values($1,$2,$3,$4,'inbound','text','Pode me chamar 25/10 às 12h.','received',$5)", [consent, org, contact, conversation, base]);
+    await pool.query("insert into job_queue(id,organization_id,contact_id,kind,status,payload) values($1,$2,$3,'inbound_turn','running',$4)", [job, org, contact, { inbound_message_id: consent }]);
+    const result = await applyScheduleFollowup(pool, { clock: () => base, c01Callback: true, knobs: { minAheadMs: 0, maxAheadMs: 7 * 86400000, staggerWindowMs: 0 } }, { tenantId: org!, leadId: contact!, sourceJobId: job!, agentId: agent }, { reason: "Retorno solicitado", promised_at: at, promise: "Conversar no horário combinado" });
+    expect(result.ok).toBe(true);
+    const rows = (await pool.query("select payload,next_run_at from cron_jobs")).rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload.c01_callback.template).toEqual({ connection_id: agent, template_id: pointer, content_hash: contentHash });
+    expect(+new Date(rows[0].next_run_at)).toBe(Date.parse(at));
+    await pool.query("update job_queue set kind='followup_turn',payload=$1", [rows[0].payload]);
+    const context = { organizationId: org!, contactId: contact!, jobId: job! };
+    const { supabase } = criarDubleDoHandler({ conversation: { id: conversation }, tabelasDeLeitura: { job_queue: { payload: rows[0].payload } } });
+    return { at: new Date(at), context, supabase, payload: rows[0].payload };
+  }
+  it("modelo: a ferramenta grava prova e horário, e o corte final SQL relê o modelo", async () => {
+    const r = await prepararModelo();
+    await comEnvioAcompanhamentoC01(r.supabase, r.context, org!, async () => {
+      await assertAcompanhamentoC01Supabase(r.supabase, r.context, org!, r.at);
+      await pool.query("update meta_templates set status='REJECTED'");
+      await expect(assertAcompanhamentoC01Supabase(r.supabase, r.context, org!, r.at)).rejects.toThrow("template_not_approved");
+    });
+  });
+  it("modelo: envio sem recibo não admite segunda tentativa física", async () => {
+    const r = await prepararModelo();
+    const transport = vi.fn(async () => {});
+    await comEnvioAcompanhamentoC01(r.supabase, r.context, org!, async () => {
+      await assertAcompanhamentoC01Supabase(r.supabase, r.context, org!, r.at);
+      await registrarTentativaEnvioC01(r.context, outbound!);
+      await transport();
+    });
+    await expect(comEnvioAcompanhamentoC01(r.supabase, r.context, org!, async () => {
+      await registrarTentativaEnvioC01(r.context, outbound!);
+      await transport();
+    })).rejects.toThrow("ja_tentado");
+    await expect(comEnvioAcompanhamentoC01(r.supabase, r.context, org!, async () => {
+      await registrarTentativaEnvioC01(r.context, randomUUID());
+      await transport();
+    })).rejects.toThrow("entrega_indeterminada");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("modelo: compra confirmada ou agente desativado depois de agendar impede o corte final", async () => {
+    const r = await prepararModelo();
+    state.paid = true;
+    await expect(comEnvioAcompanhamentoC01(r.supabase, r.context, org!, () => assertAcompanhamentoC01Supabase(r.supabase, r.context, org!, r.at))).rejects.toThrow("purchased");
+    state.paid = false;
+    await pool.query("update ai_agents set operation_mode='copilot'");
+    await expect(comEnvioAcompanhamentoC01(r.supabase, r.context, org!, () => assertAcompanhamentoC01Supabase(r.supabase, r.context, org!, r.at))).rejects.toThrow("agent_not_authorized");
+  });
   it("matrícula repetida é única; sent não é delivered e origem anterior à ativação não entra", async () => {
     await pool.query("update messages set status='sent',delivered_at=null");
     await expect(enroll()).rejects.toMatchObject({ code: "delivery_unconfirmed" });

@@ -18,6 +18,7 @@ O escopo une duas modalidades: retomada do cronograma e acompanhamento de oferta
 | `signingKey`        | Segredo com pelo menos 32 caracteres para assinar a origem e o consentimento.      |
 | `allowedKinds`      | Lista contendo `cronograma`, `oferta` ou ambas.                                    |
 | `offerConnectionId` | Conexão real da base comercial, obrigatória para a modalidade oferta.              |
+| `callbackTemplate` | Opcional; `enabled`, `connectionId`, `templateId` e `contentHash` do modelo de retorno. Ausente/OFF preserva a recusa fora de 24 horas. |
 
 Não há valores de credencial neste documento. O operador injeta os segredos pelo mecanismo já usado na instalação. Mudança de segredo de assinatura invalida provas antigas: deve ser tratada como rotação coordenada, sem reativar inscrições antigas em massa.
 
@@ -72,14 +73,21 @@ O verificador usa uma gramática pequena, não um julgamento de intenção por I
 
 Alternativas (“9h ou 10h”), condicionais (“se eu conseguir”), perguntas ainda sem confirmação, negação e frases indiretas são recusadas. O modelo recebe instrução para confirmar um único dia e horário nesse formato. A recusa nunca antecipa ou escolhe uma das alternativas.
 
-Antes de criar o cron, a ferramenta prova consentimento, oportunidade, situação atual, capacidade financeira e horário executável. Como o callback por IA ainda não seleciona um template determinístico, rejeita já na criação um horário igual ou posterior a 24 horas da última mensagem de consentimento. Não promete hoje para bloquear amanhã. Na execução, relê janela, compra, resposta, atendimento humano e hash das mensagens.
+Antes de criar o cron, a ferramenta prova consentimento, oportunidade, situação atual, capacidade financeira e horário executável. Um prazo igual ou posterior a 24 horas do consentimento só é aceito com `callbackTemplate.enabled:true`, ID exato na organização/conexão, estado `APPROVED`, hash integral correspondente e nenhum parâmetro pendente. Sem esse vínculo, conserva `c01_callback_template_required_before_promise`.
+
+O hash usa `hashDoCorpo({name,language,parameter_format,components})` da definição real do modelo. Não é o nome escolhido por aproximação nem apenas o hash dos parâmetros. A prova HMAC inclui ID, conexão, hash e agente da criação; a ferramenta não aceita que a IA forneça esses valores. O agente precisa estar automático, publicado e com `followup.c01_callback:true` e `callback_enabled:true`.
+
+No disparo, o turno confere consentimento, oportunidade, resposta, recusa, humano e compra antes de qualquer IA. Para o callback assinado com modelo, envia sempre o modelo vinculado pela cadeia comum de guardas, ledger, tentativa e recibo, sem LLM nem fallback livre. O corte final sob a trava reconfere configuração, modelo e agente: desligar a opção, pausar o agente ou alterar/rejeitar o modelo entre agendamento e execução impede envio. A falta de recibo continua impedindo repetição física. O callback sem vínculo de modelo conserva o caminho anterior dentro da janela.
+
+Essa capacidade não instala nem aprova mensagem na Meta. Nenhum modelo real foi escolhido ou ativado nesta entrega; só fixtures fictícias. A aprovação comercial, o ID/hash reais e a configuração operacional continuam necessários.
 
 Reagendamento usa o ID pendente e comparação do estado anterior, sob a mesma trava, sem cancelar e criar em duas chamadas. Só `ok:true` permite dizer que o horário foi registrado. O cliente nunca recebe promessa de antecipação para caber no horário comercial. Não há prova de linguagem com IA paga nesta entrega; os testes determinísticos e de SQL comprovam a fronteira técnica descrita.
 
 ## Evidências reproduzíveis
 
 - Testes focados dos contratos: `pnpm exec vitest run lib/followup/c01-retorno.test.ts lib/followup/c01-origem.test.ts lib/followup/c01-origem-oferta.test.ts lib/followup/c01-publicacao.test.ts lib/followup/c01-acompanhamento.test.ts lib/followup/c01-acompanhamento-engine.test.ts lib/agent-engine/agent/schedule-followup.test.ts lib/followup/retorno.test.ts tests/unit/escrita-do-turno-escopo.test.ts tests/unit/c01-acompanhamento-sink.test.ts`.
-- SQL em cluster descartável: `TEST_DB_PORT=<porta> C01_TEST_DB_USER=<usuário> pnpm exec vitest run --config vitest.c01-acompanhamento.config.mts`. O teste cria e remove só seu schema sintético. Doze cenários passaram: origem/entrega, idempotência, concorrência, compra antes do envio, queda sem recibo, exclusividade, consentimento, callback e portas físicas de texto/mídia. A ferramenta nativa foi chamada com o job real e sem IDs fornecidos pelo modelo, com consentimento direto e confirmação curta; o horário persistido foi conferido.
+- SQL em cluster descartável: `TEST_DB_PORT=<porta> C01_TEST_DB_USER=<usuário> pnpm exec vitest run --config vitest.c01-acompanhamento.config.mts`. O teste cria e remove só seu schema sintético. Dezesseis cenários passaram: origem/entrega, idempotência, concorrência, compra antes do envio, queda sem recibo, exclusividade, consentimento, callback e portas físicas de texto/mídia/modelo. A ferramenta nativa foi chamada com o job real e sem IDs fornecidos pelo modelo, com consentimento direto e confirmação curta; o horário persistido foi conferido.
 - A revisão independente executou os mesmos caminhos no baseline integral: nove cenários aprovados em `experiments/extensoes/c01-atendimento/acompanhamento-baseline.test.ts`, incluído pela frente de verificação. Também conferiu frases adversariais do M13, enriquecimento da oferta e portão de publicação.
+- Retorno por modelo: `lib/followup/c01-retorno-modelo.test.ts` confere o contrato e as recusas; `lib/agent-engine/agent/followup-turn-c01-modelo.test.ts` confere a passagem pelo transporte comum sem IA. A suíte SQL acima inclui agendamento pela ferramenta, prova persistida, desativação, compra e tentativa sem recibo. Esses testes usam banco descartável e transporte falso; não equivalem à aceitação real pela Meta.
 
 Nenhuma dessas provas representa envio WhatsApp real, modelos aprovados na Meta, publicação do agente ou liberação de produção. A frente de integração executa o portão obrigatório sobre a árvore final antes da janela de publicação.

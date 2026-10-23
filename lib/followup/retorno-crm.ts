@@ -453,7 +453,7 @@ export async function agendaRetornoNoCrm(
     }
   }
   const comercial = c01Callback ? await prepararRetornoComercialC01(getRequestPool(), {
-    organizationId: deps.orgId, contactId: alvo.alvo.contactId, leadId: alvo.alvo.leadId, sourceJobId: deps.sourceJobId,
+    organizationId: deps.orgId, contactId: alvo.alvo.contactId, leadId: alvo.alvo.leadId, sourceJobId: deps.sourceJobId, agentId: agenteId,
     promisedAt: input.prometidoPara, consent: input.consentimento ?? {},
   }) : undefined;
   if (c01Callback) horario = JANELA_RETORNO_C01;
