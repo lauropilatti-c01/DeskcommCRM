@@ -13,7 +13,8 @@ precisa conter o recibo do banco para ser apresentada como concluída.
 A chave `pagamento_confirmado` fica reservada: a edição genérica do negócio e as
 ferramentas da IA não podem gravá-la. Nos funis que exigem essa confirmação ao
 marcar Ganho, um valor preenchido por edição comum não comprova pagamento.
-Esta entrega ainda não inclui o escritor financeiro autorizado; nesses funis,
-o encerramento como Ganho permanece bloqueado até a integração ser concluída e
-validada. Isso vale também para criação direta na etapa final e quando não é
-possível ler as regras do funil. Não remova a exigência para contornar a proteção.
+O núcleo financeiro candidato ainda não tem rota nem adaptador autorizado
+validado; nesses funis, o encerramento genérico como Ganho permanece bloqueado
+até a integração ser concluída e validada. Isso vale também para criação direta
+na etapa final e quando não é possível ler as regras do funil. Não remova a
+exigência para contornar a proteção.
