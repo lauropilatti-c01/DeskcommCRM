@@ -51,8 +51,8 @@ export interface ChannelSendInput {
    * mensagens, como em toda mídia — e é ele que confere a URL antes de buscar.
    */
   media?:
-    | { storagePath: string; mime: string }
-    | { url: string; mime: string; type: 'image' | 'document' };
+    | { storagePath: string; mime: string; type?: 'image' | 'video' }
+    | { url: string; mime: string; type: 'image' | 'document' | 'video' };
   /**
    * (C01) Presente = o texto que IDENTIFICA este envio no ledger difere do `body`
    * entregue: é o corpo antes das emendas da cadeia de envio (a apresentação
