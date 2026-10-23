@@ -104,6 +104,7 @@ const agendarShape = {
    * a promessa é lida dias depois e "amanhã" não significaria nada.
    */
   in_hours: z.number().positive().max(4_320).optional(),
+  replace_pending_id: z.string().uuid().optional(),
   reason: z.string().min(1).max(500),
   promise: z.string().min(1).max(1_000),
   context: z.string().max(4_000).optional(),
@@ -117,7 +118,8 @@ export const crmScheduleFollowup: McpToolDefinition<typeof agendarShape> = {
     "OU `promised_at` (instante ISO 8601 absoluto). SE VOCÊ NÃO SABE QUE DIA É HOJE, USE " +
     "`in_hours` — é o caminho certo e não exige adivinhar a data. " +
     "Um retorno vivo por cliente: se já houver, a chamada devolve agendado=false com o motivo, " +
-    "e não é erro — é para você seguir sem duplicar. " +
+    "e não é erro — é para você seguir sem duplicar. Para alterar por pedido explícito, use replace_pending_id " +
+    "com o ID existente e a nova data, sem cancelar primeiro. Só confirme após agendado=true. " +
     "ISTO NÃO É COMPROMISSO COM HORA MARCADA: é decisão interna nossa de voltar a falar. O cliente " +
     "não fica sabendo, e nada é reservado na agenda de ninguém. Se ele ESCOLHEU um horário para ser " +
     "atendido, é outra coisa — use a ferramenta de marcar compromisso, se você tiver uma; se não " +
@@ -168,6 +170,7 @@ export const crmScheduleFollowup: McpToolDefinition<typeof agendarShape> = {
       },
       { leadId: input.lead_id ?? null, contactId: input.contact_id ?? null },
       {
+        substituirRetornoId: input.replace_pending_id,
         motivo: input.reason,
         prometidoPara,
         promessa: input.promise,
@@ -193,7 +196,9 @@ export const crmScheduleFollowup: McpToolDefinition<typeof agendarShape> = {
             `${cedoDemais} e ${tardeDemais} (${duracaoLegivel(minAheadMs)} a ${duracaoLegivel(maxAheadMs)} a partir de agora).`,
           ja_existe_retorno:
             "este cliente JÁ tem um retorno marcado — não marque outro (evita insistir com a mesma pessoa " +
-            "várias vezes). Se precisa mudar o horário, cancele o existente antes.",
+            "várias vezes). Para mudança pedida pelo cliente, use replace_pending_id com o ID devolvido e a nova data. Só confirme após agendado=true.",
+          horario_nao_permitido: "Horário fora da faixa de envios do agente. Combine outro horário permitido; nenhum retorno foi criado ou alterado.",
+          retorno_alterado: "O retorno foi cancelado, disparou ou mudou. Não confirme a alteração nem crie outro automaticamente; confira o estado atual.",
         };
         return {
           agendado: false,

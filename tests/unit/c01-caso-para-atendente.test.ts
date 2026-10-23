@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // (C01, -c01.16) O caso aberto ganha uma responsável — `lib/escalacao/caso-para-atendente.handler.ts`.
 
-const estado = { ligado: "", vapid: true, falhar: "" as string, naoVeem: [] as string[] };
+const estado = { ligado: "", vapid: true, falhar: "" as string, naoVeem: [] as string[], limiteServidor: 1000, maxIds: Infinity };
 vi.mock("@/lib/env", () => ({
   env: new Proxy({}, { get: (_t, k) => (k === "CASOS_PARA_ATENDENTES" ? estado.ligado : "") }),
 }));
@@ -17,6 +17,24 @@ vi.mock("@/lib/notifications/web_push", () => ({
   enviarPushAoUsuario: (o: string, u: string, p: { title: string; href: string }) => push(o, u, p),
   enviarPushAQuemVeAConversa: (o: string, c: string, p: { title: string; href: string }, so?: readonly string[]) =>
     paraQuemVe(o, c, p, so),
+}));
+
+let lockOcupado = false;
+vi.mock("@/lib/agent-engine/db/request-pool", () => ({
+  getRequestPool: () => ({ connect: async () => ({
+    on: () => undefined,
+    removeListener: () => undefined,
+    query: async (sql: string) => {
+      if (sql.includes("pg_try_advisory_lock")) {
+        const locked = !lockOcupado;
+        if (locked) lockOcupado = true;
+        return { rows: [{ locked }] };
+      }
+      if (sql.includes("pg_advisory_unlock")) lockOcupado = false;
+      return { rows: [] };
+    },
+    release: () => undefined,
+  }) }),
 }));
 
 type Linha = Record<string, unknown>;
@@ -39,7 +57,7 @@ function consulta(tabela: string) {
   const conds: ((l: Linha) => boolean)[] = [];
   let patch: Linha | null = null;
   let ordem: { col: string; asc: boolean } | null = null;
-  let limite = Infinity;
+  let limite = estado.limiteServidor;
   let apelidos: [string, string][] = [];
   const linhas = () => {
     let ls = ((db as Record<string, Linha[]>)[tabela] ?? []).filter((l) => conds.every((c) => c(l)));
@@ -76,9 +94,14 @@ function consulta(tabela: string) {
         .map((c) => c.split(":") as [string, string]);
       return q;
     },
+    abortSignal: (_signal: AbortSignal) => q,
     update: (p: Linha) => ((patch = p), q),
     eq: (c: string, v: unknown) => (conds.push((l) => valor(l, c) === v), q),
-    in: (c: string, vs: unknown[]) => (conds.push((l) => vs.includes(l[c])), q),
+    in: (c: string, vs: unknown[]) => {
+      if (vs.length > estado.maxIds) throw new Error("filtro excedeu o tamanho aceito pela API");
+      conds.push((l) => vs.includes(l[c])); return q;
+    },
+    gt: (c: string, v: string) => (conds.push((l) => String(valor(l, c)) > v), q),
     is: (c: string, v: unknown) => (conds.push((l) => (valor(l, c) ?? null) === v), q),
     gte: (c: string, v: string) => (conds.push((l) => Date.parse(String(l[c])) >= Date.parse(v)), q),
     neq: (c: string, v: unknown) => (conds.push((l) => valor(l, c) !== v), q),
@@ -121,10 +144,13 @@ const negocio = (id: string, contato: string, extra: Linha = {}) => ({
 });
 
 beforeEach(() => {
+  lockOcupado = false;
   estado.ligado = "";
   estado.vapid = true;
   estado.falhar = "";
   estado.naoVeem = [];
+  estado.limiteServidor = 1000;
+  estado.maxIds = Infinity;
   push.mockClear();
   paraQuemVe.mockClear();
   db = {
@@ -506,4 +532,55 @@ describe("caso sem negócio: a vez é de quem vê a conversa", () => {
     expect(r.status).toBe("retry");
     expect(atendenteDoCaso()).toBeUndefined();
   });
+});
+
+
+describe("distribuição completa em bases maiores", () => {
+  it("usa a atribuição anterior mesmo depois das 200 mais recentes", async () => {
+    db.crm_leads.push(negocio("antigo", "x", { owner_user_id: "priscila", assigned_at: "2026-10-01T12:00:00Z", status: "won" }));
+    for (let i = 0; i < 205; i++) {
+      db.crm_leads.push(negocio(`recente-${i}`, `k-${i}`, { owner_user_id: "maria", assigned_at: "2026-10-02T12:00:00Z", status: "won" }));
+    }
+    // O corte nas atribuições deixa Priscila como se nunca tivesse recebido.
+    // Mas ela ganhou um caso sem negócio mais recentemente que Maria.
+    for (let i = 0; i < 205; i++) {
+      db.agent_cases.push(caso(`historico-${i}`, "x", { opened_at: "2026-10-20T12:00:00Z", status: "resolved", context_snapshot: { c01_atendente: { user_id: "maria", em: "2026-10-02T12:00:00Z" } } }));
+    }
+    db.agent_cases.push(caso("historico-antigo", "x", { opened_at: "2026-10-01T12:00:00Z", status: "resolved", context_snapshot: { c01_atendente: { user_id: "priscila", em: "2026-10-03T12:00:00Z" } } }));
+    await casoParaAtendenteHandler.handle(evento());
+    expect(db.crm_leads[0]!.owner_user_id).toBe("maria");
+  });
+
+  it("conta 1.105 casos e divide IDs em lotes, sem misturar organizações", async () => {
+    estado.maxIds = 100;
+    // O mock reproduz o teto do PostgREST: sem paginação só chegam 1.000 linhas.
+    for (let i = 0; i < 1105; i++) {
+      const id = String(i).padStart(5, "0");
+      const dona = i < 550 ? "maria" : "priscila";
+      db.agent_cases.push(caso(`carga-${id}`, `conv-${id}`));
+      db.conversations.push({ id: `conv-${id}`, organization_id: ORG, contact_id: `contato-${id}` });
+      db.crm_leads.push(negocio(`negocio-${id}`, `contato-${id}`, { owner_user_id: dona }));
+    }
+    db.agent_cases.push(caso("externo", "x", { organization_id: "outra-org", lead_id: "L1" }));
+    await casoParaAtendenteHandler.handle(evento());
+    expect(db.crm_leads[0]!.owner_user_id).toBe("maria");
+  });
+
+  it("duas aberturas concorrentes do mesmo negócio mantêm uma única dona", async () => {
+    const resultados = await Promise.all([casoParaAtendenteHandler.handle(evento()), casoParaAtendenteHandler.handle(evento())]);
+    expect(resultados.filter((r) => r.detail === "atribuido")).toHaveLength(1);
+    expect(db.event_log).toHaveLength(1);
+    expect(db.conversations[0]!.assigned_to_user_id).toBeUndefined();
+  });
+});
+
+it("casos diferentes concorrentes esperam a vez e reavaliam a carga", async () => {
+  db.agent_cases.push(caso("caso-2", "c2"));
+  db.conversations.push({ id: "c2", organization_id: ORG, contact_id: "k2" });
+  db.crm_leads.push(negocio("L2", "k2"));
+  const rs = await Promise.all([casoParaAtendenteHandler.handle(evento()), casoParaAtendenteHandler.handle(evento("caso-2"))]);
+  const retry = rs.findIndex((r) => r.status === "retry");
+  expect(retry).not.toBe(-1);
+  await casoParaAtendenteHandler.handle(evento(retry === 0 ? "caso-1" : "caso-2"));
+  expect(db.crm_leads[0]!.owner_user_id).not.toBe(db.crm_leads[1]!.owner_user_id);
 });

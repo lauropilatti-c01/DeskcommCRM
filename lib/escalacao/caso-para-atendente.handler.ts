@@ -40,6 +40,8 @@
  * acha a dona, mas o push dela já saiu pelo `lead.assigned` da troca. Sem
  * prova, manda: aviso repetido é melhor que nenhum.
  */
+import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
+import { comTravaDaDistribuicao } from "./trava-da-distribuicao";
 import { env } from "@/lib/env";
 import type { EventHandler, EventRow, HandlerResult } from "@/lib/event-log/dispatcher";
 import { resolveActiveLeadForContact, type LeadCandidate } from "@/lib/leads/active-lead";
@@ -51,6 +53,38 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export const CASO_PARA_ATENDENTE_KEY = "c01.caso-para-atendente";
 const ESPERA_MS = 60 * 1000;
+const TAMANHO_PAGINA = 200;
+const TAMANHO_LOTE_IDS = 50;
+type Pagina = { data: unknown[] | null; error: { message: string } | null };
+
+/** Cursor por chave estável: não depende do teto silencioso do PostgREST. */
+async function todasAsPaginas(
+  consultar: (depois: string | null) => PromiseLike<Pagina>,
+  chave = "id",
+): Promise<Pagina> {
+  const linhas: unknown[] = [];
+  let depois: string | null = null;
+  for (;;) {
+    const pagina = await consultar(depois);
+    if (pagina.error) return { data: null, error: pagina.error };
+    const dados = pagina.data ?? [];
+    if (dados.length === 0) return { data: linhas, error: null };
+    const ultimo = (dados[dados.length - 1] as Record<string, unknown>)[chave];
+    if (typeof ultimo !== "string" || (depois !== null && ultimo <= depois)) {
+      return { data: null, error: { message: "paginação sem avanço; distribuição não executada" } };
+    }
+    linhas.push(...dados);
+    depois = ultimo;
+    // Não usar length < tamanho: o servidor pode impor um teto menor.
+  }
+}
+
+function lotes(ids: readonly string[]): string[][] {
+  const partes: string[][] = [];
+  for (let i = 0; i < ids.length; i += TAMANHO_LOTE_IDS) partes.push(ids.slice(i, i + TAMANHO_LOTE_IDS));
+  return partes;
+}
+
 
 const resultado = (status: HandlerResult["status"], detail?: string): HandlerResult => ({
   consumer_key: CASO_PARA_ATENDENTE_KEY,
@@ -90,6 +124,7 @@ export function escolherAtendente(
 }
 
 type Admin = ReturnType<typeof createAdminClient>;
+type Trava = { conferir: () => Promise<void>; signal: AbortSignal };
 type Caso = {
   status?: string;
   lead_id?: string | null;
@@ -229,11 +264,13 @@ async function cargas(
   caseId: string,
   elegiveis: readonly string[],
 ): Promise<Map<string, number> | Falha> {
-  const { data, error } = await admin
-    .from("agent_cases")
-    .select("id, lead_id, conversation_id, c01_atendente:context_snapshot->c01_atendente")
-    .eq("organization_id", org)
-    .eq("status", "awaiting_human");
+  const { data, error } = await todasAsPaginas((depois) => {
+    const q = admin.from("agent_cases")
+      .select("id, lead_id, conversation_id, c01_atendente:context_snapshot->c01_atendente")
+      .eq("organization_id", org).eq("status", "awaiting_human")
+      .order("id", { ascending: true }).limit(TAMANHO_PAGINA);
+    return depois ? q.gt("id", depois) : q;
+  });
   if (error) return { erro: `leitura dos casos falhou: ${error.message}` };
   const casos = (
     (data ?? []) as { id: string; lead_id: string | null; conversation_id: string | null; c01_atendente?: unknown }[]
@@ -242,36 +279,36 @@ async function cargas(
   const convIds = [...new Set(casos.flatMap((c) => (!c.lead_id && c.conversation_id ? [c.conversation_id] : [])))];
 
   const donoDoNegocio = new Map<string, string>();
-  if (leadIds.length > 0) {
+  for (const ids of lotes(leadIds)) {
     const { data: donos, error: erroDosDonos } = await admin
       .from("crm_leads")
       .select("id, owner_user_id")
       .eq("organization_id", org)
-      .in("id", leadIds)
-      .in("owner_user_id", [...elegiveis]);
+      .in("id", ids);
     if (erroDosDonos) return { erro: `leitura das cargas falhou: ${erroDosDonos.message}` };
     for (const d of (donos ?? []) as { id: string; owner_user_id: string }[]) donoDoNegocio.set(d.id, d.owner_user_id);
   }
   const contatoDaConversa = new Map<string, string>();
   const donaDoContato = new Map<string, string>();
-  if (convIds.length > 0) {
+  for (const ids of lotes(convIds)) {
     const { data: conversas, error: erroDasConversas } = await admin
       .from("conversations")
       .select("id, contact_id")
       .eq("organization_id", org)
-      .in("id", convIds);
+      .in("id", ids);
     if (erroDasConversas) return { erro: `leitura das conversas falhou: ${erroDasConversas.message}` };
     for (const c of (conversas ?? []) as { id: string; contact_id: string | null }[]) {
       if (c.contact_id) contatoDaConversa.set(c.id, c.contact_id);
     }
-    const contatos = [...new Set(contatoDaConversa.values())];
-    if (contatos.length > 0) {
-      const { data: negocios, error: erroDosNegocios } = await admin
-        .from("crm_leads")
-        .select(COLUNAS_DO_NEGOCIO)
-        .eq("organization_id", org)
-        .in("contact_id", contatos)
-        .eq("status", "open");
+  }
+  const contatos = [...new Set(contatoDaConversa.values())];
+  for (const ids of lotes(contatos)) {
+      const { data: negocios, error: erroDosNegocios } = await todasAsPaginas((depois) => {
+        const q = admin.from("crm_leads").select(COLUNAS_DO_NEGOCIO)
+          .eq("organization_id", org).in("contact_id", ids).eq("status", "open")
+          .order("id", { ascending: true }).limit(TAMANHO_PAGINA);
+        return depois ? q.gt("id", depois) : q;
+      });
       if (erroDosNegocios) return { erro: `leitura das cargas falhou: ${erroDosNegocios.message}` };
       const porContato = new Map<string, NegocioAberto[]>();
       for (const n of (negocios ?? []) as NegocioAberto[]) {
@@ -287,7 +324,6 @@ async function cargas(
         const dona = negocioDoContato(abertos, funilPadrao)?.owner_user_id ?? null;
         if (dona && elegiveis.includes(dona)) donaDoContato.set(contato, dona);
       }
-    }
   }
 
   const abertos = new Map<string, number>();
@@ -350,13 +386,13 @@ async function atendenteDaVez(
   caseId: string,
   podeReceber: (atendente: string) => boolean = () => true,
 ): Promise<string | null | "ninguem_pode" | Falha> {
-  const { data: membros, error: erroDosMembros } = await admin
-    .from("user_organizations")
-    .select("user_id")
-    .eq("organization_id", org)
-    .eq("role", "agent")
-    .not("accepted_at", "is", null)
-    .is("revoked_at", null);
+  const { data: membros, error: erroDosMembros } = await todasAsPaginas((depois) => {
+    const q = admin.from("user_organizations").select("user_id")
+      .eq("organization_id", org).eq("role", "agent")
+      .not("accepted_at", "is", null).is("revoked_at", null)
+      .order("user_id", { ascending: true }).limit(TAMANHO_PAGINA);
+    return depois ? q.gt("user_id", depois) : q;
+  }, "user_id");
   if (erroDosMembros) return { erro: `leitura da equipe falhou: ${erroDosMembros.message}` };
   const elegiveis = ((membros ?? []) as { user_id: string }[]).map((m) => m.user_id);
   if (elegiveis.length === 0) return null;
@@ -364,25 +400,22 @@ async function atendenteDaVez(
   const abertos = await cargas(admin, org, caseId, elegiveis);
   if (falhou(abertos)) return abertos;
   const ultima = new Map<string, string>();
-  const { data: recentes, error: erroDosRecentes } = await admin
-    .from("crm_leads")
-    .select("owner_user_id, assigned_at")
-    .eq("organization_id", org)
-    .in("owner_user_id", elegiveis)
-    .not("assigned_at", "is", null)
-    .order("assigned_at", { ascending: false })
-    .limit(200);
+  const { data: recentes, error: erroDosRecentes } = await todasAsPaginas((depois) => {
+    const q = admin.from("crm_leads").select("id, owner_user_id, assigned_at")
+      .eq("organization_id", org).not("owner_user_id", "is", null).not("assigned_at", "is", null)
+      .order("id", { ascending: true }).limit(TAMANHO_PAGINA);
+    return depois ? q.gt("id", depois) : q;
+  });
   if (erroDosRecentes) return { erro: `leitura das atribuições falhou: ${erroDosRecentes.message}` };
   for (const r of (recentes ?? []) as { owner_user_id: string; assigned_at: string }[]) {
-    if (!ultima.has(r.owner_user_id)) ultima.set(r.owner_user_id, r.assigned_at);
+    if (elegiveis.includes(r.owner_user_id) && r.assigned_at > (ultima.get(r.owner_user_id) ?? "")) ultima.set(r.owner_user_id, r.assigned_at);
   }
-  const { data: vezes, error: erroDasVezes } = await admin
-    .from("agent_cases")
-    .select("c01_atendente:context_snapshot->c01_atendente")
-    .eq("organization_id", org)
-    .not("context_snapshot->c01_atendente", "is", null)
-    .order("opened_at", { ascending: false })
-    .limit(200);
+  const { data: vezes, error: erroDasVezes } = await todasAsPaginas((depois) => {
+    const q = admin.from("agent_cases").select("id, c01_atendente:context_snapshot->c01_atendente")
+      .eq("organization_id", org).not("context_snapshot->c01_atendente", "is", null)
+      .order("id", { ascending: true }).limit(TAMANHO_PAGINA);
+    return depois ? q.gt("id", depois) : q;
+  });
   if (erroDasVezes) return { erro: `leitura do rodízio dos casos falhou: ${erroDasVezes.message}` };
   for (const v of (vezes ?? []) as { c01_atendente?: unknown }[]) {
     const vez = vezNoCaso(v.c01_atendente);
@@ -423,7 +456,7 @@ async function visibilidadeDaConversa(
  * se vê a conversa. Nova tentativa do mesmo evento reaproveita a que já foi
  * guardada e manda o aviso de novo (aviso repetido é melhor que nenhum).
  */
-async function semNegocio(admin: Admin, org: string, caseId: string, c: Caso): Promise<HandlerResult> {
+async function semNegocio(admin: Admin, org: string, caseId: string, c: Caso, trava: Trava): Promise<HandlerResult> {
   const conversa = c.conversation_id;
   if (!conversa) return resultado("skipped", "caso_sem_negocio:sem_conversa");
   let vez = vezNoCaso(c.context_snapshot?.c01_atendente);
@@ -441,6 +474,7 @@ async function semNegocio(admin: Admin, org: string, caseId: string, c: Caso): P
     // leitura e a escrita (a anonimização zera o snapshot: regravá-lo traria de
     // volta as falas apagadas). `updated_at` fica: o vigia de casos parados o lê
     // como "alguém da equipe encostou".
+    await trava.conferir();
     const { data: gravados, error: erroDaGravacao } = await admin
       .from("agent_cases")
       .update({ context_snapshot: { ...(c.context_snapshot ?? {}), c01_atendente: nova } })
@@ -448,17 +482,18 @@ async function semNegocio(admin: Admin, org: string, caseId: string, c: Caso): P
       .eq("id", caseId)
       .is("context_snapshot->c01_atendente", null)
       .neq("summary", RESUMO_ANONIMIZADO)
-      .select("id");
+      .select("id").abortSignal(trava.signal);
     if (erroDaGravacao) return tentarDeNovo(`gravação da atendente do caso falhou: ${erroDaGravacao.message}`);
     if ((gravados ?? []).length === 0) return tentarDeNovo("o caso mudou entre a leitura e a gravação da atendente");
     vez = nova;
   }
   if (!vapidPronto()) return resultado("skipped", "sem_negocio:rodizio:vapid_ausente");
+  await trava.conferir();
   const { sent } = await enviarPushAQuemVeAConversa(org, conversa, pushDoCasoAtribuido(caseId), [vez.user_id]);
   return resultado("ok", `sem_negocio:rodizio:sent:${sent}`);
 }
 
-async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
+async function abrir(row: EventRow, caseId: string, trava: Trava): Promise<HandlerResult> {
   const admin = createAdminClient();
   const org = row.organization_id;
 
@@ -474,7 +509,7 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
 
   const negocio = await negocioDoCaso(admin, org, c);
   if (falhou(negocio)) return tentarDeNovo(negocio.erro);
-  if (!negocio) return semNegocio(admin, org, caseId, c);
+  if (!negocio) return semNegocio(admin, org, caseId, c, trava);
   const dona = negocio.owner_user_id;
 
   // Já tem uma pessoa: não há troca de dono (nem `lead.assigned`), então o push sai daqui.
@@ -486,6 +521,7 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
     if (ativas === null) return tentarDeNovo("leitura da equipe falhou");
     if (!ativas.has(dona)) return resultado("skipped", "ja_tinha_responsavel:fora_da_equipe");
     if (!vapidPronto()) return resultado("skipped", "ja_tinha_responsavel:vapid_ausente");
+    await trava.conferir();
     const { sent } = await enviarPushAoUsuario(org, dona, pushDoCasoAtribuido(caseId));
     return resultado("ok", `ja_tinha_responsavel:sent:${sent}`);
   }
@@ -494,6 +530,7 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
   if (falhou(escolhida)) return tentarDeNovo(escolhida.erro);
   if (!escolhida || escolhida === "ninguem_pode") return resultado("skipped", "sem_atendente");
 
+  await trava.conferir();
   const { data: trocados, error: erroDaTroca } = await admin
     .from("crm_leads")
     .update({
@@ -505,7 +542,7 @@ async function abrir(row: EventRow, caseId: string): Promise<HandlerResult> {
     .eq("organization_id", org)
     .eq("id", negocio.id)
     .is("owner_user_id", null)
-    .select("id");
+    .select("id").abortSignal(trava.signal);
   if (erroDaTroca) return tentarDeNovo(`atribuição falhou: ${erroDaTroca.message}`);
   if ((trocados ?? []).length === 0) return resultado("skipped", "negocio_ja_atribuido");
   return resultado("ok", "atribuido");
@@ -523,6 +560,11 @@ export const casoParaAtendenteHandler: EventHandler = {
       (typeof row.payload.case_id === "string" ? row.payload.case_id : null) ??
       (typeof row.entity_id === "string" ? row.entity_id : null);
     if (!caseId) return resultado("skipped", "sem_caso");
-    return abrir(row, caseId);
+    try {
+      const r = await comTravaDaDistribuicao(getRequestPool(), row.organization_id, (trava) => abrir(row, caseId, trava));
+      return r.ocupado ? tentarDeNovo("distribuicao_em_andamento") : r.resultado;
+    } catch {
+      return tentarDeNovo("trava_da_distribuicao_indisponivel");
+    }
   },
 };

@@ -311,3 +311,61 @@ describe("statusDaPromessaNaFila", () => {
     expect(statusDaPromessaNaFila({ enabled: true, cancelled_at: null, last_error: "org_nao_operante" })).toBe("agendada");
   });
 });
+
+describe("reagendamento explícito sem novo job", () => {
+  const entrada = { motivo: "cliente mudou o horário", prometidoPara: "2026-08-07T14:00:00Z", promessa: "retorno sexta às 11h", substituirRetornoId: "ret-1" };
+  it("troca o horário da mesma linha e devolve o registro anterior para a timeline", async () => {
+    const antigo = retornoFake();
+    let alterou = false;
+    const espiao = fakeDb({
+      buscaRetornoVivo: async () => antigo,
+      reagenda: async (_org, anterior, novo) => {
+        alterou = true;
+        expect(anterior).toEqual(antigo);
+        return { ...antigo, quando: novo.quando.toISOString(), prometidoPara: novo.payload.promised_at };
+      },
+    });
+    const r = await agendaRetorno(espiao.db, { agora: AGORA, janela: JANELA }, { orgId: ORG, contactId: CONTATO }, entrada);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error("esperava reagendamento");
+    expect(r.retorno.id).toBe("ret-1");
+    expect(r.retorno.prometidoPara).toBe(entrada.prometidoPara);
+    expect(r.substituiu).toEqual(antigo);
+    expect(alterou).toBe(true);
+    expect(espiao.inseridos).toHaveLength(0);
+  });
+  it("não recria retorno que disparou ou foi cancelado durante a alteração", async () => {
+    const espiao = fakeDb({ buscaRetornoVivo: async () => retornoFake(), reagenda: async () => null });
+    const r = await agendaRetorno(espiao.db, { agora: AGORA, janela: JANELA }, { orgId: ORG, contactId: CONTATO }, entrada);
+    expect(r).toMatchObject({ ok: false, codigo: "retorno_alterado" });
+    expect(espiao.inseridos).toHaveLength(0);
+  });
+  it("ID antigo ou de outro contato não substitui nem cria nada", async () => {
+    const espiao = fakeDb({ buscaRetornoVivo: async () => retornoFake({ id: "outro" }) });
+    const r = await agendaRetorno(espiao.db, { agora: AGORA, janela: JANELA }, { orgId: ORG, contactId: CONTATO }, entrada);
+    expect(r).toMatchObject({ ok: false, codigo: "retorno_alterado" });
+    expect(espiao.inseridos).toHaveLength(0);
+  });
+  it("data sem hora ou sem fuso não vira compromisso inventado", () => {
+    for (const data of ["2026-08-07", "2026-08-07T11:00:00", "07/08/2026"]) {
+      expect(validaInstanteDoRetorno(data, AGORA, JANELA)).toEqual({ ok: false, codigo: "instante_invalido" });
+    }
+  });
+});
+
+describe("horário permitido do retorno", () => {
+  const horario = { timezone: "America/Sao_Paulo", start: "08:00", end: "21:00", weekdays: [0, 1, 2, 3, 4, 5, 6] };
+  it("recusa hora fora da faixa sem mudar o retorno existente", async () => {
+    const db = fakeDb();
+    for (const data of ["2026-08-07T07:59:00-03:00", "2026-08-07T21:00:00-03:00"]) {
+      const r = await agendaRetorno(db.db, { agora: AGORA, janela: JANELA, horario }, { orgId: ORG, contactId: CONTATO }, { motivo: "pedido", promessa: "voltar", prometidoPara: data });
+      expect(r).toMatchObject({ ok: false, codigo: "horario_nao_permitido" });
+    }
+    expect(db.inseridos).toHaveLength(0);
+  });
+  it("08h em Brasília é válido mesmo quando a data vem em UTC", async () => {
+    const db = fakeDb();
+    const r = await agendaRetorno(db.db, { agora: AGORA, janela: JANELA, horario }, { orgId: ORG, contactId: CONTATO }, { motivo: "pedido", promessa: "voltar", prometidoPara: "2026-08-07T11:00:00Z" });
+    expect(r.ok).toBe(true);
+  });
+});

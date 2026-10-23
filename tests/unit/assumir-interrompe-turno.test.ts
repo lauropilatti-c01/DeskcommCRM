@@ -123,3 +123,17 @@ describe("o turno perde comando quando humano assume", () => {
     ]);
   });
 });
+
+
+it("a guarda usa a conexão retida e não pede outra ao pool ocupado", async () => {
+  const m = mundo();
+  const retida = mundo();
+  await withServiceJob(m.db, job, async () => {
+    const chamadasAntes = vi.mocked(m.db.query).mock.calls.length;
+    await guardServiceEffect(retida.db);
+    expect(vi.mocked(m.db.query).mock.calls).toHaveLength(chamadasAntes);
+    expect(retida.db.query).toHaveBeenCalled();
+    retida.assumir();
+    await expect(guardServiceEffect(retida.db)).rejects.toThrow("service_boundary_stale");
+  });
+});

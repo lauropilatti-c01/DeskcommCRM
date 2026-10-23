@@ -78,9 +78,9 @@ export async function assertAgendaEffectSupabase(
   const p = (await protecaoAgendaSupabase(db, c.organizationId, [c.contactId])).get(c.contactId)!;
   if (p.adiar) throw new AgendaDeferredError(p);
 }
-export async function guardAgendaEffect(): Promise<void> {
+export async function guardAgendaEffect(conexaoRetida?: Queryable): Promise<void> {
   const scope = effects.getStore();
-  if (scope) await assertAgendaEffectPg(scope.db, scope.context);
+  if (scope) await assertAgendaEffectPg(conexaoRetida ?? scope.db, scope.context);
 }
 export async function withAgendaEffect<T>(
   db: Queryable,
