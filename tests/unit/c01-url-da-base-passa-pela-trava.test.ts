@@ -192,7 +192,14 @@ describe("(C01) o turno: as URLs do resultado da base chegam ao gate", () => {
   it("a fiação: o turno embrulha crm_query_external_data, guarda as URLs e passa `urlsDaBase` ao gate", () => {
     const turno = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
     expect(turno).toMatch(/const FERRAMENTA_DA_BASE = 'crm_query_external_data';/);
-    expect(turno).toMatch(/name === FERRAMENTA_DA_BASE[\s\S]{0,600}for \(const url of urlsNoResultado\(resultado\)\) urlsDaBase\.add\(url\);/);
+    // O marcador de oferta acrescenta instruções neste wrapper. Confira o ramo
+    // real da consulta, sem usar um limite de caracteres como fronteira.
+    const inicioConsulta = turno.indexOf("} else if (name === FERRAMENTA_DA_BASE");
+    const fimConsulta = turno.indexOf("mcpToolIdsDoTurno.push(...mcp.toolIds)", inicioConsulta);
+    expect(inicioConsulta).toBeGreaterThan(-1);
+    expect(fimConsulta).toBeGreaterThan(inicioConsulta);
+    const consulta = turno.slice(inicioConsulta, fimConsulta);
+    expect(consulta).toMatch(/const resultado = await executeOriginal\(\.\.\.args\);[\s\S]*?for \(const url of urlsNoResultado\(resultado\)\) urlsDaBase\.add\(url\);/);
     expect(turno).toMatch(/enforceInternalVocabulary: true,[\s\S]{0,200}urlsDaBase,/);
     const beforeSend = readFileSync("lib/agent-engine/guardrails/before-send.ts", "utf8");
     expect(beforeSend).toMatch(/urlsDaBase: args\.urlsDaBase/);
