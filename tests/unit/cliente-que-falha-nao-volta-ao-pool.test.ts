@@ -38,6 +38,7 @@ import type { Logger } from '@/lib/agent-engine/obs/logger';
 import { claimJobs, completeJob } from '@/lib/agent-engine/queue/queue';
 import { requireRole, type RoleCheck } from '@/lib/auth/require-role';
 import type { AuthUser } from '@/lib/auth/types';
+import { createClient } from '@/lib/supabase/server';
 
 vi.mock('@/lib/auth/require-role', () => ({ requireRole: vi.fn() }));
 vi.mock('@/lib/agent-engine/db/request-pool', () => ({ getRequestPool: vi.fn() }));
@@ -51,6 +52,7 @@ vi.mock('@/lib/agent-engine/agent/human-handoff', () => ({
   performHumanHandoff: vi.fn(async () => undefined),
 }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminClient: vi.fn(() => ({})) }));
+vi.mock('@/lib/supabase/server', () => ({ createClient: vi.fn() }));
 // A autoridade de suporte é exercitada na suíte própria daquele módulo.
 vi.mock('@/lib/impersonate/support', async (importOriginal) => ({
   ...(await importOriginal<typeof SuporteDeImpersonate>()),
@@ -329,6 +331,24 @@ const AUTORIZACAO: RoleCheck = {
 
 function rotaComCliente(cliente: ClienteFalso): void {
   vi.mocked(requireRole).mockResolvedValue(AUTORIZACAO);
+  // A rota só abre a transação depois de confirmar a visibilidade pela sessão.
+  // Exercitamos o helper real com uma sessão autorizada, para que esta prova
+  // continue chegando ao release do cliente em vez de parar na guarda de acesso.
+  const sessao = {
+    from(tabela: string) {
+      const cadeia = {
+        select: () => cadeia,
+        eq: () => cadeia,
+        in: () => cadeia,
+        then: (aceita: (valor: unknown) => unknown) => Promise.resolve({
+          data: tabela === 'agent_cases' ? [{ conversation_id: CONV_ID }] : [{ id: CONV_ID }],
+          error: null,
+        }).then(aceita),
+      };
+      return cadeia;
+    },
+  };
+  vi.mocked(createClient).mockResolvedValue(sessao as unknown as Awaited<ReturnType<typeof createClient>>);
   vi.mocked(getRequestPool).mockReturnValue({
     query: vi.fn(async () => ({
       rows: [

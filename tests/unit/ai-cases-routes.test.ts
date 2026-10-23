@@ -24,7 +24,7 @@ import { ROLE_RANK, type AuthUser, type Role } from "@/lib/auth/types";
 
 vi.mock("@/lib/auth/require-role", () => ({ requireRole: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
-// O cliente de SESSÃO entrou nas duas rotas de leitura: é por ele que a RLS de
+// O cliente de SESSÃO atende às rotas de leitura e resposta: é por ele que a RLS de
 // `conversations` decide o que esta pessoa pode ver, ANTES da leitura
 // privilegiada (ver `conversasVisiveisDosCasos` em lib/escalacao/chamados.ts).
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
@@ -60,21 +60,33 @@ const CONV_ALHEIA = "66666666-6666-4666-8666-666666666666";
  * `conversations` devolve SÓ o que este usuário enxerga
  * (`fn_can_view_conversation`).
  */
-function sessaoComVisibilidade(opts: { casos?: string[]; visiveis: string[] }) {
+function sessaoComVisibilidade(opts: {
+  casos?: string[];
+  visiveis: string[];
+  falhaEm?: "agent_cases" | "conversations";
+}) {
+  const filtros: Array<[string, string, unknown]> = [];
   const linhasPorTabela = (tabela: string) =>
     tabela === "conversations"
       ? opts.visiveis.map((id) => ({ id }))
       : (opts.casos ?? opts.visiveis).map((conversation_id) => ({ conversation_id }));
 
-  function cadeia(linhas: unknown[]) {
+  function cadeia(tabela: string, linhas: unknown[]) {
     const c: Record<string, unknown> = {};
-    for (const metodo of ["select", "eq", "in", "order", "limit"]) c[metodo] = () => c;
+    for (const metodo of ["select", "order", "limit"]) c[metodo] = () => c;
+    for (const metodo of ["eq", "in"]) c[metodo] = (coluna: string, valor: unknown) => {
+      filtros.push([tabela, coluna, valor]);
+      return c;
+    };
     c.then = (aceita: (v: unknown) => unknown) =>
-      Promise.resolve({ data: linhas, error: null }).then(aceita);
+      Promise.resolve({
+        data: opts.falhaEm === tabela ? null : linhas,
+        error: opts.falhaEm === tabela ? { message: "Leitura da visibilidade indisponível" } : null,
+      }).then(aceita);
     return c;
   }
 
-  const cliente = { from: (tabela: string) => cadeia(linhasPorTabela(tabela)) };
+  const cliente = { from: (tabela: string) => cadeia(tabela, linhasPorTabela(tabela)), filtros };
   vi.mocked(createClient).mockResolvedValue(cliente as unknown as Awaited<ReturnType<typeof createClient>>);
   return cliente;
 }
@@ -414,6 +426,12 @@ describe("GET /api/v1/ai/cases/:id", () => {
 // ---------------------------------------------------------------------------
 
 describe("POST /api/v1/ai/cases/:id/reply", () => {
+  beforeEach(() => {
+    // Cada resposta autorizada precisa da própria sessão visível; não pode
+    // herdar a fixture do último GET nem pular a guarda para chegar ao pool.
+    sessaoComVisibilidade({ visiveis: [CONV_ID] });
+  });
+
   /**
    * O pool devolve a linha do caso na leitura e um client de transação em
    * `connect()`. O client registra os `begin`/`commit`/`rollback` para os testes
@@ -482,6 +500,10 @@ describe("POST /api/v1/ai/cases/:id/reply", () => {
     expect(res.status).toBe(200);
     const resBody = (await res.json()) as { data: { status: string } };
     expect(resBody.data.status).toBe("awaiting_lead");
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining("conv.id = any($3::uuid[])"),
+      [ORG_ID, CASE_ID, [CONV_ID]],
+    );
 
     // Transição e enqueue recebem o MESMO client da transação — é o que garante
     // que os dois efeitos entrem no mesmo commit.
@@ -682,9 +704,9 @@ describe("POST /api/v1/ai/cases/:id/reply", () => {
 
   it("caso de outra org → 404 (org resolvida via authz, nunca do body/path)", async () => {
     session("agent");
-    // A leitura do caso é org-scoped: para uma org sem esse caso, o SELECT
-    // (WHERE organization_id = $1 AND id = $2) não retorna linha — mesmo
-    // efeito de o caso pertencer a OTHER_ORG_ID.
+    // A sessão não vê casos de outra organização. A leitura privilegiada nem
+    // começa, e a consulta da sessão usa a organização autenticada.
+    const sessao = sessaoComVisibilidade({ casos: [], visiveis: [] });
     const pool = makePoolStub(undefined);
     vi.mocked(getRequestPool).mockReturnValue(pool as unknown as ReturnType<typeof getRequestPool>);
 
@@ -696,8 +718,44 @@ describe("POST /api/v1/ai/cases/:id/reply", () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("not_found");
-    // Prova que a query foi org-scoped pelo org do authz (ORG_ID), não OTHER_ORG_ID.
-    expect(pool.query).toHaveBeenCalledWith(expect.any(String), [ORG_ID, CASE_ID]);
+    expect(sessao.filtros).toContainEqual(["agent_cases", "organization_id", ORG_ID]);
+    expect(sessao.filtros).toContainEqual(["agent_cases", "id", CASE_ID]);
+    expect(getRequestPool).not.toHaveBeenCalled();
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  describe.each(["resolved", "need_lead_info", "escalate"] as const)("guarda da ação %s", (action) => {
+    async function responderSemEfeito(status: number, code: string) {
+      session("agent");
+      const pool = makePoolStub(caseRowFixture());
+      vi.mocked(getRequestPool).mockReturnValue(pool as unknown as ReturnType<typeof getRequestPool>);
+      const { POST } = await import("@/app/api/v1/ai/cases/[id]/reply/route");
+      const { resolveCaseFromHuman, markAwaitingLead, escalateCase } = await import("@/lib/agent-engine/agent/human-cases");
+      const { performHumanHandoff } = await import("@/lib/agent-engine/agent/human-handoff");
+      const { enqueueJob } = await import("@/lib/agent-engine/queue/queue");
+      const res = await POST(replyReq({ action, body: "Resposta humana" }), {
+        params: Promise.resolve({ id: CASE_ID }),
+      });
+
+      expect(res.status).toBe(status);
+      expect((await res.json()).error.code).toBe(code);
+      for (const efeito of [getRequestPool, pool.query, pool.connect, createAdminClient,
+        resolveCaseFromHuman, markAwaitingLead, escalateCase, performHumanHandoff, enqueueJob, audit]) {
+        expect(efeito).not.toHaveBeenCalled();
+      }
+    }
+
+    it("caso existente, mas conversa invisível → 404 antes de ler ou alterar pelo pool", async () => {
+      const sessao = sessaoComVisibilidade({ casos: [CONV_ALHEIA], visiveis: [] });
+      await responderSemEfeito(404, "not_found");
+      expect(sessao.filtros).toContainEqual(["conversations", "organization_id", ORG_ID]);
+      expect(sessao.filtros).toContainEqual(["conversations", "id", [CONV_ALHEIA]]);
+    });
+
+    it.each(["agent_cases", "conversations"] as const)("falha ao consultar %s → 503 sem efeito", async (falhaEm) => {
+      sessaoComVisibilidade({ visiveis: [CONV_ID], falhaEm });
+      await responderSemEfeito(503, "unavailable");
+    });
   });
 });
 
