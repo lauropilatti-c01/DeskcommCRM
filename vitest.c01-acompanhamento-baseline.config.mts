@@ -10,7 +10,10 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["experiments/extensoes/c01-atendimento/acompanhamento-baseline.test.ts"],
+    include: [
+      "experiments/extensoes/c01-atendimento/acompanhamento-baseline.test.ts",
+      "experiments/extensoes/c01-atendimento/origem-sink.test.ts",
+    ],
     maxWorkers: 1,
     testTimeout: 30000,
   },
