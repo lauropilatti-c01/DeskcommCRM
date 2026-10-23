@@ -134,18 +134,20 @@ export async function requireCurrentAutonomousTurn(
   );
   if (!rows[0]?.current) throw new StaleServiceBoundaryError();
 }
-export async function guardServiceEffect(): Promise<void> {
+export async function guardServiceEffect(conexaoRetida?: Queryable): Promise<void> {
   const scope = execution.getStore();
+  // Uma trava pode reter a única conexão do pool; não pedir uma segunda.
+  const db = conexaoRetida ?? scope?.db;
   // (C01) Primeiro a posse do lease: execução substituída não paga as outras
   // consultas — e nenhum efeito dela (envio, caso, nota, etapa, checkpoint) sai.
-  if (scope?.job) await assertJobLeaseHeld(scope.db, scope.job, scope.cancelamento);
-  if (scope?.job) await requireCurrentAutonomousTurn(scope.db, scope.job);
-  if (scope?.agentOperation) await assertAgentOperationPg(scope.db, scope.agentOperation);
-  if (scope) await requireCurrentServiceBoundary(scope.db, scope.boundary);
+  if (scope?.job) await assertJobLeaseHeld(db!, scope.job, scope.cancelamento);
+  if (scope?.job) await requireCurrentAutonomousTurn(db!, scope.job);
+  if (scope?.agentOperation) await assertAgentOperationPg(db!, scope.agentOperation);
+  if (scope) await requireCurrentServiceBoundary(db!, scope.boundary);
   if (scope?.job?.kind === "transactional_delivery") {
     const claim = claimOfJob(scope.job);
     if (!claim) assertCurrentServiceBoundary(null, null);
-    await assertMeetingDeliveryPg(scope.db, {
+    await assertMeetingDeliveryPg(db!, {
       organizationId: scope.job.organization_id,
       jobId: scope.job.id,
       jobClaim: claim!,
@@ -154,13 +156,13 @@ export async function guardServiceEffect(): Promise<void> {
   if (scope?.job?.kind === "approved_reply") {
     const claim = claimOfJob(scope.job);
     if (!claim) assertCurrentServiceBoundary(null, null);
-    await assertApprovedReplyPg(scope.db, {
+    await assertApprovedReplyPg(db!, {
       organizationId: scope.job.organization_id,
       jobId: scope.job.id,
       jobClaim: claim!,
     });
   }
-  await guardAgendaEffect();
+  await guardAgendaEffect(conexaoRetida);
 }
 /** Continuação sem job (ex.: decisão humana sobre um caso já existente). */
 export async function withServiceBoundary<T>(

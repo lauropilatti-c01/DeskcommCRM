@@ -21,6 +21,7 @@
 import { z } from 'zod';
 import type pg from 'pg';
 
+import type { JanelaDeAtendimento } from './janela-de-atendimento';
 import { duracaoLegivel, agendaRetorno } from '@/lib/followup/retorno';
 import { criaRetornoDbPg } from '@/lib/followup/retorno-pg';
 import { emitAgentActivityForContact } from '@/lib/leads/agent-activity';
@@ -39,6 +40,7 @@ export interface FollowupWindowKnobs {
 
 /** Whitelist EXATA do que o modelo promete — .strict() rejeita o resto (mesmo padrão da F2-10). */
 export const scheduleFollowupInputSchema = z.strictObject({
+  replace_pending_id: z.string().min(1).max(64).optional(),
   reason: z.string().min(1).max(500),
   promised_at: z.string().min(1).max(64),
   promise: z.string().min(1).max(1_000),
@@ -51,14 +53,15 @@ export type ScheduleFollowupResult =
   | {
       ok: false;
       error: {
-        code: 'invalid_payload' | 'promised_at_in_past' | 'promised_at_out_of_window' | 'already_pending';
+        code: 'invalid_payload' | 'promised_at_in_past' | 'promised_at_out_of_window' | 'already_pending' | 'pending_changed' | 'outside_send_window';
         message: string;
       };
     };
 
 const PAYLOAD_TEACHING =
   'Campos aceitos: reason (por que agendar), promised_at (data ISO 8601 do retorno, no futuro), ' +
-  'promise (o que você prometeu ao lead), context_snapshot (contexto curto para o run futuro) — ' +
+  'promise (o que você prometeu ao lead), context_snapshot (contexto curto para o run futuro), ' +
+  'replace_pending_id (id já existente, somente para mudar um retorno a pedido do cliente) — ' +
   'nada além. Lead e organização vêm do runtime, nunca do payload da tool.';
 
 function teachInvalidPayload(issues: string): ScheduleFollowupResult {
@@ -76,7 +79,7 @@ function teachInvalidPayload(issues: string): ScheduleFollowupResult {
  */
 export async function applyScheduleFollowup(
   db: pg.Pool,
-  cfg: { clock: () => Date; knobs: FollowupWindowKnobs },
+  cfg: { clock: () => Date; knobs: FollowupWindowKnobs; horario?: JanelaDeAtendimento | null },
   ids: { tenantId: string; leadId: string; agentId?: string | null },
   rawInput: unknown,
 ): Promise<ScheduleFollowupResult> {
@@ -94,11 +97,13 @@ export async function applyScheduleFollowup(
   const agora = cfg.clock();
   const resultado = await agendaRetorno(
     criaRetornoDbPg(db),
-    { agora, janela: cfg.knobs },
+    { agora, janela: cfg.knobs, horario: cfg.horario },
     // No harness, "lead" É o contato (inbound-turn: leadId = job.contact_id) — é
     // exatamente o que `cron_jobs.contact_id` guarda.
     { orgId: ids.tenantId, contactId: ids.leadId },
     {
+      substituirRetornoId: input.replace_pending_id,
+      agenteId: ids.agentId ?? undefined,
       motivo: input.reason,
       prometidoPara: input.promised_at,
       promessa: input.promise,
@@ -141,6 +146,12 @@ export async function applyScheduleFollowup(
           },
         };
       }
+      case 'horario_nao_permitido':
+        return { ok: false, error: { code: 'outside_send_window', message:
+          `O horário fica fora da faixa permitida (${cfg.horario?.start}–${cfg.horario?.end}, ${cfg.horario?.timezone}). Combine outro horário; nenhum retorno foi criado ou alterado.` } };
+      case 'retorno_alterado':
+        return { ok: false, error: { code: 'pending_changed', message:
+          'O retorno foi cancelado, disparou ou mudou enquanto você tentava alterar. Não prometa o novo horário nem crie outro automaticamente; confira o estado atual.' } };
       case 'ja_existe_retorno': {
         // Guard anti-empilhamento (1 follow-up VIVO por lead): sem isto, o agente
         // marca um "reconfirmar amanhã" a cada turno e o lead vira alvo de N
@@ -155,7 +166,8 @@ export async function applyScheduleFollowup(
             message:
               `este lead JÁ tem um follow-up agendado${quando ? ` para ${quando}` : ''} — ` +
               `não agende outro (evita bombardear o lead com confirmações repetidas). ` +
-              `Se precisa mudar o horário, encerre o turno; o follow-up existente vai disparar no horário combinado. ` +
+              `Se o cliente pediu outro horário, repita a chamada com replace_pending_id="${resultado.existente?.id}" e a nova data. ` +
+              `Só confirme a alteração depois de ok=true; nunca cancele e crie outro em duas chamadas. ` +
               `Use SEMPRE data ABSOLUTA (ex.: "2026-07-25T13:00:00Z"), nunca relativa como "amanhã" — ` +
               `a promessa é lida dias depois e "amanhã" fica sem sentido.`,
           },
@@ -174,7 +186,7 @@ export async function applyScheduleFollowup(
     organizationId: ids.tenantId,
     contactId: ids.leadId,
     type: 'followup_scheduled',
-    reason: `Retorno agendado — ${input.reason}`,
+    reason: `${resultado.substituiu ? "Retorno reagendado" : "Retorno agendado"} — ${input.reason}`,
     sourceModule: 'followup',
     sourceId: null,
     agentId: ids.agentId ?? null,
@@ -182,6 +194,7 @@ export async function applyScheduleFollowup(
       retorno_id: resultado.retorno.id,
       quando: resultado.retorno.quando,
       prometido_para: resultado.retorno.prometidoPara,
+      ...(resultado.substituiu ? { horario_anterior: resultado.substituiu.prometidoPara ?? resultado.substituiu.quando } : {}),
     },
   });
 
@@ -190,7 +203,7 @@ export async function applyScheduleFollowup(
     cronJobId: resultado.retorno.id,
     promisedAt: new Date(resultado.retorno.quando),
     message:
-      `retorno agendado para ${input.promised_at}. Encerre o turno agora; ` +
+      `retorno ${resultado.substituiu ? "reagendado" : "agendado"} para ${input.promised_at}. Encerre o turno agora; ` +
       `o sistema fará o follow-up com o lead no horário combinado.`,
   };
 }

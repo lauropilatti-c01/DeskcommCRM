@@ -16,6 +16,7 @@
  *     atividade" passa no typecheck e no lint com texto falso dentro.
  */
 import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
 
 import {
   crmScheduleFollowup,
@@ -29,6 +30,12 @@ import { ACTIVITY_LABELS } from "@/lib/leads/activity-vocabulary";
 import { pickToolsFromMcp } from "@/lib/ai/runtime/tools";
 import type { McpAuthResult } from "@/lib/mcp/auth";
 import type { McpContext } from "@/lib/mcp/types";
+
+vi.mock("@/lib/agent-engine/db/request-pool", () => ({
+  getRequestPool: () => ({ connect: async () => Object.assign(new EventEmitter(), {
+    query: async () => ({ rows: [{ locked: true }] }), release() {},
+  }) }),
+}));
 
 vi.mock("@/lib/audit", () => ({ audit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -91,6 +98,11 @@ function fakeSupabase(resolve: Resolver, cap: Capturas) {
         c.filtros[col] = val;
         return chain;
       },
+      filter: (col: string, op: string, val: unknown) => {
+        c.filtros[`${col}:${op}`] = val;
+        return chain;
+      },
+      abortSignal: () => chain,
       in: () => chain,
       is: () => chain,
       gt: () => chain,
@@ -224,6 +236,35 @@ describe("crm_schedule_followup", () => {
     expect(res.agendado).toBe(false);
     expect(res.motivo).toBe("ja_existe_retorno");
     expect(cap.inserts.filter((i) => i.table === "cron_jobs")).toHaveLength(0);
+  });
+
+  it.each([true, false])("troca explícita pelo MCP só confirma se a escrita vencer (venceu=%s)", async (venceu) => {
+    const cap = novasCapturas();
+    const antigo = {
+      id: RETORNO, contact_id: CONTATO, next_run_at: daquiADias(1), enabled: true,
+      payload: { reason: "original", promise: "amanhã", promised_at: daquiADias(1), service_boundary: { revision: 1 } },
+      cancelled_at: null, cancel_reason: null,
+    };
+    const novaData = daquiADias(2);
+    const consultas: Consulta[] = [];
+    const resolver: Resolver = (c) => {
+      consultas.push(c);
+      if (c.table !== "cron_jobs") return caminhoLivre(c);
+      if (c.op === "select") return { data: c.terminal === "list" ? [antigo] : antigo, error: null };
+      if (c.op === "update") return { data: venceu ? { ...antigo, next_run_at: novaData, payload: { ...antigo.payload, promised_at: novaData } } : null, error: null };
+      throw new Error("Reagendar não pode inserir outro job");
+    };
+    const res = await crmScheduleFollowup.handler({
+      lead_id: LEAD, promised_at: novaData, reason: "cliente pediu outro horário", promise: "depois de amanhã",
+      replace_pending_id: RETORNO,
+    }, ctxDe(resolver, cap)) as { agendado: boolean; motivo?: string };
+    expect(res.agendado).toBe(venceu);
+    if (!venceu) expect(res.motivo).toBe("retorno_alterado");
+    const escrita = consultas.find((c) => c.table === "cron_jobs" && c.op === "update");
+    expect(escrita?.filtros).toMatchObject({ organization_id: ORG, id: RETORNO, contact_id: CONTATO, enabled: true, next_run_at: antigo.next_run_at, "payload:eq": JSON.stringify(antigo.payload) });
+    expect(cap.updates.find((c) => c.table === "cron_jobs")?.values.payload).toMatchObject({ service_boundary: { revision: 1 } });
+    expect(cap.inserts.some((c) => c.table === "cron_jobs")).toBe(false);
+    expect(cap.inserts.some((c) => c.table === "crm_lead_activities")).toBe(venceu);
   });
 
   /**

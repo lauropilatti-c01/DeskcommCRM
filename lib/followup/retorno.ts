@@ -22,6 +22,7 @@
  * compartilhada por `buildLeadActivityRow`. Duplicar aqui a escolha do emissor
  * seria inventar um terceiro.
  */
+import { msAteAJanelaAbrir, type JanelaDeAtendimento } from "@/lib/agent-engine/agent/janela-de-atendimento";
 import { computeInitialRunAt } from "@/lib/agent-engine/cron/schedule";
 
 import type { JanelaDeRetorno } from "./janela";
@@ -51,6 +52,7 @@ export interface PayloadDoRetorno {
   context_snapshot?: string | null;
   /** De onde veio o agendamento (ex.: `reactivation`). */
   source?: string;
+  callback_agent_id?: string;
 }
 
 export interface RetornoAgendado {
@@ -73,6 +75,10 @@ export interface RetornoAgendado {
  * Supabase, e para os testes da REGRA não precisarem de Postgres.
  */
 export interface RetornoDb {
+  /** Os adaptadores reais serializam a decisão inteira por organização/contato. */
+  comExclusividade?<T>(
+    orgId: string, contactId: string, executar: (db: RetornoDb) => Promise<T>,
+  ): Promise<{ ocupado: true } | { ocupado: false; resultado: T }>;
   /** O retorno VIVO do contato, se houver (o guard anti-empilhamento). */
   buscaRetornoVivo(orgId: string, contactId: string): Promise<RetornoAgendado | null>;
   /** Cria a linha. `quando` já vem com o stagger aplicado por quem chama. */
@@ -80,6 +86,12 @@ export interface RetornoDb {
     orgId: string,
     input: { contactId: string; quando: Date; payload: PayloadDoRetorno },
   ): Promise<RetornoAgendado>;
+  /** Troca condicional da mesma linha; null = cron/cancelamento/edição ganhou a corrida. */
+  reagenda?(
+    orgId: string,
+    anterior: RetornoAgendado,
+    input: { quando: Date; payload: PayloadDoRetorno },
+  ): Promise<RetornoAgendado | null>;
   buscaPorId(orgId: string, retornoId: string): Promise<RetornoAgendado | null>;
   /** Marca cancelado. `false` = a linha já não estava agendada (corrida perdida). */
   marcaCancelado(
@@ -100,7 +112,9 @@ export type RecusaDeAgendamento =
   | "instante_invalido"
   | "instante_no_passado"
   | "instante_fora_da_janela"
-  | "ja_existe_retorno";
+  | "ja_existe_retorno"
+  | "retorno_alterado"
+  | "horario_nao_permitido";
 
 export interface InstanteAceito {
   ok: true;
@@ -108,7 +122,7 @@ export interface InstanteAceito {
 }
 export interface InstanteRecusado {
   ok: false;
-  codigo: Exclude<RecusaDeAgendamento, "ja_existe_retorno">;
+  codigo: Exclude<RecusaDeAgendamento, "ja_existe_retorno" | "retorno_alterado" | "horario_nao_permitido">;
 }
 
 /** Duração em português — só ordem de grandeza, nunca PII. */
@@ -131,6 +145,9 @@ export function validaInstanteDoRetorno(
   agora: Date,
   janela: JanelaDeRetorno,
 ): InstanteAceito | InstanteRecusado {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(prometidoIso)) {
+    return { ok: false, codigo: "instante_invalido" };
+  }
   const ms = Date.parse(prometidoIso);
   if (Number.isNaN(ms)) return { ok: false, codigo: "instante_invalido" };
 
@@ -147,6 +164,10 @@ export function validaInstanteDoRetorno(
 // ---------------------------------------------------------------------------
 
 export interface AgendaRetornoInput {
+  /** Só em pedido explícito de mudança; nunca cancelar e criar em duas chamadas. */
+  substituirRetornoId?: string;
+  /** Autor confiável do runtime; nunca argumento do modelo. */
+  agenteId?: string;
   /** Por que voltar a falar. */
   motivo: string;
   /** Instante ABSOLUTO, ISO 8601. Relativo ("amanhã") é lido dias depois e não significa nada. */
@@ -158,7 +179,7 @@ export interface AgendaRetornoInput {
 }
 
 export type ResultadoDoAgendamento =
-  | { ok: true; retorno: RetornoAgendado }
+  | { ok: true; retorno: RetornoAgendado; substituiu?: RetornoAgendado }
   | {
       ok: false;
       codigo: RecusaDeAgendamento;
@@ -178,15 +199,28 @@ export type ResultadoDoAgendamento =
  */
 export async function agendaRetorno(
   db: RetornoDb,
-  cfg: { agora: Date; janela: JanelaDeRetorno },
+  cfg: { agora: Date; janela: JanelaDeRetorno; horario?: JanelaDeAtendimento | null },
   ids: { orgId: string; contactId: string },
   input: AgendaRetornoInput,
 ): Promise<ResultadoDoAgendamento> {
   const instante = validaInstanteDoRetorno(input.prometidoPara, cfg.agora, cfg.janela);
   if (!instante.ok) return { ok: false, codigo: instante.codigo, janela: cfg.janela };
 
+  if (cfg.horario && msAteAJanelaAbrir(cfg.horario, instante.quando) !== null) {
+    return { ok: false, codigo: "horario_nao_permitido", janela: cfg.janela };
+  }
+
+  if (db.comExclusividade) {
+    const r = await db.comExclusividade(ids.orgId, ids.contactId, (serial) =>
+      agendaRetorno(serial, cfg, ids, input));
+    return r.ocupado ? { ok: false, codigo: "retorno_alterado", janela: cfg.janela } : r.resultado;
+  }
+
   const vivo = await db.buscaRetornoVivo(ids.orgId, ids.contactId);
-  if (vivo) {
+  if (input.substituirRetornoId && (!vivo || vivo.id !== input.substituirRetornoId || !db.reagenda)) {
+    return { ok: false, codigo: "retorno_alterado", existente: vivo ?? undefined, janela: cfg.janela };
+  }
+  if (vivo && !input.substituirRetornoId) {
     return { ok: false, codigo: "ja_existe_retorno", existente: vivo, janela: cfg.janela };
   }
 
@@ -199,17 +233,23 @@ export async function agendaRetorno(
     ids.contactId,
   );
 
-  const retorno = await db.insere(ids.orgId, {
-    contactId: ids.contactId,
-    quando,
-    payload: {
-      reason: input.motivo,
-      promise: input.promessa,
-      promised_at: input.prometidoPara,
-      context_snapshot: input.contexto ?? null,
-      ...(input.source ? { source: input.source } : {}),
-    },
-  });
+  if (cfg.horario && msAteAJanelaAbrir(cfg.horario, quando) !== null) {
+    return { ok: false, codigo: "horario_nao_permitido", janela: cfg.janela };
+  }
+  const payload: PayloadDoRetorno = {
+    reason: input.motivo,
+    promise: input.promessa,
+    promised_at: input.prometidoPara,
+    context_snapshot: input.contexto ?? null,
+    ...(input.source ? { source: input.source } : {}),
+    ...(input.agenteId ? { callback_agent_id: input.agenteId } : {}),
+  };
+  if (vivo && input.substituirRetornoId && db.reagenda) {
+    const alterado = await db.reagenda(ids.orgId, vivo, { quando, payload });
+    if (!alterado) return { ok: false, codigo: "retorno_alterado", janela: cfg.janela };
+    return { ok: true, retorno: alterado, substituiu: vivo };
+  }
+  const retorno = await db.insere(ids.orgId, { contactId: ids.contactId, quando, payload });
 
   return { ok: true, retorno };
 }

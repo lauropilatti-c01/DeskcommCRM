@@ -1,3 +1,6 @@
+import { comTravaDeEfeito, type TravaDeEfeito } from "@/lib/agent-engine/db/trava-de-efeito";
+import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
+import { lerJanelaDeFollowup } from "@/lib/agent-engine/agent/janela-de-followup";
 import { beginServiceAtOrigin } from "@/lib/atendimento/origem";
 /**
  * O retorno agendado do lado do CRM — adaptador de banco + as operações que a
@@ -80,6 +83,15 @@ function paraRetorno(row: LinhaDeCron): RetornoAgendado {
  * desligar — silenciosamente, porque a tabela é a mesma.
  */
 export function criaRetornoDbSupabase(admin: SupabaseClient): RetornoDb {
+  return {
+    ...adaptadorSupabase(admin),
+    comExclusividade: (orgId, contactId, executar) => comTravaDeEfeito(
+      getRequestPool(), `callback:${orgId}:${contactId}`, (trava) => executar(adaptadorSupabase(admin, trava)),
+    ),
+  };
+}
+
+function adaptadorSupabase(admin: SupabaseClient, trava?: TravaDeEfeito): RetornoDb {
   const base = () =>
     admin.from("cron_jobs").select(COLUNAS).eq("kind", "at").eq("job_kind", "followup_turn");
 
@@ -98,6 +110,7 @@ export function criaRetornoDbSupabase(admin: SupabaseClient): RetornoDb {
 
     async insere(orgId, input) {
       const boundary = await beginServiceAtOrigin(admin, orgId, input.contactId);
+      await trava?.conferir();
       const { data, error } = await admin
         .from("cron_jobs")
         .insert({
@@ -108,12 +121,38 @@ export function criaRetornoDbSupabase(admin: SupabaseClient): RetornoDb {
           next_run_at: input.quando.toISOString(),
           payload: { ...input.payload, conversation_id: boundary.conversation_id, service_boundary: boundary },
         })
+        .abortSignal(trava?.signal ?? new AbortController().signal)
         .select(COLUNAS)
         .single();
       if (error || !data) {
         throw new Error(`retorno_insert_failed: ${error?.message ?? "sem linha"}`);
       }
       return paraRetorno(data as unknown as LinhaDeCron);
+    },
+
+    async reagenda(orgId, anterior, input) {
+      // Preserva fronteira/conversa e metadados do job; igualdade do payload
+      // também impede sobrescrever uma edição concorrente que manteve a hora.
+      const { data: atual, error: erro } = await base()
+        .eq("organization_id", orgId).eq("id", anterior.id)
+        .eq("contact_id", anterior.contactId).eq("enabled", true).maybeSingle();
+      if (erro) throw new Error(`retorno_query_failed: ${erro.message}`);
+      if (!atual) return null;
+      const linha = atual as unknown as LinhaDeCron;
+      if (new Date(linha.next_run_at).getTime() !== Date.parse(anterior.quando) ||
+          texto(linha.payload?.promised_at) !== anterior.prometidoPara) return null;
+      await trava?.conferir();
+      let q = admin.from("cron_jobs").update({
+        next_run_at: input.quando.toISOString(),
+        payload: { ...(linha.payload ?? {}), ...input.payload },
+        updated_at: new Date().toISOString(), attempts: 0, last_error: null,
+      }).eq("organization_id", orgId).eq("id", anterior.id)
+        .eq("contact_id", anterior.contactId).eq("kind", "at").eq("job_kind", "followup_turn")
+        .eq("enabled", true).is("cancelled_at", null).eq("next_run_at", linha.next_run_at);
+      q = linha.payload === null ? q.is("payload", null) : q.filter("payload", "eq", JSON.stringify(linha.payload));
+      const { data, error } = await q.abortSignal(trava?.signal ?? new AbortController().signal).select(COLUNAS).maybeSingle();
+      if (error) throw new Error(`retorno_reschedule_failed: ${error.message}`);
+      return data ? paraRetorno(data as unknown as LinhaDeCron) : null;
     },
 
     async buscaPorId(orgId, retornoId) {
@@ -383,11 +422,32 @@ export async function agendaRetornoNoCrm(
   if (!alvo.ok) return { ok: false, codigo: alvo.codigo };
 
   const agora = deps.agora ?? new Date();
+  const agenteId = deps.actor.type === "ai_agent" ? deps.actor.agent_id : undefined;
+  let horario = null;
+  if (agenteId) {
+    const { data: agente, error: erroAgente } = await deps.admin.from("ai_agents")
+      .select("published_version_id").eq("organization_id", deps.orgId).eq("id", agenteId).maybeSingle();
+    if (erroAgente) throw new Error(`retorno_agent_query_failed: ${erroAgente.message}`);
+    if (!agente?.published_version_id) throw new Error("retorno_agent_unpublished");
+    if (agente.published_version_id) {
+      const { data: versao, error: erroVersao } = await deps.admin.from("ai_agent_versions")
+        .select("followup").eq("organization_id", deps.orgId).eq("id", agente.published_version_id).maybeSingle();
+      if (erroVersao) throw new Error(`retorno_version_query_failed: ${erroVersao.message}`);
+      if (!versao) throw new Error("retorno_version_missing");
+      if (versao.followup?.callback_enabled === false) throw new Error("retorno_callback_disabled");
+      if (versao?.followup?.send_window) {
+        const { data: org, error: erroOrg } = await deps.admin.from("organizations").select("timezone").eq("id", deps.orgId).maybeSingle();
+        if (erroOrg) throw new Error(`retorno_timezone_query_failed: ${erroOrg.message}`);
+        horario = lerJanelaDeFollowup(versao.followup, org?.timezone ?? "America/Sao_Paulo");
+        if (!horario) throw new Error("retorno_send_window_invalid");
+      }
+    }
+  }
   const resultado = await agendaRetorno(
     criaRetornoDbSupabase(deps.admin),
-    { agora, janela: janelaDe(deps) },
+    { agora, janela: janelaDe(deps), horario },
     { orgId: deps.orgId, contactId: alvo.alvo.contactId },
-    input,
+    { ...input, agenteId },
   );
   if (!resultado.ok) return { ...resultado, alvo: alvo.alvo };
 
@@ -396,11 +456,12 @@ export async function agendaRetornoNoCrm(
     alvo: alvo.alvo,
     tipo: "followup_scheduled",
     actor: deps.actor,
-    reason: motivoLegivel(input.motivo),
+    reason: `${resultado.substituiu ? "Horário alterado — " : ""}${motivoLegivel(input.motivo)}`,
     payload: {
       retorno_id: resultado.retorno.id,
       quando: resultado.retorno.quando,
       prometido_para: resultado.retorno.prometidoPara,
+      ...(resultado.substituiu ? { horario_anterior: resultado.substituiu.prometidoPara ?? resultado.substituiu.quando } : {}),
     },
     origem: "lib/followup/retorno-crm.agendaRetornoNoCrm",
     ...(deps.requestId ? { requestId: deps.requestId } : {}),

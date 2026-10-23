@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { EventEmitter } from 'node:events';
 import type pg from 'pg';
 
 import { applyScheduleFollowup } from './schedule-followup';
@@ -13,8 +14,12 @@ function fakePool(pendentes: Array<{ id: string; promised_at: string | null }>):
   inserts: number;
 } {
   let inserts = 0;
-  const db = {
+  const db = Object.assign(new EventEmitter(), {
+    release() {},
+    async connect() { return this; },
     async query(sql: string) {
+      if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ locked: true }] };
+      if (/pg_advisory_unlock|select 1/.test(sql)) return { rows: [] };
       if (/insert into cron_jobs/i.test(sql)) {
         inserts += 1;
         return { rows: [{ id: 'cron-novo', next_run_at: new Date('2026-07-25T13:00:00Z') }] };
@@ -22,7 +27,7 @@ function fakePool(pendentes: Array<{ id: string; promised_at: string | null }>):
       // guard SELECT
       return { rows: pendentes };
     },
-  } as unknown as pg.Pool;
+  }) as unknown as pg.Pool;
   return { db, get inserts() { return inserts; } } as { db: pg.Pool; inserts: number };
 }
 
@@ -64,5 +69,26 @@ describe('applyScheduleFollowup — guard anti-empilhamento (1 pendente por lead
     if (res.ok) throw new Error('esperava falha');
     expect(res.error.message.toLowerCase()).toContain('absoluta');
     expect(res.error.message).toContain('amanhã');
+  });
+});
+
+
+describe('applyScheduleFollowup — troca explícita de horário', () => {
+  it.each([true, false])('só confirma a troca depois de a escrita vencer (venceu=%s)', async (venceu) => {
+    const queries: string[] = [];
+    const original = { id: 'cron-existente', contact_id: 'lead-1', next_run_at: '2026-07-24T13:00:00Z', payload: { reason: 'original', promised_at: '2026-07-24T13:00:00Z' }, enabled: true };
+    const db = Object.assign(new EventEmitter(), { release() {}, async connect() { return this; }, query: async (sql: string) => {
+      queries.push(sql);
+      if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ locked: true }] };
+      if (/pg_advisory_unlock|select 1/.test(sql)) return { rows: [] };
+      if (/update cron_jobs/i.test(sql)) return { rows: venceu ? [{ ...original, next_run_at: VALID.promised_at }] : [] };
+      if (/from cron_jobs/i.test(sql)) return { rows: [original] };
+      return { rows: [] };
+    } }) as unknown as pg.Pool;
+    const res = await applyScheduleFollowup(db, CFG, IDS, { ...VALID, replace_pending_id: original.id });
+    expect(res.ok).toBe(venceu);
+    if (!res.ok) expect(res.error.code).toBe('pending_changed');
+    else expect(res.message).toContain('reagendado');
+    expect(queries.some((sql) => /insert into cron_jobs/i.test(sql))).toBe(false);
   });
 });

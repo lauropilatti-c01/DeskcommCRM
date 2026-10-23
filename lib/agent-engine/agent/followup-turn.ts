@@ -1,3 +1,4 @@
+import { conferirCallbackAntesDoTurno } from "./callback-disparo";
 import {claimOfJob,type JobClaim} from "../queue/claim";
 import {resultadoDoEnvioDoFollowup} from "../edge/crm/send-ledger";
 import { parseServiceBoundary } from "@/lib/atendimento/fronteira";
@@ -79,6 +80,7 @@ const HOUR_MS = 3_600_000;
  */
 export const followupTurnPayloadSchema = z
   .object({
+    callback_agent_id: z.string().uuid().optional(),
     reason: z.string().optional(),
     promise: z.string().optional(),
     promised_at: z.string().optional(),
@@ -511,12 +513,25 @@ export function createFollowupTurnHandler(deps: FollowupTurnDeps) {
     }
 
     const clock = deps.clock ?? ((): Date => new Date());
+    // Retornos novos carregam o agente confiável da criação. Não alteramos os
+    // callbacks legados; nos novos, a faixa publicada vale também ao acordar.
+    if (!payload.followup_enrollment_id && payload.callback_agent_id) {
+      const callback = await conferirCallbackAntesDoTurno(pool, tenantId, payload.callback_agent_id, clock());
+      if (callback.tipo === 'impedido') {
+        deps.log.info('retorno não executado', { job_id: job.id, reason: callback.motivo });
+        return;
+      }
+      if (callback.tipo === 'adiar') {
+        await rescheduleReentry(pool, { tenantId, leadId, jobId: job.id, at: callback.ate, payload: job.payload });
+        deps.log.info('retorno adiado pela faixa do agente', { job_id: job.id, next_run_at: callback.ate.toISOString() });
+        return;
+      }
+    }
 
     // #490 — a janela PRÓPRIA vale só para envio proativo dirigido por fluxo.
     // `classify` e `plan_timing` não falam com o cliente e podem rodar a qualquer
-    // hora. Retornos prometidos via `schedule_followup` continuam fora deste
-    // recorte: eles não têm enrollment/agent pinado, e a issue deixou essa regra
-    // explicitamente em aberto para uma decisão separada.
+    // hora. Retornos novos com agente pinado passam pelo bloco acima; retornos
+    // legados sem agente continuam com o contrato anterior.
     if (payload.followup_enrollment_id !== undefined && payload.purpose === 'send_message') {
       const followup = await followupPublicadoDoEnrollment(
         pool,

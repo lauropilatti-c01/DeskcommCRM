@@ -1,3 +1,4 @@
+import { lerJanelaDeFollowup } from './janela-de-followup';
 import { prospectingConversationContext } from "@/lib/prospecting/context";
 import { setExecutionAgentOperation } from '@/lib/atendimento/fronteira-server';
 import type { AgentOperationContext } from '@/lib/ai/agents/operation';
@@ -439,12 +440,13 @@ export const AGENT_TOOL_DEFS = {
       'Agenda o SEU próprio retorno a este lead num momento futuro (follow-up). Use sempre que ' +
       'prometer voltar a falar depois (ex.: "te retorno amanhã de manhã", "confirmo na segunda"). ' +
       'Um agendamento por promessa; o sistema fará o follow-up sozinho no horário combinado — ' +
-      'depois de agendar, encerre o turno.',
+      'Só confirme depois de ok=true. Para mudança pedida pelo cliente, use replace_pending_id devolvido pela recusa; depois encerre o turno.',
     // Schema LARGO para o SDK (o modelo vê os campos); a validação REAL é a whitelist
     // .strict() + guard de prototype pollution dentro de applyScheduleFollowup — campo
     // extra/forjado e data inválida viram erro de ENSINO ao modelo, nunca exceção do SDK.
     inputSchema: z
       .object({
+        replace_pending_id: z.string().optional().describe('ID do retorno existente, somente se o cliente pediu para mudar seu horário'),
         reason: z.string().describe('por que agendar o retorno'),
         promised_at: z
           .string()
@@ -6263,9 +6265,15 @@ async function executarTurnoDoAgente(
           // agentId vai junto para a atividade da timeline nascer com AUTORIA: sem
           // ele a linha entra como "Sistema" e o humano não sabe qual agente
           // prometeu voltar — numa org com três agentes isso não responde nada.
+          const horarioDoRetorno = lerJanelaDeFollowup(agentConfig?.followup, fusoDaOrg);
+          const configDoRetorno = agentConfig?.followup;
+          if (typeof configDoRetorno === 'object' && configDoRetorno !== null &&
+              'send_window' in configDoRetorno && configDoRetorno.send_window != null && !horarioDoRetorno) {
+            throw new Error('retorno_send_window_invalid');
+          }
           const res = await applyScheduleFollowup(
             pool,
-            { clock, knobs: followupKnobs },
+            { clock, knobs: followupKnobs, horario: horarioDoRetorno },
             { tenantId, leadId, agentId: agentConfig?.agentId ?? null },
             raw,
           );

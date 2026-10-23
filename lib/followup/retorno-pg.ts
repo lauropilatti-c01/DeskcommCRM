@@ -1,3 +1,4 @@
+import { comTravaDeEfeito } from "@/lib/agent-engine/db/trava-de-efeito";
 import { currentExecutionBoundary, guardServiceEffect } from "@/lib/atendimento/fronteira-server";
 /**
  * O `RetornoDb` sobre `pg.Pool` — o lado do motor do agente.
@@ -60,7 +61,16 @@ function paraRetorno(row: LinhaDeCron, contactIdPadrao: string): RetornoAgendado
   };
 }
 
-export function criaRetornoDbPg(db: pg.Pool): RetornoDb {
+export function criaRetornoDbPg(pool: pg.Pool): RetornoDb {
+  return {
+    ...adaptadorPg(pool),
+    comExclusividade: (orgId, contactId, executar) => comTravaDeEfeito(
+      pool, `callback:${orgId}:${contactId}`, (trava) => executar(adaptadorPg(trava.db)),
+    ),
+  };
+}
+
+function adaptadorPg(db: Pick<pg.Pool, "query">): RetornoDb {
   return {
     async buscaRetornoVivo(orgId, contactId) {
       const { rows } = await db.query<LinhaDeCron>(
@@ -77,7 +87,7 @@ export function criaRetornoDbPg(db: pg.Pool): RetornoDb {
     },
 
     async insere(orgId, input) {
-      await guardServiceEffect();
+      await guardServiceEffect(db);
       const boundary = currentExecutionBoundary();
       const { rows } = await db.query<LinhaDeCron>(
         `insert into cron_jobs
@@ -89,6 +99,23 @@ export function criaRetornoDbPg(db: pg.Pool): RetornoDb {
       const row = rows[0];
       if (row === undefined) throw new Error("retorno_insert_failed: sem linha");
       return paraRetorno(row, input.contactId);
+    },
+
+    async reagenda(orgId, anterior, input) {
+      await guardServiceEffect(db);
+      const { rows } = await db.query<LinhaDeCron>(
+        `update cron_jobs
+            set next_run_at = $4, payload = coalesce(payload, '{}'::jsonb) || $5::jsonb,
+                updated_at = now(), attempts = 0, last_error = null
+          where organization_id = $1 and id = $2 and contact_id = $3
+            and kind = 'at' and job_kind = 'followup_turn' and enabled = true
+            and cancelled_at is null and next_run_at = $6
+            and (payload->>'promised_at') is not distinct from $7::text
+          returning ${COLUNAS}`,
+        [orgId, anterior.id, anterior.contactId, input.quando, input.payload,
+          anterior.quando, anterior.prometidoPara],
+      );
+      return rows[0] ? paraRetorno(rows[0], anterior.contactId) : null;
     },
 
     async buscaPorId(orgId, retornoId) {
