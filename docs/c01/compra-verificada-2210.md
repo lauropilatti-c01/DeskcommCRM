@@ -1,5 +1,9 @@
 # Compra verificada — núcleo candidato de 22/10/2026
 
+Registro histórico da entrega de 22/10. A rota e os adaptadores candidatos foram
+acrescentados em [23/10](compra-verificada-2310.md); continuam desligados. As
+limitações e os resultados abaixo descrevem a rodada anterior.
+
 Estado: implementado e testado localmente, **desligado, sem rota e sem ferramenta
 registrada**. Não foi instalado nem acionado na produção. A integração
 observacional continua apenas conferindo. Não há migration, tabela ou coluna

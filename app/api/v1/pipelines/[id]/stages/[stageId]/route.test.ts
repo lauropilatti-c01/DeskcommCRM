@@ -133,14 +133,22 @@ describe("PATCH /api/v1/pipelines/[id]/stages/[stageId]", () => {
     const db = makeDb({
       stages: [
         ...funil(),
-        etapa({ id: "e9", name: "Proposta antiga", slug: "antiga", position: 9000, is_archived: true }),
+        etapa({
+          id: "e9",
+          name: "Proposta antiga",
+          slug: "antiga",
+          position: 9000,
+          is_archived: true,
+        }),
       ],
     });
     const { PATCH } = await import("./route");
     const res = await PATCH(reqPatch({ is_won: true }), ctx("e9"));
 
     expect(res.status).toBe(409);
-    expect((await res.json() as { error: { message: string } }).error.message).toContain("arquivada");
+    expect(((await res.json()) as { error: { message: string } }).error.message).toContain(
+      "arquivada",
+    );
     // O veredito não é o status: é que a etapa de ganho de verdade continua sendo «Pago».
     expect(db.escritas).toEqual([]);
     expect(db.tabelas.crm_stages.find((e) => e.id === "e3")?.is_won).toBe(true);
@@ -256,9 +264,7 @@ describe("PATCH /api/v1/pipelines/[id]/stages/[stageId]", () => {
    */
   it("mover a marcação de ganho → dois updates em SEQUÊNCIA, desmarcando primeiro", async () => {
     authOk();
-    const stages = funil().map((e) =>
-      e.id === "e3" ? { ...e, agent_stage_hint: "won" } : e,
-    );
+    const stages = funil().map((e) => (e.id === "e3" ? { ...e, agent_stage_hint: "won" } : e));
     const db = makeDb({ stages });
     const { PATCH } = await import("./route");
     const res = await PATCH(reqPatch({ is_won: true }), ctx());
@@ -548,7 +554,9 @@ describe("DELETE /api/v1/pipelines/[id]/stages/[stageId]", () => {
       payload: { from_stage_id: "e2", to_stage_id: "e1", stage_archived: true },
     });
     // A razão é lida por gente: cita as duas colunas e o motivo.
-    expect(linhas[0]!.reason).toBe("Movido de Proposta para Novo (a etapa «Proposta» foi arquivada)");
+    expect(linhas[0]!.reason).toBe(
+      "Movido de Proposta para Novo (a etapa «Proposta» foi arquivada)",
+    );
   });
 
   /**
@@ -681,7 +689,37 @@ describe("DELETE /api/v1/pipelines/[id]/stages/[stageId]", () => {
 
 // Este teste isola o handler; autoridade de suporte é exercitada na suíte própria.
 vi.mock("@/lib/impersonate/support", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@/lib/impersonate/support")>(),
+  ...(await importOriginal<typeof import("@/lib/impersonate/support")>()),
   requireSupportWrite: vi.fn(async () => null),
   authenticatedSessionId: vi.fn(async () => "f2200000-0000-4000-8000-000000000099"),
 }));
+
+describe("C01: arquivamento não é atalho de confirmação financeira", () => {
+  it("recusa mover todos para Ganho quando o funil exige pagamento confirmado", async () => {
+    authOk();
+    const db = makeDb({
+      stages: funil(),
+      leads: [negocio("l1", "e2")],
+      pipelines: [
+        {
+          id: PIPE,
+          name: "Vendas",
+          organization_id: ORG_ID,
+          settings: {
+            fields: [{ key: "pagamento_confirmado", obrigatorio_em: { ao_ganhar: true } }],
+          },
+        },
+      ],
+    });
+    const { DELETE } = await import("./route");
+    const r = await DELETE(reqDelete("e3"), ctx());
+    expect(r.status).toBe(422);
+    expect(await r.json()).toMatchObject({
+      error: {
+        code: "unprocessable_entity",
+        message: expect.stringContaining("Escolha uma etapa em aberto."),
+      },
+    });
+    expect(db.escritas).toEqual([]);
+  });
+});
