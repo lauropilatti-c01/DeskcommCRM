@@ -287,7 +287,7 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
 
   it("a cadeia arma a trava pelo contexto, lido na hora de cada execução", () => {
     expect(CADEIA).toMatch(/travasDeEnvio: args\.travasDeEnvio\(\)/);
-    expect(CADEIA).toMatch(/textoLongoGate,\s*disclosureGate,/);
+    expect(CADEIA).toMatch(/textoLongoGate,\s*linguagemFormalGate,\s*disclosureGate,/);
   });
 
   it("o turno lê a configuração uma vez, antes das ferramentas; com o divisor ligado, conta bolhas", () => {
@@ -315,7 +315,7 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
     const bloco = sendMessage.slice(i, sendMessage.indexOf("chain.code === 'internal_vocabulary_leak'"));
     expect(bloco).toMatch(
       // (-c01.8) Antes do `return`, o envio vetado fica guardado para sair sem etapa de reescrita.
-      /const vetos = \(vetosDeEstilo\.get\(chain\.code\) \?\? 0\) \+ 1;\s*vetosDeEstilo\.set\(chain\.code, vetos\);\s*if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*envioVetadoPorEstilo = \{\s*trava: chain\.code,\s*entrada: [^\n]*\n\s*\};\s*return \{ ok: false, error: \{ code: chain\.code, message: chain\.message \} \};/,
+      /const vetos = \(vetosDeEstilo\.get\(chain\.code\) \?\? 0\) \+ 1;\s*vetosDeEstilo\.set\(chain\.code, vetos\);\s*if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*envioVetadoPorEstilo = \{\s*trava: chain\.code,\s*entrada: \{[\s\S]*?\},\s*\};\s*return \{ ok: false, error: \{ code: chain\.code, message: chain\.message \} \};/,
     );
     expect(bloco).toMatch(
       /chain = await cadeiaDeEnvio\(\(\) =>\s*runBeforeSend\(\{\s*\.\.\.beforeSendArgs,\s*\.\.\.\(openedCaseThisTurn \? \{ hasOpenCase: true, openedCaseThisTurn: true \} : \{\}\),\s*\}\),\s*\);/,

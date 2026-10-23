@@ -699,6 +699,7 @@ export const MAX_VETOS_DE_CONTEUDO = MAX_VETOS_DE_VOCABULARIO_INTERNO;
  */
 export const TRAVAS_DE_ESTILO: Readonly<Record<string, keyof TravasArmadas>> = {
   texto_longo: 'textoLongo',
+  linguagem_formal: 'linguagemFormal',
   // (C01, -c01.3, item 3c) Ver `uma-pergunta.ts`.
   uma_pergunta: 'umaPergunta',
   // (C01, -c01.14) Ver `consulta-antes-de-enviar.ts`.
@@ -4385,7 +4386,10 @@ async function executarTurnoDoAgente(
   // o laço acabar sem nova tentativa de envio (sem etapa: `max_steps`, consultas que gastaram
   // as etapas, teto de tokens), ele sai depois do laço com as travas de estilo desarmadas:
   // estilo nunca abre caso, nunca manda a frase de espera, nunca passa à equipe.
-  let envioVetadoPorEstilo = null as { trava: string; entrada: { body: string; produto_codigo?: string } } | null;
+  let envioVetadoPorEstilo = null as {
+    trava: string;
+    entrada: { body: string; produto_codigo?: string; video_chave?: string };
+  } | null;
   /**
    * (C01, -c01.3) O que o `send_message` arma em cada tentativa: as travas ligadas na
    * organização, com o que cada uma precisa saber do turno AGORA (quantas mensagens
@@ -4411,6 +4415,9 @@ async function executarTurnoDoAgente(
     ...(travasDaOrg.travas.umaPergunta && !estiloDesarmado('uma_pergunta')
       ? { umaPergunta: true as const }
       : {}),
+    ...(travasDaOrg.travas.linguagemFormal && !estiloDesarmado('linguagem_formal')
+      ? { linguagemFormal: true as const }
+      : {}),
     // (C01, -c01.8) Com o divisor desligado, a trava confere o tamanho da mensagem inteira
     // (`texto_longo.max_caracteres`, padrão 700): uma mensagem por resposta.
     ...(travasDaOrg.travas.textoLongo && !estiloDesarmado('texto_longo')
@@ -4422,6 +4429,9 @@ async function executarTurnoDoAgente(
               : { maxChars: travasDaOrg.travas.textoLongoMaxCaracteres, semDivisor: true as const }),
             // (C01, -c01.15) Com o divisor, também o total da resposta (`texto-longo.ts`).
             maxTotal: travasDaOrg.travas.textoLongoMaxCaracteres,
+            ...(travasDaOrg.travas.textoLongoPorBolhaSemUrls
+              ? { porBolhaSemUrls: travasDaOrg.travas.textoLongoMaxCaracteres }
+              : {}),
           },
         }
       : {}),
@@ -5105,6 +5115,9 @@ async function executarTurnoDoAgente(
     send_message: tool({
       ...AGENT_TOOL_DEFS.send_message,
       execute: async ({ body: corpoDoModelo, produto_codigo, video_chave }, opcoes) => {
+        // (C01, -c01.8; integração V1) Qualquer tentativa nova substitui a pendente,
+        // inclusive vídeo inválido: o fim do turno não pode soltar a resposta antiga.
+        envioVetadoPorEstilo = null;
         tentativasDeEnvio += 1;
         // O texto sai no formato do WhatsApp — sem `\n` literal nem
         // `**negrito**` de Markdown na tela do cliente. Antes de qualquer gate,
@@ -5117,8 +5130,6 @@ async function executarTurnoDoAgente(
           return { ok: false, error: { code: 'video_configuracao_invalida', message:
             'Vídeo nativo exige legenda de até 1024 caracteres, sem produto_codigo. A prévia não executa vídeo; não considere o anexo enviado.' } };
         }
-        // (C01, -c01.8) Uma tentativa nova substitui a que o estilo vetou.
-        envioVetadoPorEstilo = null;
         // (C01, -c01.14) As tabelas cobradas cujo resultado NÃO estava no que o modelo leu
         // ao escrever ESTA mensagem. (`opcoes.messages` abre o passo, sem o passo desta
         // chamada: a consulta pedida junto com o envio não conta.)
@@ -5718,7 +5729,11 @@ async function executarTurnoDoAgente(
             if (vetos < MAX_VETOS_DE_ESTILO) {
               envioVetadoPorEstilo = {
                 trava: chain.code,
-                entrada: { body, ...(produto_codigo !== undefined ? { produto_codigo } : {}) },
+                entrada: {
+                  body,
+                  ...(produto_codigo !== undefined ? { produto_codigo } : {}),
+                  ...(video_chave !== undefined ? { video_chave } : {}),
+                },
               };
               return { ok: false, error: { code: chain.code, message: chain.message } };
             }

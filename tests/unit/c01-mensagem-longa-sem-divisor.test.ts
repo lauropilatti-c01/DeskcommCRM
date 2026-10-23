@@ -139,6 +139,13 @@ describe("(C01, -c01.8) a ligação no turno, pelo código", () => {
     expect(TURNO).toMatch(/if \(vetos < MAX_VETOS_DE_ESTILO\) \{\s*envioVetadoPorEstilo = \{/);
     // (-c01.14) o `execute` recebe também as opções do passo (`opcoes.messages`, o que o modelo leu).
     // Junção da 1.86: antes, a contagem de tentativas e a formatação do autor (`formatarParaWhatsApp`).
-    expect(TURNO).toMatch(/execute: async \(\{ body(?:: corpoDoModelo)?, produto_codigo \}(?:, opcoes)?\) => \{[\s\S]{0,600}?\/\/ \(C01, -c01\.8\)[^\n]*\n\s*envioVetadoPorEstilo = null;/);
+    // V1 acrescentou `video_chave`; a limpeza precede a validação da legenda. A cerca
+    // mede a posição dentro do send_message, sem depender do tamanho dos comentários.
+    const envio = TURNO.slice(TURNO.indexOf('send_message: tool({'), TURNO.indexOf('update_lead_state: tool({'));
+    expect(envio).toMatch(/execute: async \(\{ body: corpoDoModelo, produto_codigo, video_chave \}, opcoes\) => \{/);
+    const limpeza = envio.indexOf('envioVetadoPorEstilo = null;');
+    expect(limpeza).toBeGreaterThan(0);
+    expect(limpeza).toBeLessThan(envio.indexOf('if (video_chave !== undefined'));
+    expect(limpeza).toBeLessThan(envio.indexOf('const consultasFaltando ='));
   });
 });

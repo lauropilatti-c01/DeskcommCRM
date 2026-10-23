@@ -314,11 +314,25 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
     oQueProtege:
       "Quando a resposta viraria mais mensagens do que o assistente pode mandar de uma vez, ou " +
       "passa do tamanho combinado quando ele manda uma mensagem só, ela volta para ser reescrita " +
-      "mais curta, em vez de sair enorme.",
+      "mais curta, em vez de sair enorme. Uma opção da configuração mede o limite por mensagem " +
+      "e desconta o tamanho dos links; sem essa opção, mantém a contagem anterior.",
     escolha: null,
     porQueNaoSeDesliga:
       "É ajuste de estilo, e cada negócio decide se quer. Se a resposta voltar duas vezes, " +
       "ela sai inteira, como sairia sem esta conferência: nunca deixa o cliente sem resposta.",
+    camada: null,
+    opcionalNaConfiguracao: true,
+  },
+  {
+    nome: "linguagem_formal",
+    rotulo: "Evitar palavras formais e de manual",
+    oQueProtege:
+      "Pede uma reescrita quando encontra uma expressão da lista definida para o atendimento, " +
+      "como «mediante» ou «selecione». Não muda fatos, valores ou links.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "Vem desligada e depende de configuração própria da organização. É ajuste de estilo: " +
+      "após duas tentativas, deixa de pedir reescrita daquela resposta. Os bloqueios de envio continuam valendo.",
     camada: null,
     opcionalNaConfiguracao: true,
   },

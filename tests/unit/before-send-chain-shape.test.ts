@@ -43,6 +43,7 @@ const ORDEM_ESPERADA = [
   "valor_em_dinheiro",
   "uma_pergunta",
   "texto_longo",
+  "linguagem_formal",
   "disclosure",
 ] as const;
 
@@ -74,10 +75,9 @@ describe("forma da cadeia before_send", () => {
     // O par (tamanho, versão) é o que amarra os dois. Acrescentar um gate sem
     // bumpar deixa o trace de auditoria mentindo sobre qual cadeia rodou — e o
     // trace é justamente a prova que as Fases 0–2 usam para dizer "não regrediu".
-    // (Junção da 1.86) 13 do autor (com `clinical_claim` e `factual_claim`) + as 7
-    // nossas; a versão soma as duas numerações (ver `BEFORE_SEND_CHAIN_VERSION`).
-    expect(BEFORE_SEND_GATES).toHaveLength(20);
-    expect(BEFORE_SEND_CHAIN_VERSION).toBe(15);
+    // (Junção da 1.86) 13 do autor + as 8 nossas, incluindo G1 opt-in.
+    expect(BEFORE_SEND_GATES).toHaveLength(21);
+    expect(BEFORE_SEND_CHAIN_VERSION).toBe(16);
   });
 
   it("internal_vocabulary roda ANTES do disclosure — inspeciona o texto do modelo, não o emendado", () => {

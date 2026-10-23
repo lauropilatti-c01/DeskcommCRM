@@ -84,6 +84,7 @@ import { linkPermitidoGate } from './link-permitido';
 import { consultaAntesDeEnviarGate } from './consulta-antes-de-enviar';
 import { marcadorEntreColchetesGate } from './marcador-entre-colchetes';
 import { textoLongoGate } from './texto-longo';
+import { linguagemFormalGate } from './linguagem-formal';
 import { umaPerguntaGate } from './uma-pergunta';
 import { valorEmDinheiroGate } from './valor-em-dinheiro';
 import type { TravasArmadas } from './travas-de-envio';
@@ -975,8 +976,10 @@ const spinningGate: Gate = {
  * organização que ligou a camada `afirmacao_clinica`.
  * v15 (junção da 1.86; a v9 do autor) = insere `factualClaimGate` logo depois de
  * `semantic_promise` — a conferência de fato (#2231), ver abaixo.
+ * v16 = G1 opcional depois de `texto_longo`, antes do disclosure; linguagem formal
+ * usa o mesmo limite de vetos de estilo. G2 é opt-in dentro de `texto_longo`.
  */
-export const BEFORE_SEND_CHAIN_VERSION = 15;
+export const BEFORE_SEND_CHAIN_VERSION = 16;
 /**
  * Gate 6.3 — CONFERÊNCIA DE FATO (#2231): a afirmação de FATO da resposta
  * ("abrimos às 8h", "check-in às 12h", "temos piscina") conferida contra a
@@ -1036,6 +1039,7 @@ export const factualClaimGate: Gate = {
  *   (7.3) uma_pergunta (C01) — no máximo uma pergunta por mensagem;
  *   (7.4) texto_longo (C01) — a resposta cabe nas mensagens do turno; antes do disclosure
  *         (julga o texto do modelo, não o emendado);
+ *   (7.5) linguagem_formal (C01) — expressões decididas, somente com ativação própria;
  *   (8) disclosure — 1ª mensagem se apresenta como assistente virtual (F4-05).
  * (O anti-jailbreak F4-04 é INBOUND advisório, não gate de before_send — não entra aqui.)
  */
@@ -1059,6 +1063,7 @@ export const BEFORE_SEND_GATES: readonly Gate[] = [
   valorEmDinheiroGate,
   umaPerguntaGate,
   textoLongoGate,
+  linguagemFormalGate,
   disclosureGate,
 ];
 
