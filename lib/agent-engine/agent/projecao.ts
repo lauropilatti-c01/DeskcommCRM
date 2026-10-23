@@ -83,6 +83,9 @@ export interface ContextoProjetado {
    * pela mesma régua do retorno de ferramenta: chave com cara de identificador sai.
    */
   campos_do_card?: Record<string, unknown>;
+  campos_do_card_limites?: LeadContext['campos_do_card_limites'];
+  campos_do_card_vazios?: string[];
+  campos_do_card_leitura?: LeadContext['campos_do_card_leitura'];
   mensagens: MensagemProjetada[];
 }
 
@@ -134,6 +137,9 @@ export function projetarContexto(ctx: LeadContext): ContextoProjetado {
     ...(ctx.campos_do_card !== undefined
       ? { campos_do_card: projetarRetornoDeTool(ctx.campos_do_card) as Record<string, unknown> }
       : {}),
+    ...(ctx.campos_do_card_leitura ? {campos_do_card_leitura: ctx.campos_do_card_leitura} : {}),
+    ...(ctx.campos_do_card_vazios ? {campos_do_card_vazios: ctx.campos_do_card_vazios} : {}),
+    ...(ctx.campos_do_card_limites ? { campos_do_card_limites: ctx.campos_do_card_limites } : {}),
     mensagens: ctx.messages.map((m) => {
       const base: MensagemProjetada = {
         // 'inbound'/'outbound' é vocabulário de sistema e já apareceu parafraseado

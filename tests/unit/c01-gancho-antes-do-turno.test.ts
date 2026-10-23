@@ -317,7 +317,7 @@ describe("os campos do card que o modelo lê", () => {
         numero: 3,
         sim: true,
       }),
-    ).toEqual({ interesse: "plano-b", lista: "a, b", longo: "y".repeat(120), numero: 3, sim: true });
+    ).toEqual({ interesse: "plano-b", lista: "a, b", longo: "y".repeat(119) + "…", numero: 3, sim: true });
     const muitos = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`campo_${i}`, "valor"]));
     expect(Object.keys(camposCompactosDoCard(muitos))).toHaveLength(20);
     const grandes = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`c${i}`, "z".repeat(119)]));

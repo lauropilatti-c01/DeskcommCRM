@@ -141,10 +141,13 @@ export const TETO_DO_BLOCO_NO_CONTEXTO = 800;
 /**
  * (C01, -c01.16) Os tetos quando o funil define os campos: a ordem do funil decide
  * quem entra, e os tetos maiores fazem caber o card de um lead antigo que entra
- * pela campanha. Card sem definição no funil fica nos tetos de cima.
+ * pela campanha. Os 70 lugares cobrem até 50 campos declarados, nativos e
+ * campos técnicos. O orçamento total do contexto continua sendo conferido.
+ * Card sem definição no funil fica nos tetos de cima.
  */
-export const TETO_DE_CAMPOS_COM_FUNIL = 40;
-export const TETO_DO_BLOCO_COM_FUNIL = 1600;
+export const TETO_DE_CAMPOS_COM_FUNIL = 70;
+export const TETO_DO_BLOCO_COM_FUNIL = 32768;
+export const TETO_DO_VALOR_COM_FUNIL = 512;
 /**
  * (C01, -c01.16) Os campos que o próprio Deskcomm grava no card (a qualificação do
  * agente), logo depois dos do funil: não são definidos no funil, e sem eles na frente
@@ -160,20 +163,39 @@ export const CAMPOS_NATIVOS_DO_CARD = ['next_action', 'need', 'timeline', 'budge
  * telefone, do nome ou do e-mail), valor vazio, objeto e texto com cara de JSON
  * (começa com `{` ou `[`: JSON grande vira ruído e come o histórico), e lista que
  * não seja de valores simples. Lista simples vira texto separado por vírgula. Texto
- * passa de `TETO_DO_VALOR_NO_CONTEXTO`: cortado. O bloco inteiro respeita os dois
- * tetos acima, na ordem das chaves; o que não cabe fica de fora.
+ * acima do teto recebe reticência e é identificado como parcial. Para os
+ * consumidores de contexto, `projetarCamposDoCard` também distingue campos
+ * vazios, omitidos e truncados; este wrapper conserva apenas os valores.
  *
  * (C01, -c01.16) Com `ordemDoFunil` (as chaves definidas no funil do card), esses
  * campos vêm primeiro, na ordem do funil; depois os nativos (`CAMPOS_NATIVOS_DO_CARD`);
  * depois os demais, na ordem de antes. Os tetos passam a `TETO_DE_CAMPOS_COM_FUNIL` e
- * `TETO_DO_BLOCO_COM_FUNIL`. Sem
- * definição no funil, tudo como antes. A projeção do prompt (`projetarRetornoDeTool`)
+ * `TETO_DO_BLOCO_COM_FUNIL`, com até 512 caracteres por valor. Sem
+ * definição no funil, mantêm-se os tetos anteriores. A projeção do prompt (`projetarRetornoDeTool`)
  * continua depois daqui.
  */
 export function camposCompactosDoCard(
   campos: Record<string, unknown>,
   ordemDoFunil: readonly string[] = [],
 ): Record<string, string | number | boolean> {
+  return projetarCamposDoCard(campos, ordemDoFunil).campos;
+}
+
+export interface ProjecaoDosCamposDoCard {
+  campos: Record<string, string | number | boolean>;
+  /** Campos legíveis fora do resumo: ausência aqui nunca significa dado vazio no banco. */
+  omitidos: string[];
+  /** O valor é um trecho; consulte o card inteiro antes de decidir pelo texto. */
+  truncados: string[];
+  /** Chaves presentes mas sem valor, diferentes das omitidas por limite. */
+  vazios: string[];
+}
+
+/** Uma única projeção para a leitura inicial e para o resultado do gancho. */
+export function projetarCamposDoCard(
+  campos: Record<string, unknown>,
+  ordemDoFunil: readonly string[] = [],
+): ProjecaoDosCamposDoCard {
   const comFunil = ordemDoFunil.length > 0;
   const tetoDeCampos = comFunil ? TETO_DE_CAMPOS_COM_FUNIL : TETO_DE_CAMPOS_NO_CONTEXTO;
   const tetoDoBloco = comFunil ? TETO_DO_BLOCO_COM_FUNIL : TETO_DO_BLOCO_NO_CONTEXTO;
@@ -182,33 +204,48 @@ export function camposCompactosDoCard(
     ...new Set([...primeiro.filter((k) => Object.prototype.hasOwnProperty.call(campos, k)), ...Object.keys(campos)]),
   ];
   const saida: Record<string, string | number | boolean> = {};
+  const omitidos: string[] = [];
+  const truncados: string[] = [];
+  const vazios: string[] = [];
   let tamanho = 2;
   for (const chave of naOrdem) {
     const valor = campos[chave];
-    if (Object.keys(saida).length >= tetoDeCampos) break;
     if (chave.startsWith('_') || chave.trim() === '' || chaveEDadoPessoal(chave)) continue;
-    const compacto = valorCompacto(valor);
-    if (compacto === null) continue;
+    if (valor === null || valor === undefined || (typeof valor === 'string' && valor.trim() === '') || (Array.isArray(valor) && valor.length === 0)) {
+      vazios.push(chave);
+      continue;
+    }
+    const tetoDoValor = comFunil ? TETO_DO_VALOR_COM_FUNIL : TETO_DO_VALOR_NO_CONTEXTO;
+    const compacto = valorCompacto(valor, tetoDoValor);
+    if (compacto === null) {
+      omitidos.push(chave);
+      continue;
+    }
     const custo = JSON.stringify(chave).length + JSON.stringify(compacto).length + 2;
-    if (tamanho + custo > tetoDoBloco) continue;
+    if (Object.keys(saida).length >= tetoDeCampos || tamanho + custo > tetoDoBloco) {
+      omitidos.push(chave);
+      continue;
+    }
+    const texto = typeof valor === 'string' ? valor.trim() : null;
+    if (texto !== null && texto.length > tetoDoValor) truncados.push(chave);
     saida[chave] = compacto;
     tamanho += custo;
   }
-  return saida;
+  return { campos: saida, omitidos, truncados, vazios };
 }
 
-function valorCompacto(valor: unknown): string | number | boolean | null {
+function valorCompacto(valor: unknown, teto = TETO_DO_VALOR_NO_CONTEXTO): string | number | boolean | null {
   if (typeof valor === 'number') return Number.isFinite(valor) ? valor : null;
   if (typeof valor === 'boolean') return valor;
   if (typeof valor === 'string') {
     const t = valor.trim();
-    return t === '' || t.startsWith('{') || t.startsWith('[') ? null : t.slice(0, TETO_DO_VALOR_NO_CONTEXTO);
+    return t === '' || t.startsWith('{') || t.startsWith('[') ? null : t.length > teto ? `${t.slice(0, teto - 1)}…` : t;
   }
   if (Array.isArray(valor)) {
     if (valor.length === 0) return null;
     if (!valor.every((v) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) return null;
     const t = valor.map(String).map((v) => v.trim()).filter((v) => v !== '').join(', ');
-    return t === '' || t.length > TETO_DO_VALOR_NO_CONTEXTO ? null : t;
+    return t === '' || t.length > teto ? null : t;
   }
   return null;
 }

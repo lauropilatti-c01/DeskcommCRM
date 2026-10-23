@@ -1,3 +1,4 @@
+import { recusarEscritaFinanceiraGenerica } from '@/lib/leads/confirmacao-financeira';
 /**
  * MCP tools sobre /api/v1/leads (Spec 11 §3.1, §3.2).
  *
@@ -308,6 +309,7 @@ export const crmCreateLead: McpToolDefinition<typeof createInputShape> = {
     // ela, a chave nova deixava a IA cumprir a régua da etapa com um valor que
     // o cliente não disse. O campo recusado sai do insert; se a etapa o exige,
     // a régua devolve o 422 — coerente: o cliente não disse.
+    recusarEscritaFinanceiraGenerica(input.custom_fields, ctx.requestId);
     const conferencia = await conferirCamposPersonalizados(
       ctx,
       { pipelineId: input.pipeline_id },
@@ -397,6 +399,7 @@ export const crmUpdateLead: McpToolDefinition<typeof updateInputShape> = {
     // dinheiro em código, o degrau 2 pergunta ao Jev o que sobrou, e o que o
     // cliente não disse volta como ERRO DE ENSINO para o modelo, com os outros
     // campos da mesma chamada seguindo gravando (`lib/mcp/conferencia-de-campos`).
+    recusarEscritaFinanceiraGenerica(input.custom_fields, ctx.requestId);
     const conferencia = await conferirCamposPersonalizados(ctx, { leadId: lead_id }, parsed.custom_fields);
     const lead = await updateLeadHandler(
       ctx.supabase,

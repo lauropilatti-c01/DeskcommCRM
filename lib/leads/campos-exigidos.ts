@@ -41,6 +41,7 @@
  * hoje tem de sobreviver byte a byte. `required: true` (o asterisco antigo)
  * NÃO entra nesta decisão: ele continua significando "destaque no formulário".
  */
+import { campoDeConfirmacaoFinanceira, RECUSA_DE_GANHO_SEM_INTEGRACAO } from './confirmacao-financeira';
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -55,7 +56,9 @@ import type { CustomFieldDef } from "@/lib/schemas/settings";
  *
  * ⚠️ FAIL-OPEN, e por decisão escrita: settings indisponível (erro de rede,
  * dublê de teste que não serve a tabela, id malformado) devolve `null`, que
- * valida como "nada exigido". A exigência é opt-in por configuração de funil,
+ * valida como "nada exigido" nas operações comuns. Ganho é a exceção: sem
+ * conseguir ler as regras financeiras, a validação recusa o encerramento.
+ * A exigência dos demais campos é opt-in por configuração de funil,
  * e uma janela sem ela deixa o sistema como era ANTES desta issue; derrubar o
  * arrasto ou o encerramento porque a LEITURA das configurações falhou trocaria
  * um dado incompleto por uma operação impossível — e o caminho do "nada mudou"
@@ -95,6 +98,8 @@ export interface CampoFaltando {
    */
   tipo?: CustomFieldDef["type"];
   opcoes?: { value: string; label: string }[];
+  /** O campo não pode ser suprido pelo diálogo nem pela IA. */
+  somente_integracao?: boolean;
 }
 
 /** O veredito: lista vazia = pode escrever. */
@@ -112,7 +117,7 @@ export interface DestinoDaEscrita {
 
 interface EntradaDeCampos {
   lead: Record<string, unknown>;
-  /** `crm_pipelines.settings` cru (ou `null` — funil desconhecido = nada exigido). */
+  /** `crm_pipelines.settings` cru; desconhecido impede Ganho, mas não movimentos comuns. */
   settingsDoFunil: unknown;
   destino: DestinoDaEscrita;
   /**
@@ -176,7 +181,23 @@ function campoExigidoNoDestino(
  */
 export function validaCamposExigidos(entrada: EntradaDeCampos): VereditoDeCampos {
   const faltando: CampoFaltando[] = [];
+  if (entrada.destino.desfecho === "won" &&
+      (!entrada.settingsDoFunil || typeof entrada.settingsDoFunil !== "object" || Array.isArray(entrada.settingsDoFunil))) {
+    return { faltando: [{ chave: "_configuracao_financeira", rotulo: "Não foi possível conferir as regras de Ganho. Tente novamente.", somente_integracao: true }] };
+  }
   const settings = settingsComoRecord(entrada.settingsDoFunil);
+  // Antes do parser tolerante: uma definição legada inválida não pode apagar
+  // a exigência financeira. Também independe de visibilidade ou escopo do campo.
+  if (entrada.destino.desfecho === "won" && Array.isArray(settings.fields)) {
+    for (const raw of settings.fields) {
+      const campo = settingsComoRecord(raw);
+      const regra = settingsComoRecord(campo.obrigatorio_em);
+      if (typeof campo.key === "string" && campoDeConfirmacaoFinanceira(campo.key) && regra.ao_ganhar === true) {
+        faltando.push({ chave: campo.key, rotulo: typeof campo.label === "string" ? campo.label : "Pagamento confirmado", somente_integracao: true });
+      }
+    }
+    if (faltando.length) return { faltando };
+  }
   const valores = {
     ...((entrada.lead.custom_fields as Record<string, unknown> | null | undefined) ?? {}),
     ...(entrada.customFieldsPropostos ?? {}),
@@ -228,7 +249,15 @@ export function validaCamposExigidos(entrada: EntradaDeCampos): VereditoDeCampos
 export function recusaDeCamposObrigatorios(
   faltando: CampoFaltando[],
   idioma?: Idioma | null,
-): { codigo: "required_fields_missing"; mensagem: string } {
+): { codigo: "required_fields_missing" | "financial_verification_required"; mensagem: string } {
+  if (faltando.some(c => c.somente_integracao)) {
+    return {
+      codigo: "financial_verification_required",
+      mensagem: faltando.some(c => campoDeConfirmacaoFinanceira(c.chave))
+        ? RECUSA_DE_GANHO_SEM_INTEGRACAO
+        : "Não foi possível conferir as regras de Ganho. Tente novamente; não preencha uma confirmação manual.",
+    };
+  }
   // Só o rótulo nativo tem tradução; o de campo personalizado é texto do funil.
   const nomes = faltando
     .map((c) =>

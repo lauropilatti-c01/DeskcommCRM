@@ -103,7 +103,14 @@ function consulta(tabela: string) {
 
 const banco = {
   from: (t: string) => consulta(t),
-  rpc: () => Promise.resolve({ error: null }),
+  rpc: async (name?: string, args?: Record<string, unknown>): Promise<{data: Record<string, unknown> | null; error: null}> => {
+    if (name !== 'fn_lead_anotar_campos') return {data: {}, error: null};
+    const lead = (tabelas.crm_leads ?? []).find(l => l.organization_id === args?.p_org && l.id === args?.p_lead);
+    if (!lead) return {data: null, error: null};
+    const campos = {...(lead.custom_fields as Record<string, unknown>), ...(args?.p_campos as Record<string, unknown>)};
+    lead.custom_fields = campos;
+    return {data: campos, error: null};
+  },
 };
 
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => banco }));
@@ -353,5 +360,40 @@ describe("clone para outro funil: o dono vem da ORIGEM", () => {
     await expect(
       createLeadHandler(banco as never, ctx, novo({ owner_user_id: DESLIGADO_A })),
     ).rejects.toMatchObject({ status: 422 });
+  });
+});
+
+describe('confirmação financeira não nasce pela escrita genérica', () => {
+  it('criar direto na etapa Ganho não contorna a confirmação, nem com dispensa de campos', async () => {
+    tabelas.crm_stages![0]!.is_won = true;
+    tabelas.crm_pipelines = [{id: PIPELINE, settings: {fields: [{key: 'pagamento_confirmado', label: 'Pagamento confirmado', type: 'boolean', obrigatorio_em: {ao_ganhar: true}}]}}];
+    await expect(createLeadHandler(banco as never, ctx, novo(), {exigirCamposDaEtapa: false})).rejects.toMatchObject({code: 'financial_verification_required'});
+    expect(leadsGravados()).toHaveLength(0);
+  });
+  it('criação não aceita pagamento nem comprovante forjado', async () => {
+    await expect(createLeadHandler(banco as never, ctx, novo({custom_fields: {pagamento_confirmado: true}}))).rejects.toMatchObject({code: 'financial_field_read_only'});
+    expect(leadsGravados()).toHaveLength(0);
+  });
+  it('edição não aceita pagamento confirmado, inclusive por humano ou token', async () => {
+    await expect(updateLeadHandler(banco as never, ctx, LEAD, {custom_fields: {pagamento_confirmado: true}} as never)).rejects.toMatchObject({code: 'financial_field_read_only'});
+    expect(leadsGravados()).toHaveLength(0);
+  });
+  it('MCP recusa antes da conferência opcional da IA', async () => {
+    await expect(crmUpdateLead.handler({lead_id: LEAD, custom_fields: {pagamento_confirmado: 'sim'}}, ctxMcp)).rejects.toMatchObject({code: 'financial_field_read_only'});
+    expect(leadsGravados()).toHaveLength(0);
+  });
+});
+
+
+describe('recibo da gravação de campos', () => {
+  it('resposta sem recibo não afirma que os dados foram gravados', async () => {
+    const spy = vi.spyOn(banco, 'rpc').mockResolvedValueOnce({data: null, error: null});
+    await expect(updateLeadHandler(banco as never, ctx, LEAD, {custom_fields: {conhece_preparacao: 'não'}} as never)).rejects.toMatchObject({code: 'lead_fields_not_confirmed'});
+    spy.mockRestore();
+  });
+  it('devolve os campos confirmados pela gravação, inclusive negativos', async () => {
+    const campos = {decisao_concurso: 'decidido', conhece_preparacao: 'não', tempo_por_dia: 'Mais de 4 horas', aluno_zero1: false};
+    const r = await updateLeadHandler(banco as never, ctx, LEAD, {custom_fields: campos} as never);
+    expect(r.custom_fields).toEqual(campos);
   });
 });

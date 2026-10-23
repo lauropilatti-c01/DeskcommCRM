@@ -30,7 +30,7 @@ type Row = Record<string, unknown>;
 function makeDb({
   leads = [],
   stages = [],
-  pipelines = [],
+  pipelines = [{ id: PIPELINE, organization_id: ORG, settings: {} }],
   updateError,
 }: {
   leads?: Row[];
@@ -171,6 +171,31 @@ describe("encerraDemanda", () => {
     ).rejects.toMatchObject({ code: "validation_failed", status: 422 });
     expect(db.updates).toEqual([]);
     expect(db.rpcs).toEqual([]);
+  });
+
+  it("não ganha com confirmação financeira genérica já gravada no card", async () => {
+    const db = makeDb({
+      leads: [baseLead({ custom_fields: { pagamento_confirmado: true } })],
+      stages: baseStages(),
+      pipelines: [{ id: PIPELINE, organization_id: ORG, settings: {
+        fields: [{ key: "pagamento_confirmado", label: "Pagamento confirmado", type: "boolean", obrigatorio_em: { ao_ganhar: true } }],
+      } }],
+    });
+    await expect(
+      encerraDemanda(db.client as never, ctx, { leadId: LEAD, desfecho: "won" }),
+    ).rejects.toMatchObject({ code: "financial_verification_required", status: 422 });
+    expect(db.updates).toEqual([]);
+    expect(db.tables.crm_lead_activities).toEqual([]);
+    expect(db.tables.crm_leads?.[0]?.status).toBe("open");
+  });
+
+  it("não ganha sem conseguir ler as regras do funil", async () => {
+    const db = makeDb({ leads: [baseLead()], stages: baseStages(), pipelines: [] });
+    await expect(
+      encerraDemanda(db.client as never, ctx, { leadId: LEAD, desfecho: "won" }),
+    ).rejects.toMatchObject({ code: "financial_verification_required", status: 422 });
+    expect(db.updates).toEqual([]);
+    expect(db.tables.crm_lead_activities).toEqual([]);
   });
 
   it("não usa stage terminal arquivado", async () => {

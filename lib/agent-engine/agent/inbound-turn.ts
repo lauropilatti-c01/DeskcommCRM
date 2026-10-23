@@ -139,7 +139,7 @@ import {
   trocarResumoNoContexto,
   type GanchoAntesDoTurnoConfig,
 } from './gancho-antes-do-turno';
-import { camposCompactosDoCard } from '../edge/crm/card-do-contato';
+import { projetarCamposDoCard } from '../edge/crm/card-do-contato';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { buildOrigemBlock } from './abertura/origem-do-contato';
 import { agendaNoFechamento } from './abertura/agenda-no-fechamento';
@@ -3809,7 +3809,18 @@ async function executarTurnoDoAgente(
     if (desfechoDoGancho.enviadasAntes !== undefined)
       acrescentarEnviadasAntesNoContexto(openingContext.context.messages, desfechoDoGancho.enviadasAntes, fusoDaOrg);
     if (desfechoDoGancho.camposDoCard !== undefined) {
-      const campos = camposCompactosDoCard(desfechoDoGancho.camposDoCard, desfechoDoGancho.ordemDoFunil);
+      const projecao = projetarCamposDoCard(desfechoDoGancho.camposDoCard, desfechoDoGancho.ordemDoFunil);
+      const campos = projecao.campos;
+      openingContext.context.campos_do_card_leitura = 'lido';
+      if (projecao.vazios.length) openingContext.context.campos_do_card_vazios = projecao.vazios;
+      else delete openingContext.context.campos_do_card_vazios;
+      if (projecao.omitidos.length || projecao.truncados.length) {
+        openingContext.context.campos_do_card_limites = {
+          omitidos: projecao.omitidos,
+          truncados: projecao.truncados,
+          orientacao: 'O resumo está incompleto. Consulte o negócio antes de usar esses campos; campo omitido não é resposta ausente.',
+        };
+      } else delete openingContext.context.campos_do_card_limites;
       if (Object.keys(campos).length > 0) openingContext.context.campos_do_card = campos;
       else delete openingContext.context.campos_do_card;
     }

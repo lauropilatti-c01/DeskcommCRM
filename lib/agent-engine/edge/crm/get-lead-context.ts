@@ -18,7 +18,7 @@ import { isoLocalComOffset } from '@/lib/tempo/agora';
 import { logger } from '@/lib/logger';
 import { nomeDoContato } from '@/lib/contacts/rotulo-do-contato';
 import { TEXTO_DA_RESPOSTA_DE_FORMULARIO, textoDaRespostaDeFormulario } from '@/lib/channels/interativo';
-import { camposCompactosDoCard, lerCardDoContato } from './card-do-contato';
+import { projetarCamposDoCard, lerCardDoContato } from './card-do-contato';
 
 /**
  * Heurística conservadora de contagem: ~3,5 chars/token para pt-br (BPE real fica
@@ -158,6 +158,13 @@ export interface LeadContext {
    * motivo de `contact_id`.
    */
   campos_do_card?: Record<string, string | number | boolean>;
+  campos_do_card_vazios?: string[];
+  campos_do_card_leitura?: 'lido' | 'sem_card_unico';
+  campos_do_card_limites?: {
+    omitidos: string[];
+    truncados: string[];
+    orientacao: string;
+  };
   /** Últimas N mensagens, da mais antiga para a mais nova. */
   messages: LeadContextMessage[];
 }
@@ -378,25 +385,25 @@ export async function getLeadContext(
     }
   };
 
-  // (C01, -c01.5) Os campos do card, compactos, só quando o turno pede (o gancho antes
-  // do turno ligado). Falha aberta como a proposta: o turno segue sem eles. Entra em
-  // paralelo com as outras leituras (a -c01.5 lia em série, antes da 1.86).
-  const camposDoCardDoContato = async (): Promise<Record<string, string | number | boolean>> => {
-    if (input.camposDoCard !== true) return {};
+  // Campo indisponível não é campo vazio. Sem esta distinção o modelo repetia
+  // perguntas e podia decidir sobre pagamento sem ter lido o card.
+  const camposDoCardDoContato = async () => {
+    if (input.camposDoCard !== true) return { campos: {}, omitidos: [], truncados: [], vazios: [], leitura: 'sem_card_unico' as const };
     try {
       const card = await lerCardDoContato(db, input.tenantId, input.leadId);
-      return card ? camposCompactosDoCard(card.campos, card.ordemDoFunil) : {};
-    } catch (err) {
-      logger.warn('lead-context: leitura do card falhou — contexto segue sem os campos', {
-        organizationId: input.tenantId,
-        erro: err instanceof Error ? err.message : String(err),
-      });
-      return {};
+      return card ? { ...projetarCamposDoCard(card.campos, card.ordemDoFunil), leitura: 'lido' as const } : { campos: {}, omitidos: [], truncados: [], vazios: [], leitura: 'sem_card_unico' as const };
+    } catch {
+      logger.warn('lead-context: leitura do card indisponível', { organizationId: input.tenantId });
+      return null;
     }
   };
 
-  const [{ conversationId, history, previousOutcomes }, lastHumanDecision, last_proposal, campos_do_card] =
+  const [{ conversationId, history, previousOutcomes }, lastHumanDecision, last_proposal, projecaoDoCard] =
     await Promise.all([conversaHistoricoEDesfechos(), ultimaDecisao(), ultimaProposta(), camposDoCardDoContato()]);
+  if (projecaoDoCard === null) {
+    return teach('crm_unavailable', 'Não consegui ler os campos do negócio. Não trate isso como respostas ausentes; tente novamente ou peça ajuda à equipe.');
+  }
+  const campos_do_card = projecaoDoCard.campos;
 
   // LGPD: base legal derivada DIRETO do contato (fonte da verdade, mesmo banco).
   // isProspecting=false: o MVP é inbound + follow-up — ambos respondem a lead que
@@ -436,11 +443,23 @@ export async function getLeadContext(
       last_human_decision: lastHumanDecision,
       last_proposal,
       ...(Object.keys(campos_do_card).length > 0 ? { campos_do_card } : {}),
+      ...(input.camposDoCard ? { campos_do_card_leitura: projecaoDoCard.leitura } : {}),
+      ...(projecaoDoCard.vazios.length ? {campos_do_card_vazios: projecaoDoCard.vazios} : {}),
+      ...(projecaoDoCard.omitidos.length || projecaoDoCard.truncados.length ? {
+        campos_do_card_limites: {
+          omitidos: projecaoDoCard.omitidos,
+          truncados: projecaoDoCard.truncados,
+          orientacao: 'O resumo está incompleto. Consulte o negócio antes de usar esses campos; campo omitido não é resposta ausente.',
+        },
+      } : {}),
     },
     history,
     knobs.maxTokens,
     input.fuso,
   );
+  if (countPayloadTokens(JSON.stringify(context)) > knobs.maxTokens) {
+    return teach('crm_unavailable', 'Os dados do negócio excedem o orçamento do contexto. Não descarte respostas: peça ajuda à equipe para revisar o limite.');
+  }
   return { ok: true, context, tokenCount: countPayloadTokens(JSON.stringify(context)), lgpd };
 }
 

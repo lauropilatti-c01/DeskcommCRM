@@ -1,3 +1,4 @@
+import { recusarEscritaFinanceiraGenerica } from '@/lib/leads/confirmacao-financeira';
 import { guardServiceEffect } from "@/lib/atendimento/fronteira-server";
 import { observeServiceOrigin } from "@/lib/atendimento/origem";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -558,10 +559,11 @@ export async function createLeadHandler(
     exigirCamposDaEtapa?: boolean;
   } = {},
 ): Promise<Record<string, unknown>> {
+  recusarEscritaFinanceiraGenerica(input.custom_fields, ctx.requestId);
   // Validate stage belongs to pipeline within active org.
   const { data: stage, error: stageErr } = await supabase
     .from("crm_stages")
-    .select("id, pipeline_id, organization_id")
+    .select("id, pipeline_id, organization_id, is_won, is_lost")
     .eq("id", input.stage_id)
     .maybeSingle();
 
@@ -603,20 +605,18 @@ export async function createLeadHandler(
   // (ver `opcoes` acima).
   //
   // O `settings` perguntado é o do funil de DESTINO — `input.pipeline_id`, que a
-  // checagem acima acabou de provar ser o da etapa. `desfecho: null`, como no
-  // clone e na retomada: criar não fecha o negócio, então `ao_ganhar`/`ao_perder`
-  // não entram nesta pergunta. O valor que a régua lê é o que o negócio VAI ter:
-  // `custom_fields` do corpo.
+  // checagem acima acabou de provar ser o da etapa. O trigger também roda no
+  // INSERT: criar na etapa Ganho fecha o negócio e precisa da mesma confirmação.
+  // A dispensa de campos da captação não dispensa confirmação financeira.
   //
-  // FAIL-OPEN igual ao resto da régua (`settingsDoFunil` devolve `null` quando a
-  // leitura falha): um funil sem `obrigatorio_em` valida `faltando: []` e a
-  // criação acontece byte a byte como antes — a regra continua opt-in.
-  if (opcoes.exigirCamposDaEtapa !== false) {
+  // Um funil lido sem `obrigatorio_em` mantém a criação comum. Se a leitura
+  // falhar, Ganho é recusado; captação em etapa aberta mantém a tolerância anterior.
+  if (opcoes.exigirCamposDaEtapa !== false || stage.is_won === true) {
     const settingsDaCriacao = await settingsDoFunil(supabase, input.pipeline_id);
     const vereditoDeCampos = validaCamposExigidos({
       lead: { custom_fields: input.custom_fields ?? {} },
       settingsDoFunil: settingsDaCriacao,
-      destino: { stageId: stage.id, desfecho: null },
+      destino: { stageId: stage.id, desfecho: stage.is_won ? "won" : null },
       motivoDeGanho: null,
     });
     if (vereditoDeCampos.faltando.length > 0) {
@@ -821,6 +821,7 @@ export async function updateLeadHandler(
   leadId: string,
   input: UpdateLeadInput,
 ): Promise<Record<string, unknown>> {
+  recusarEscritaFinanceiraGenerica(input.custom_fields, ctx.requestId);
   // `*` e nao lista explicita DE PROPOSITO: `camposAlterados` compara o patch
   // contra isto, e uma lista fixa faria todo campo NOVO do patch cair contra
   // `undefined` e ser marcado como alterado em toda edicao — o mesmo defeito
@@ -953,10 +954,16 @@ export async function updateLeadHandler(
     if (anotarErr) {
       throw new ApiError(500, "internal_error", undefined, ctx.requestId, anotarErr.message);
     }
+    // NULL é ausência de linha no RPC (apagada entre as leituras, por exemplo),
+    // não um recibo de sucesso. Não afirmar ao modelo que uma gravação ocorreu.
+    if (!mesclados || typeof mesclados !== "object" || Array.isArray(mesclados) ||
+        !Object.keys(input.custom_fields).every(chave => Object.prototype.hasOwnProperty.call(mesclados, chave))) {
+      throw new ApiError(409, "lead_fields_not_confirmed", undefined, ctx.requestId,
+        "Não foi possível confirmar a gravação dos campos. Releia o negócio antes de continuar.");
+    }
     // A resposta é o que EXISTE no banco, não o que esta requisição mandou: sob
     // concorrência as duas coisas diferem, e é a do banco que vale.
-    (updated as Record<string, unknown>).custom_fields =
-      (mesclados as Record<string, unknown> | null) ?? {};
+    (updated as Record<string, unknown>).custom_fields = mesclados as Record<string, unknown>;
   }
 
   const a = actorAuditPayload(ctx.actor);

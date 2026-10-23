@@ -1,8 +1,9 @@
 /**
  * (C01, -c01.16) O CONTEXTO DO CARD que o modelo lê: os campos definidos no funil
  * entram primeiro, na ordem do funil, depois os nativos do Deskcomm (`next_action`,
- * `need`, `timeline`, `budget`, `authority`, `reason`), depois o resto, com tetos de 40
- * campos e 1.600 caracteres.
+ * `need`, `timeline`, `budget`, `authority`, `reason`), depois o resto. A candidata
+ * de 22/10 comporta 70 campos e identifica os limites explicitamente; o orçamento
+ * total do contexto continua obrigatório.
  * Antes, o corte seguia a ordem do `jsonb` (chave curta primeiro) com 20 campos e 800
  * caracteres, e o lead antigo perdia `plano_oferecido`, `inscrito_tp2026` e
  * `objecao_principal`. Card sem definição no funil continua como antes.
@@ -110,15 +111,15 @@ describe("camposCompactosDoCard com a ordem do funil", () => {
     }
   });
 
-  it("tetos: com o funil, 40 campos e 1.600 caracteres; sem o funil, 20 e 800 como antes", () => {
-    expect([TETO_DE_CAMPOS_COM_FUNIL, TETO_DO_BLOCO_COM_FUNIL]).toEqual([40, 1600]);
-    const muitos = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`campo_${i}`, "v"]));
-    expect(Object.keys(camposCompactosDoCard(muitos, ["campo_59"]))).toHaveLength(40);
+  it("tetos comportam 50 campos do funil, nativos e metadados; sem o funil, 20 e 800", () => {
+    expect([TETO_DE_CAMPOS_COM_FUNIL, TETO_DO_BLOCO_COM_FUNIL]).toEqual([70, 32768]);
+    const muitos = Object.fromEntries(Array.from({ length: 90 }, (_, i) => [`campo_${i}`, "v"]));
+    expect(Object.keys(camposCompactosDoCard(muitos, ["campo_59"]))).toHaveLength(70);
     expect(Object.keys(camposCompactosDoCard(muitos))).toHaveLength(TETO_DE_CAMPOS_NO_CONTEXTO);
     const grandes = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`c${i}`, "z".repeat(119)]));
     const comFunil = JSON.stringify(camposCompactosDoCard(grandes, ["c0"]));
-    expect(comFunil.length).toBeLessThanOrEqual(1600);
-    expect(comFunil.length).toBeGreaterThan(1400);
+    expect(comFunil.length).toBeLessThanOrEqual(32768);
+    expect(comFunil.length).toBeGreaterThan(4000);
     expect(JSON.stringify(camposCompactosDoCard(grandes)).length).toBeLessThanOrEqual(TETO_DO_BLOCO_NO_CONTEXTO);
   });
 
@@ -191,9 +192,9 @@ describe("lerCardDoContato traz a ordem do funil na mesma consulta", () => {
 describe("as duas montagens do contexto passam a ordem do funil", () => {
   it("o contexto do turno e o card relido depois do gancho", () => {
     const leitura = readFileSync("lib/agent-engine/edge/crm/get-lead-context.ts", "utf8");
-    expect(leitura).toContain("camposCompactosDoCard(card.campos, card.ordemDoFunil)");
+    expect(leitura).toContain("projetarCamposDoCard(card.campos, card.ordemDoFunil)");
     const turno = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
-    expect(turno).toContain("camposCompactosDoCard(desfechoDoGancho.camposDoCard, desfechoDoGancho.ordemDoFunil)");
+    expect(turno).toContain("projetarCamposDoCard(desfechoDoGancho.camposDoCard, desfechoDoGancho.ordemDoFunil)");
     const gancho = readFileSync("lib/agent-engine/agent/gancho-antes-do-turno.ts", "utf8");
     expect(gancho).toContain("ordemDoFunil: relido.ordemDoFunil");
   });

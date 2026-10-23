@@ -1,3 +1,4 @@
+import { recusarEscritaFinanceiraGenerica } from '@/lib/leads/confirmacao-financeira';
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/leads/[id]/move
@@ -55,6 +56,7 @@ export async function POST(
   let input;
   try {
     input = await validateRequest(moveLeadSchema, req);
+    recusarEscritaFinanceiraGenerica(input.custom_fields, requestId);
   } catch (err) {
     if (err instanceof ApiError) {
       return fail(err.code, err.message, err.status, {
