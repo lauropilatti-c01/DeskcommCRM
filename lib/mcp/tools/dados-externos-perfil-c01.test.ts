@@ -4,7 +4,7 @@ vi.mock('@/lib/agent-engine/edge/crm/card-do-contato', () => ({ lerCardDoContato
 vi.mock('@/lib/agent-engine/db/request-pool', () => ({ getRequestPool: () => ({ query: vi.fn() }) }));
 import { abrirAcesso } from '@/lib/external-db/acesso';
 import { lerCardDoContato } from '@/lib/agent-engine/edge/crm/card-do-contato';
-import type { ConexaoExterna, PedidoDeLeitura, FiltroDeLeitura } from '@/lib/external-db/types';
+import type { ConexaoExterna, PedidoDeLeitura } from '@/lib/external-db/types';
 import type { McpContext } from '../types';
 import { crmQueryExternalData } from './dados-externos';
 
@@ -30,7 +30,7 @@ function ctx(comContato = true): McpContext {
     } },
   } as unknown as McpContext;
 }
-async function consultar(filtros: FiltroDeLeitura[] = [assunto], context = ctx(), tabela = input.tabela) {
+async function consultar(filtros: Parameters<typeof crmQueryExternalData.handler>[0]['filtros'] = [assunto], context = ctx(), tabela = input.tabela) {
   return await crmQueryExternalData.handler({ ...input, filtros, tabela }, context) as Record<string, unknown>;
 }
 function filtrosLidos(n = 0) { return (lerTabela.mock.calls[n]![0] as PedidoDeLeitura).filtros; }

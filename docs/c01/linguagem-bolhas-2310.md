@@ -120,3 +120,11 @@ tentativas continua impedindo o envio.
 Volta: desativar só as opções novas devolve a régua anterior, sem tocar outras
 travas. Código exige a versão anterior do programa pelo processo de publicação
 já aprovado. Dados de configuração devem ser guardados e relidos na operação.
+
+## Revisão independente e integração
+
+A coordenação leu a cadeia, configuração, divisor e fallback e repetiu os
+39 casos de linguagem/bolhas, pendência de vídeo e forma da cadeia. Passaram.
+A revisão do controle repetiu os dez casos de preservação de opções; o roteiro
+não ativa as opções novas. Integrado ao `main`; typecheck e suíte completos
+continuam vinculados ao portão da árvore final. Nenhuma configuração aplicada.

@@ -24,3 +24,11 @@ Arquivos: `lib/external-db/c01-perfil-do-card.ts`, `lib/mcp/tools/dados-externos
 ## Entrega e limites
 
 Implementado e testado em fixtures, sem configuração ou publicação. A prova integrada e a releitura da configuração na instalação ainda são necessárias. Só depois dessa prova a sessão comercial pode retirar o manual correspondente do prompt; esta frente não altera o texto nem as skills. Não há migration/DDL.
+
+### Integração do typecheck
+
+A compilação de outra cópia encontrou um tipo amplo demais no helper do teste
+(`FiltroDeLeitura.valor` aceita `unknown`, ao contrário da entrada validada da
+ferramenta). O helper passou a usar o tipo real do argumento do handler, sem
+cast nem alteração de runtime. Os 13 casos foram repetidos e passaram.
+A prova de tipos que vale para a entrega será a da árvore integrada final.
