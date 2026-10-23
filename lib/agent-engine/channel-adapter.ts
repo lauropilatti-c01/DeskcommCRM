@@ -1,4 +1,5 @@
 import type { AgentOperationContext } from '@/lib/ai/agents/operation';
+import type { OrigemC01 } from '@/lib/followup/c01-origem';
 import type { JobClaim } from './queue/claim';
 /**
  * Contrato agnóstico de canal (F2-25; blueprint risco nº 1 + veredito executivo).
@@ -17,7 +18,7 @@ import type { JobClaim } from './queue/claim';
 /** Uma mensagem de texto a enviar ao lead. Identidade da intenção = (jobId, seq). */
 export interface ChannelSendInput {
   /** Origem interna autenticada; leadId aqui é a oportunidade, não o contato. */
-  c01Origin?: { kind: 'cronograma' | 'oferta'; leadId: string; productKey: string };
+  c01Origin?: OrigemC01;
   agentOperation?: AgentOperationContext;
   jobClaim?: JobClaim;
   tenantId: string;

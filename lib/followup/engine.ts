@@ -879,17 +879,18 @@ async function processEnrollment(
   // C01: antes do efeito, inclusive encerramento que outra integração pode
   // interpretar como perda. Usa estados/eventos existentes, sem enum/DDL.
   const policy = graph.settings?.c01_acompanhamento;
-  if (policy && (node.type === "action" || node.type === "move_lead" || (node.type === "end" && node.config.outcome === "exhausted"))) {
+  if (policy && (node.type === "action" || node.type === "move_lead" || (node.type === "end" && (node.config.outcome === "exhausted" || policy.kind === "video_curso")))) {
     const decision = db.decidirAcompanhamentoC01
       ? await db.decidirAcompanhamentoC01(policy, enrollment, clock())
       : { kind: "blocked" as const, reason: "integracao_aplicada_indisponivel" };
-    const expected = node.type === "action" ? "send" : "lost";
+    const expected = node.type === "action" ? "send" : policy.kind === "video_curso" && node.type === "end" ? "complete" : "lost";
     if (decision.kind !== expected) {
       const reason = "reason" in decision ? decision.reason : "passo_incompativel_com_politica";
       const terminal = decision.kind === "cancel" || decision.kind === "complete";
+      const videoConcluido = policy.kind === "video_curso" && decision.kind === "complete";
       const patch: EnrollmentPatch = decision.kind === "defer"
         ? { next_eval_at: decision.until, claimed_until: null, last_error: `c01:${reason}` }
-        : { status: terminal ? "cancelled" : "paused_manual", next_eval_at: null, claimed_until: null, last_error: `c01:${reason}`, ...(terminal ? { cancel_reason: reason, completed_at: clock().toISOString() } : {}) };
+        : { status: videoConcluido ? "completed" : terminal ? "cancelled" : "paused_manual", next_eval_at: null, claimed_until: null, last_error: videoConcluido ? null : `c01:${reason}`, ...(terminal ? { cancel_reason: reason, completed_at: clock().toISOString() } : {}) };
       const event = { node_id: node.id, event_type: "c01_acompanhamento_retido", payload: { decision: decision.kind, reason }, idempotency_key: `${node.id}:${enrollment.steps_taken}:c01:${decision.kind}:${decision.kind === "defer" ? decision.until : reason}` };
       if (db.applyEnrollmentStep) await db.applyEnrollmentStep(enrollment.id, enrollment.organization_id, patch, event);
       else {

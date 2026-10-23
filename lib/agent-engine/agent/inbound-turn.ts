@@ -1,5 +1,6 @@
 import { configOrigemC01 } from "@/lib/followup/c01-origem";
 import { completarConsultaOfertaC01, ofertasDaConsultaC01, origemDaOfertaEnviadaC01, type OfertaConsultadaC01 } from "@/lib/followup/c01-origem-oferta";
+import { videosDaConsultaC01, origemDoVideoEnviadoC01, type VideoConsultadoC01 } from "@/lib/followup/c01-video-curso";
 import { lerJanelaDeFollowup } from './janela-de-followup';
 import { prospectingConversationContext } from "@/lib/prospecting/context";
 import { setExecutionAgentOperation } from '@/lib/atendimento/fronteira-server';
@@ -4126,6 +4127,7 @@ async function executarTurnoDoAgente(
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
   const urlsDaBase = new Set<string>();
   const ofertasConsultadasC01: OfertaConsultadaC01[] = [];
+  const videosConsultadosC01: VideoConsultadoC01[] = [];
   // (C01, -c01.7) O que as ferramentas de CONSULTA devolveram neste turno — as URLs e os
   // valores (em centavos) que a trava "link e valor de ferramenta" libera. As de consulta
   // são a base externa (`FERRAMENTA_DA_BASE`), a base RAG (`search_knowledge`) e a
@@ -4192,7 +4194,10 @@ async function executarTurnoDoAgente(
     const falhada = falhadas[0];
     const origemOferta = !preview && leadId && envio.body && !opcoes?.fraseDeEspera
       ? await origemDaOfertaEnviadaC01(pool, tenantId, leadId, envio.body, ofertasConsultadasC01) : undefined;
-    const resultado = await liveChannel().send({ ...envio, ...(origemOferta ? { c01Origin: origemOferta } : {}), seq: falhada?.seq ?? posicao + 1 });
+    const origemVideo = !origemOferta && !preview && leadId && !opcoes?.fraseDeEspera
+      ? await origemDoVideoEnviadoC01(pool, tenantId, leadId, input.conversationId, envio.body ?? '', envio.media, videosConsultadosC01) : undefined;
+    const origemC01 = origemOferta ?? origemVideo;
+    const resultado = await liveChannel().send({ ...envio, ...(origemC01 ? { c01Origin: origemC01 } : {}), seq: falhada?.seq ?? posicao + 1 });
     // (C01, -c01.3, rodada 3) A evidência de resposta é marcada logo depois do aceite,
     // antes de qualquer outra espera: se a consulta da posição falhada cair depois de
     // um `sent`, o `catch` da última tentativa já vê o lead respondido e não manda a
@@ -6754,6 +6759,8 @@ async function executarTurnoDoAgente(
                   const resultado = await executeOriginal(...args);
                   if (configOrigem?.enabled && configOrigem.organizationId === tenantId && configOrigem.offerConnectionId)
                     ofertasConsultadasC01.push(...ofertasDaConsultaC01(args[0], resultado, configOrigem.offerConnectionId));
+                  if (configOrigem?.enabled && configOrigem.organizationId === tenantId)
+                    videosConsultadosC01.push(...videosDaConsultaC01(args[0], resultado, configOrigem));
                   for (const url of urlsNoResultado(resultado)) urlsDaBase.add(url);
                   // (C01, -c01.7) O erro da consulta não é fonte: repete o que o modelo pediu
                   // (a coluna "salario_6700"). A base externa o devolve sem `isError`.

@@ -2,6 +2,7 @@ import { modelosQueOFluxoEnvia } from "./modelos-aprovados";
 import type { Queryable } from "@/lib/agent-engine/queue/queue";
 import type { FatosAcompanhamento, Toque } from "./c01-acompanhamento";
 import { conferirOrigemC01, hashDoConteudoDaOrigem, type ConfigOrigemC01 } from "./c01-origem";
+import { politicaDoVideoValidaC01, videoDaOrigemValido } from "./c01-video-curso";
 
 export interface EscopoFinanceiroC01 {
   db: Queryable;
@@ -190,6 +191,9 @@ export async function lerFatosAcompanhamentoC01(
     organizationId: org,
     contactId: contact,
     opportunityId: origin.leadId,
+    ...(origin.kind === "video_curso" ? {
+      videoPolicyReady: politicaDoVideoValidaC01(row.graph, cfg) && videoDaOrigemValido(cfg, origin, anchor),
+    } : {}),
     anchor: {
       kind: origin.kind,
       at: anchorAt,

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FlowGraph } from "./graph-schema";
 import { configOrigemC01 } from "./c01-origem";
+import { politicaDoVideoValidaC01 } from "./c01-video-curso";
 import { configuracoesFinanceiras } from "@/lib/leads/configuracao-financeira";
 /** Pré-voo no servidor. Não há booleano de prontidão vindo do formulário.
  * Credencial/mapa disponível não é prova de ausência de compra: o envio ainda
@@ -24,6 +25,11 @@ export async function conferirPublicacaoC01(
     !cfg.allowedKinds.includes(policy.kind)
   )
     return "A integração de acompanhamentos está desligada ou não pertence a esta organização.";
+  if (
+    policy.kind === "video_curso" &&
+    (!cfg.videoCourse?.catalog.length || !politicaDoVideoValidaC01(params.graph, cfg))
+  )
+    return "A pergunta após o vídeo precisa de catálogo, texto aprovado e grafo de toque único habilitado.";
   const { data: pointer, error } = await admin
     .from("followup_flow_pointers")
     .select("id,active_version_id")
@@ -76,14 +82,16 @@ export async function conferirPublicacaoC01(
     .is("archived_at", null);
   if (ce || !channels?.some((c) => c.status === "WORKING"))
     return "Nenhum canal desta organização está conectado.";
-  if (policy.kind === "oferta") {
-    if (!cfg.offerConnectionId)
+  if (policy.kind === "oferta" || policy.kind === "video_curso") {
+    const connectionId =
+      policy.kind === "oferta" ? cfg.offerConnectionId : cfg.videoCourse?.connectionId;
+    if (!connectionId)
       return "Falta a conexão comercial autorizada para comprovar a origem das ofertas.";
     const { data: connection, error: e } = await admin
       .from("external_db_connections")
       .select("id,enabled")
       .eq("organization_id", params.orgId)
-      .eq("id", cfg.offerConnectionId)
+      .eq("id", connectionId)
       .maybeSingle();
     if (e || !connection?.enabled) return "A conexão comercial da origem está indisponível.";
   }

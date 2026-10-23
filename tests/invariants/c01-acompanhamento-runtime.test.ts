@@ -553,3 +553,119 @@ describe("acompanhamento com SQL real e transporte falso", () => {
     ).toBe("done");
   });
 });
+
+describe("pausa após vídeo integrada ao SQL existente", () => {
+  const videoKey="curso-ficticio", videoUrl="https://example.invalid/curso", question="Ficou alguma dúvida sobre como funciona?";
+  async function videoReady() {
+    const { assinarOrigemC01, hashDoConteudoDaOrigem } = await import("@/lib/followup/c01-origem");
+    const config = { ...cfg, allowedKinds: ["oferta", "cronograma", "video_curso"] as const,
+      videoCourse: { enabled:true, connectionId:agent!, copyStatus:"approved" as const, question,
+        catalog:[{key:videoKey, productKey:"produto-teste",url:videoUrl}] } };
+    const videoCfg = { ...config, allowedKinds:[...config.allowedKinds] };
+    vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(videoCfg));
+    const videoGraph=JSON.parse(JSON.stringify(graph));
+    videoGraph.settings.c01_acompanhamento.kind="video_curso";
+    videoGraph.nodes[1].config.body=question;
+    await pool.query("update followup_flow_versions set graph=$1", [videoGraph]);
+    await pool.query("update messages set body=$1", [videoUrl]);
+    const source=(await pool.query("select * from messages where id=$1",[message])).rows[0];
+    const origin={kind:"video_curso" as const,leadId:lead!,productKey:"produto-teste",messageId:message!,videoKey};
+    const proof=assinarOrigemC01(videoCfg,{...origin,organizationId:org!,contactId:contact!,conversationId:conversation!,createdAt:base.toISOString(),contentHash:hashDoConteudoDaOrigem(source)});
+    await pool.query("update messages set metadata=$1 where id=$2",[{c01_origin:proof},message]);
+    return {videoCfg,videoGraph,origin,proof};
+  }
+  it("matrícula e relógio usam recibo; read sem delivered também funciona", async()=>{
+    const v=await videoReady();
+    await pool.query("update messages set status='sent',delivered_at=null");
+    await expect(registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now)).rejects.toThrow("delivery_unconfirmed");
+    await pool.query("update messages set status='read',read_at=$1",[new Date(+base+5*60000)]);
+    const e=await registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now);
+    const f=await lerFatosAcompanhamentoC01(pool,v.videoCfg,{organizationId:org!,contactId:contact!,enrollmentId:e.enrollment_id},now,financial);
+    expect(f!.anchor.at).toBe("2026-10-23T13:05:00.000Z");
+    expect(f!.videoPolicyReady).toBe(true);
+  });
+  it("replay e novo balão do mesmo vídeo não geram segunda inscrição",async()=>{
+    const v=await videoReady();const first=await registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now);
+    expect(await registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now)).toEqual({status:"replay",enrollment_id:first.enrollment_id});
+    const {assinarOrigemC01}=await import("@/lib/followup/c01-origem");
+    const second=randomUUID(),proof=assinarOrigemC01(v.videoCfg,{...v.proof,messageId:second});
+    await pool.query("insert into messages select $1,organization_id,contact_id,conversation_id,direction,type,body,$2,media_url,media_storage_path,status,external_id,sent_at,delivered_at,read_at,error_code,revoked_at from messages where id=$3",[second,{c01_origin:proof},message]);
+    expect(await registrarOrigemEntregueC01(pool,v.videoCfg,{...v.origin,messageId:second},now)).toEqual({status:"replay",enrollment_id:first.enrollment_id});
+    expect((await pool.query("select count(*)::int as n from followup_enrollments")).rows[0].n).toBe(1);
+  });
+  it.each(["oferta","cronograma"] as const)("%s ativa é preservada, e scanner registra omissão para não rearmar depois",async(kind)=>{
+    const oldGraph=JSON.parse(JSON.stringify(graph));oldGraph.settings.c01_acompanhamento.kind=kind;
+    await pool.query("update followup_flow_versions set graph=$1",[oldGraph]);
+    const old=await registrarOrigemEntregueC01(pool,cfg,{kind,leadId:lead!,productKey:"produto-teste",messageId:message!},now);const v=await videoReady();
+    const {inscreverOrigensConfirmadasC01}=await import("@/lib/followup/c01-acompanhamento-origens");
+    // A inscrição antiga conserva sua própria versão de oferta.
+    const oldVersion=randomUUID();await pool.query("insert into followup_flow_versions values($1,$2,$3)",[oldVersion,org,oldGraph]);
+    await pool.query("update followup_enrollments set version_id=$1 where id=$2",[oldVersion,old.enrollment_id]);
+    await pool.query("delete from followup_enrollment_events where enrollment_id=$1",[old.enrollment_id]);
+    await inscreverOrigensConfirmadasC01(pool,now);
+    expect((await pool.query("select status from followup_enrollments where id=$1",[old.enrollment_id])).rows[0].status).toBe("active");
+    expect((await pool.query("select metadata from messages where id=$1",[message])).rows[0].metadata.c01_video_omitted.reason).toBe("another_sequence_live");
+    await pool.query("update followup_enrollments set status='completed'");
+    await inscreverOrigensConfirmadasC01(pool,now);
+    expect((await pool.query("select count(*)::int as n from followup_enrollments")).rows[0].n).toBe(1);
+    expect(v.videoCfg.videoCourse.enabled).toBe(true);
+  });
+  it("retorno consentido permanece intacto e vídeo fica omitido com motivo",async()=>{
+    await videoReady();
+    await pool.query("insert into cron_jobs(organization_id,contact_id,kind,job_kind,next_run_at) values($1,$2,'at','followup_turn',$3)",[org,contact,now]);
+    const {inscreverOrigensConfirmadasC01}=await import("@/lib/followup/c01-acompanhamento-origens");
+    await inscreverOrigensConfirmadasC01(pool,now);
+    expect((await pool.query("select metadata from messages where id=$1",[message])).rows[0].metadata.c01_video_omitted.reason).toBe("callback_has_priority");
+    expect((await pool.query("select enabled,next_run_at from cron_jobs")).rows[0]).toMatchObject({enabled:true,next_run_at:now});
+    expect((await pool.query("select count(*)::int as n from followup_enrollments")).rows[0].n).toBe(0);
+  });
+  it("oferta posterior substitui vídeo e guarda o motivo no histórico",async()=>{
+    const v=await videoReady();const video=await registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now);
+    const offerPointer=randomUUID(),offerVersion=randomUUID(),offerMessage=randomUUID();
+    await pool.query("insert into followup_flow_pointers values($1,$2,$3,'active')",[offerPointer,org,offerVersion]);
+    await pool.query("insert into followup_flow_versions values($1,$2,$3)",[offerVersion,org,graph]);
+    await pool.query("update ai_agent_versions set followup=$1",[{enabled:true,flow_pointer_ids:[pointer,offerPointer]}]);
+    await pool.query("insert into messages select $1,organization_id,contact_id,conversation_id,direction,type,'Oferta nova','{}',media_url,media_storage_path,status,'provider-2',$2,$2,null,null,null from messages where id=$3",[offerMessage,new Date(+base+60000),message]);
+    await registrarOrigemEntregueC01(pool,v.videoCfg,{kind:"oferta",leadId:lead!,productKey:"produto-teste",messageId:offerMessage},now);
+    expect((await pool.query("select cancel_reason from followup_enrollments where id=$1",[video.enrollment_id])).rows[0].cancel_reason).toBe("oferta_substitui_toque_do_video");
+    expect((await pool.query("select payload from followup_enrollment_events where enrollment_id=$1 and event_type='c01_sequencia_substituida'",[video.enrollment_id])).rows[0].payload.reason).toBe("oferta_substitui_toque_do_video");
+  });
+  it("resposta antes do recibo e origem anterior à ativação não inscrevem",async()=>{
+    const v=await videoReady();
+    await pool.query("update messages set delivered_at=$1",[new Date(+base+10*60000)]);
+    await pool.query("update conversations set last_inbound_at=$1",[new Date(+base+5*60000)]);
+    await expect(registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now)).rejects.toThrow("new_reply");
+    await pool.query("update conversations set last_inbound_at=$1",[base]);
+    v.videoGraph.settings.c01_acompanhamento.activated_at=new Date(+base+60000).toISOString();
+    await pool.query("update followup_flow_versions set graph=$1",[v.videoGraph]);
+    await expect(registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now)).rejects.toThrow("origin_before_activation");
+  });
+  it("OFF após matrícula bloqueia na porta final comum, sem transporte",async()=>{
+    const v=await videoReady();const e=await registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now);
+    await pool.query("update followup_enrollments set current_node_id='touch' where id=$1",[e.enrollment_id]);
+    const context={organizationId:org!,contactId:contact!,enrollmentId:e.enrollment_id,nodeId:"touch",jobId:job!};
+    const {supabase}=criarDubleDoHandler({conversation:{id:conversation},tabelasDeLeitura:{followup_enrollments:{version_id:version,contact_id:contact},followup_flow_versions:{graph:v.videoGraph}}});
+    await comEnvioAcompanhamentoC01(supabase,context,org!,async()=>{
+      await assertAcompanhamentoC01Supabase(supabase,context,org!,now);
+      vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION",JSON.stringify({...v.videoCfg,videoCourse:{...v.videoCfg.videoCourse,enabled:false}}));
+      await expect(assertAcompanhamentoC01Supabase(supabase,context,org!,now)).rejects.toThrow("Acompanhamento C01 bloqueado");
+    });
+  });
+  it.each(["resposta","humano","recusa","compra","falha"])("%s entre seleção e envio impede efeito na porta comum",async(cause)=>{
+    const v=await videoReady();const e=await registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now);
+    await pool.query("update followup_enrollments set current_node_id='touch' where id=$1",[e.enrollment_id]);
+    const context={organizationId:org!,contactId:contact!,enrollmentId:e.enrollment_id,nodeId:"touch",jobId:job!};
+    const {supabase}=criarDubleDoHandler({conversation:{id:conversation},tabelasDeLeitura:{followup_enrollments:{version_id:version,contact_id:contact},followup_flow_versions:{graph:v.videoGraph}}});
+    const transport=vi.fn();
+    await comEnvioAcompanhamentoC01(supabase,context,org!,async()=>{
+      await assertAcompanhamentoC01Supabase(supabase,context,org!,now);
+      if(cause==="resposta")await pool.query("update conversations set last_inbound_at=$1",[new Date(+base+60000)]);
+      if(cause==="humano")await pool.query("update conversations set assignee_kind='human'");
+      if(cause==="recusa")await pool.query("update contacts set ai_opt_out=true");
+      if(cause==="compra")state.paid=true;
+      if(cause==="falha")await pool.query("update messages set status='failed',error_code='131049' where id=$1",[message]);
+      await expect((async()=>{await assertAcompanhamentoC01Supabase(supabase,context,org!,now);transport();})()).rejects.toThrow("Acompanhamento C01 bloqueado");
+    });
+    expect(transport).not.toHaveBeenCalled();
+  });
+});
