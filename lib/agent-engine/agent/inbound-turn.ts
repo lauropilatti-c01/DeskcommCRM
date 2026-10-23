@@ -1,5 +1,6 @@
 import { configOrigemC01 } from "@/lib/followup/c01-origem";
 import { completarConsultaOfertaC01, ofertasDaConsultaC01, origemDaOfertaEnviadaC01, type OfertaConsultadaC01 } from "@/lib/followup/c01-origem-oferta";
+import { lerPoliticaMatricula, prepararMatriculaUmaVez, reciboDaMatriculaSuprimida } from './c01-matricula-uma-vez';
 import { videosDaConsultaC01, origemDoVideoEnviadoC01, type VideoConsultadoC01 } from "@/lib/followup/c01-video-curso";
 import { lerJanelaDeFollowup } from './janela-de-followup';
 import { prospectingConversationContext } from "@/lib/prospecting/context";
@@ -4130,6 +4131,8 @@ async function executarTurnoDoAgente(
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
   const urlsDaBase = new Set<string>();
   const ofertasConsultadasC01: OfertaConsultadaC01[] = [];
+  const politicaMatricula = preview ? { enabled: false as const } : await lerPoliticaMatricula(pool, tenantId);
+  const paginasMatricula = new Set<string>();
   const videosConsultadosC01: VideoConsultadoC01[] = [];
   // (C01, -c01.7) O que as ferramentas de CONSULTA devolveram neste turno — as URLs e os
   // valores (em centavos) que a trava "link e valor de ferramenta" libera. As de consulta
@@ -4143,7 +4146,7 @@ async function executarTurnoDoAgente(
   const valoresDaConsulta = new Set<number>();
   // (C01, G3) Só URLs literais da reentrada humana confirmada. Nunca usar
   // registrarConsulta no corpo do caso: isso também autorizaria valores.
-  if (job.kind === 'case_reply_turn' && input.respostaDoCaso) {
+  if (job?.kind === 'case_reply_turn' && input.respostaDoCaso) {
     try {
       for (const url of await lerLinksDaRespostaDoCaso(pool, {
         tenantId, contactId: leadId, conversationId: input.conversationId, jobId: job.id,
@@ -5544,7 +5547,24 @@ async function executarTurnoDoAgente(
             },
             // `finalBody` = corpo após a cadeia (o disclosureGate F4-05 pode prependar o
             // disclosure via inject); é ELE que vai ao canal, não o `body` capturado da tool.
-            send: (finalBody: string) => {
+            send: async (finalBody: string) => {
+              // T5: leitura sob o lock de before-send. Só o literal repetido sai;
+              // o resto passou pelas mesmas travas. Replay e mídia mantêm o caminho original.
+              if (!preview && leadId && !videoNativo && fotosDoProduto.length === 0 && retomada === null) {
+                const matricula = await prepararMatriculaUmaVez(pool, {
+                  organizationId: tenantId, contactId: leadId,
+                  conversationId: input.conversationId, jobId: liveJob().id,
+                }, politicaMatricula, finalBody, paginasMatricula);
+                if (matricula.reason !== 'none') {
+                  runLog.info('T5: fechamento repetido suprimido; resposta útil preservada', { motivo: matricula.reason });
+                  finalBody = matricula.body;
+                  if (!finalBody) {
+                    const prior = reciboDaMatriculaSuprimida(matricula);
+                    registrarRespostaAoLead(prior.kind);
+                    return prior;
+                  }
+                }
+              }
               pararDigitando(); // a mensagem sai agora; renovar depois dela mentiria
               corposEnviados.push(finalBody);
               const sleep =
@@ -6772,9 +6792,12 @@ async function executarTurnoDoAgente(
                 ...mcpTool,
                 execute: (async (...args: Parameters<typeof executeOriginal>) => {
                   const configOrigem = configOrigemC01();
-                  if (configOrigem?.enabled && configOrigem.organizationId === tenantId && configOrigem.offerConnectionId)
+                  if ((configOrigem?.enabled && configOrigem.organizationId === tenantId && configOrigem.offerConnectionId) || politicaMatricula.enabled)
                     args[0] = completarConsultaOfertaC01(args[0]) as typeof args[0];
                   const resultado = await executeOriginal(...args);
+                  if (politicaMatricula.enabled)
+                    for (const oferta of ofertasDaConsultaC01(args[0], resultado, politicaMatricula.offer_connection_id))
+                      for (const url of oferta.urls) paginasMatricula.add(url);
                   if (configOrigem?.enabled && configOrigem.organizationId === tenantId && configOrigem.offerConnectionId)
                     ofertasConsultadasC01.push(...ofertasDaConsultaC01(args[0], resultado, configOrigem.offerConnectionId));
                   if (configOrigem?.enabled && configOrigem.organizationId === tenantId)
