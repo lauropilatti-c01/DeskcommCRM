@@ -60,8 +60,23 @@ paginação malformada ou teto atingido nunca produzem ausência de compra.
   `amount_paid` para valor previsto nem de `paid_at` para criação/atualização.
 
 Os contratos foram confrontados com os leitores existentes do Guru e com o
-schema/código do boleto; os testes usam respostas sintéticas dessas APIs. Não
-foi realizada chamada financeira real para ativar ou testar esta candidata.
+schema/código do boleto. A primeira bateria usou respostas sintéticas. Depois,
+foram feitas consultas **GET reais**, sem chamar a rota de confirmação:
+
+- Guru: uma transação conhecida retornou pagamento válido, com produto e oferta
+  coincidentes com o mapa exato; HTTP 200 em 552 ms, às 08h53 de 23/10.
+- Boleto: a transação conhecida retornou HTTP 200 e identidade/produto coerentes,
+  mas uma parcela marcada paga não tinha `amount_paid`. Não houve confirmação
+  financeira nem fallback para valor previsto. Depois da correção de
+  classificação, a mesma resposta voltou como revisão em 323 ms, às 08h55.
+  Quatro referências do espelho foram inspecionadas ao todo: nenhuma comprovou
+  pagamento integral pelos critérios desta integração. O espelho é uma pista
+  para localizar a referência; sua classificação não substitui o recibo real.
+
+Recibo incompleto de uma pessoa identificada conserva a revisão dessa pessoa,
+sem tornar indisponível a conferência de todos os demais clientes. A prova de
+boleto real nesta rodada é de leitura e recusa correta; **não** é uma aprovação
+real do caminho positivo de pagamento integral.
 
 ## Consulta que alimenta a guarda dos acompanhamentos
 
@@ -127,6 +142,16 @@ Cada produto declara os IDs exatos de origem e oferta, as chaves canônicas do
 CRM e `commercialFlowIds`. Segredos ficam exclusivamente no ambiente privado do
 servidor; nunca entram no catálogo do guia ou no frontend.
 
+Foi preparada configuração privada OFF em `~/workspace/dados/crm-financeiro-2310`,
+fora do Git, diretório 700 e arquivos 600. Passou pelo mesmo validador Zod da
+aplicação. Contém duas fontes e os dois pares produto/plano com evidência exata
+nas oportunidades atuais; não inventa mapa para os demais cards. Os IDs de
+fluxos comerciais estão vazios, aguardando conferir a implantação coordenada.
+`guru-c01-principal` é namespace estável da credencial C01 na configuração,
+não uma alegação de ID de conta retornado pela API. O manifesto registra hashes
+das fontes e das configurações, horários, limites e nenhuma ativação. Credenciais
+e referências financeiras não foram copiadas para este documento.
+
 Antes de ativar são necessários: instalar a candidata pela janela aprovada;
 provisionar credenciais de leitura e assinatura; conferir o mapa de origem e o
 conjunto de contas; validar uma transação conhecida e suas permissões reais;
@@ -141,11 +166,11 @@ Não encerra como Perdido quando a conferência de compras estiver incompleta.
 
 ## Provas desta rodada
 
-- **67 testes unitários passaram** nos três arquivos afetados: adaptadores,
+- **68 testes unitários passaram** na cobertura combinada dos três arquivos afetados: adaptadores,
   persistência da resposta e arquivamento de etapa. Cobrem DDD 55, campos
   financeiros reservados, cancelamento, parcial, resposta incompleta, repetição
   transitória, timeout e origem divergente.
-- **54 cenários SQL passaram** em `tests/invariants/c01-compra-verificada.test.ts`:
+- **55 cenários SQL passaram** em `tests/invariants/c01-compra-verificada.test.ts`:
   núcleo, handler real `POST(Request)` com autenticação e adaptadores Guru/boleto,
   tenant, replay, rotação de integração, quatro falhas entre efeitos, conservação
   do atendimento humano, consulta de ausência com as duas fontes e recusas.
@@ -158,14 +183,17 @@ Não encerra como Perdido quando a conferência de compras estiver incompleta.
   imutável. A fixture passou a criar o pointer correto desde o início. O
   verificador aprovou esse caso e o novo caso de relógio antigo, depois os 13
   casos da guarda financeira afetados pela validação do horário. A cobertura
-  combinada é de 54 cenários sem falha remanescente. Não se desabilitou trigger
+  combinada inicial é de 54 cenários sem falha remanescente. A consulta real
+  acrescentou o caso de recibo incompleto, executado isoladamente pelo
+  verificador no mesmo baseline: aprovado, totalizando 55 cenários. Não se desabilitou trigger
   nem se alterou o baseline para fazer o teste passar. Os logs privados estão
   no diretório de evidências `crm-operacao-2310-p2`, arquivos
   `financeiro-integral-final.log`, `financeiro-integral-correcao.log` e
-  `financeiro-integral-guarda-final.log`.
+  `financeiro-integral-guarda-final.log` e `financeiro-integral-recibo-incompleto.log`.
 - A rodada preliminar no recorte PostgreSQL de 22/10 passou; a prova integral
   acima substitui a limitação daquele recorte para estes cenários. Não é uma
-  prova de API financeira real nem de publicação de produção.
+  prova de publicação de produção. As consultas GET reais limitadas estão
+  descritas acima.
 - Lint dos arquivos alterados: zero erros, um aviso preexistente de importação
   de tipo no teste da rota de etapas. Diff-check passou. O typecheck geral
   ultrapassou o heap padrão de 4 GiB; o coordenador o executará na árvore

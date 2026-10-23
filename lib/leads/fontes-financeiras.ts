@@ -16,12 +16,13 @@ export interface RegistroFinanceiro {
   orderedAt: string;
   status: "paid" | "pending" | "review";
   proof?: ProvaFinanceira;
+  reviewReason?: "comprovante_financeiro_incompleto";
 }
 const rec = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
-const erro = (code = "financial_evidence_invalid"): never => {
+function erro(code = "financial_evidence_invalid"): never {
   throw new CompraRecusada(code);
-};
+}
 function str(v: unknown): string {
   return typeof v === "string" && v.trim()
     ? v.trim()
@@ -158,6 +159,7 @@ export function criarFonteFinanceira(
       currency = "BRL",
       status: RegistroFinanceiro["status"];
     let phone: string | null, offerId: string | null;
+    let evidenceIncomplete = false;
     if (cfg.provider === "guru") {
       p = rec(row.product);
       c = rec(row.contact);
@@ -227,8 +229,18 @@ export function criarFonteFinanceira(
         )
           review = true;
         if (pay.status === "paid") {
-          paidCents += money(pay.amount_paid);
-          times.push(iso(pay.paid_at));
+          try {
+            const amount = money(pay.amount_paid);
+            const date = iso(pay.paid_at);
+            paidCents += amount;
+            times.push(date);
+          } catch (error) {
+            if (!(error instanceof CompraRecusada)) throw error;
+            // Identidade e produto continuam conhecidos. A ausência do recibo
+            // bloqueia esta pessoa, sem virar ausência nem derrubar outras.
+            review = true;
+            evidenceIncomplete = true;
+          }
         }
       }
       status =
@@ -249,6 +261,7 @@ export function criarFonteFinanceira(
       email: email(c.email),
       orderedAt,
       status,
+      ...(evidenceIncomplete ? { reviewReason: "comprovante_financeiro_incompleto" as const } : {}),
     };
     if (status === "paid") {
       if (

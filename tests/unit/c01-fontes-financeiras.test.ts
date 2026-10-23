@@ -234,3 +234,31 @@ it("vários itens e gratuidade não viram pagamento integral de um único produt
     expect((await f.readRecord("tx-1", new AbortController().signal)).status).toBe("review");
   }
 });
+
+it("parcela paga sem recibo fica em revisão sem derrubar outras identidades", async () => {
+  const row = { ...boleto, payments: [{ ...boleto.payments[0], amount_paid: null }] };
+  const f = criarFonteFinanceira(
+    {
+      provider: "boleto",
+      sourceAccountId: BORG,
+      baseUrl: "https://exemplo.supabase.co",
+      apiToken: "teste",
+    },
+    {
+      fetch: vi.fn(async () => new Response(JSON.stringify([row]))) as typeof fetch,
+      now: () => now,
+    },
+  );
+  const records = await f.scan(new Date("2026-10-22"), now, new AbortController().signal);
+  expect(records).toHaveLength(1);
+  expect(records[0]).toMatchObject({
+    status: "review",
+    reviewReason: "comprovante_financeiro_incompleto",
+    productId: "p1",
+    phone: "+5511999990001",
+  });
+  expect(records[0].proof).toBeUndefined();
+  await expect(f.readPayment(row.id, new AbortController().signal)).rejects.toThrow(
+    "financial_payment_not_confirmed",
+  );
+});
