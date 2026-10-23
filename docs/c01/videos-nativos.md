@@ -57,16 +57,71 @@ A prévia do agente ainda não prepara vídeo. Ela mostra impedimento explícito
 não aprova a legenda como prova de anexo. Testes desta entrega usam ferramentas,
 Storage e recibos simulados, sem WhatsApp, IA paga ou banco compartilhado.
 
-## V3: contrato preparado, executor ainda pendente
+## V3: executor de acompanhamentos, candidato OFF
 
-O classificador de mídia aceita um opt-in `videoMp4: true`. Chamadas antigas
-continuam limitadas a imagem/PDF. O contrato de canal e o corpo do handler já
-preservam `type: video`. Isso, sozinho, não liga vídeo nos acompanhamentos.
+Implementação local sobre `c1f468e4c`, em `c01/video-followup-2310`. Os caminhos
+`lib/agent-engine/agent/followup-turn.ts` e `lib/followup/enviar-texto-fixo.ts`
+leem a mesma política por organização, com `enabled && flow_mp4`. Ausência,
+erro de leitura, tipo inválido ou qualquer uma das duas opções desligada recusa
+MP4 sem enviar a legenda sozinha. Imagem, PDF e texto preservam seus contratos.
+Nenhuma configuração real foi criada ou habilitada.
 
-A integração V3 precisa ler a configuração no worker e no executor inline,
-exigir `enabled && flow_mp4`, recusar legenda grande e preservar janela, compra,
-resposta, humano, recusa e recibo. Ela não deve atrasar a versão dos acompanhamentos.
-O editor, a tabela trava→vídeo, os arquivos reais e a habilitação não foram alterados.
+O nó já existente `action.mode=text` recebe `media_url` terminado em `.mp4` e
+`body` como legenda. O tipo enviado é `video`; a mensagem inteira segue pelo
+mesmo handler do CRM e o mesmo transporte do canal. Não existe fallback para
+link textual, chamada de IA ou novo serviço. O editor não foi redesenhado.
+
+**Limite de origem desta fatia:** a URL do nó é uma configuração do operador;
+a extensão identifica o tipo solicitado, mas não comprova bytes, hash, codec
+ou conteúdo. Esse caminho não usa `video_chave` nem a cópia privada do catálogo
+V1. Não anunciar a validação de hash do V1 para uma URL arbitrária. Antes de
+habilitar é necessário aprovar a URL estável e conferir o arquivo/reprodução;
+URL que expira pode falhar. Uma futura seleção do catálogo por chave exigirá
+contrato específico de nó e fica fora desta entrega.
+
+A legenda precisa ter de 1 a 1024 caracteres, incluindo espaços. O worker
+reconfere o corpo após os ajustes da cadeia. O inline usa o corpo fixo que já
+veio renderizado. Configuração e legenda são relidas imediatamente antes de
+entregar a intenção ao canal/handler. Desligar depois de preparar impede o envio.
+
+Vídeo e legenda têm uma identidade de mídia no ledger comum. No mesmo job,
+refazer a legenda não cria uma segunda entrega do mesmo vídeo; a URL precisa
+permanecer estável. O worker e o inline usam a mesma forma de identidade.
+`queued`, `failed` e indisponibilidade não concluem o passo nem contam entrega.
+Uma saída já aceita conserva o recibo no replay. Sem prova de entrega, o motor
+C01 continua bloqueando o próximo toque; não interpreta falha como silêncio.
+
+As guardas continuam nos caminhos existentes: inscrição viva, fronteira de
+atendimento, elegibilidade, responsável humano, recusa, janela do canal, ritmo
+e corte financeiro C01. Vídeo livre não é modelo Meta e não sai fora da janela
+de 24 horas. O retorno combinado não recebe vídeo por esse opt-in.
+
+O suporte a vídeo no passo **não ativa a pergunta de 15 minutos** nem escolhe
+vídeo por objeção. São capacidades distintas, com configuração própria. Também
+não adiciona mídias aos grafos de acompanhamento já preparados. Texto pode ser
+liberado independentemente desta candidata.
+
+### Ficha de prova V3
+
+- Vermelho inicial: seis casos novos falharam nos dois executores porque MP4
+  continuava recusado como tipo; os demais casos passaram.
+- `lib/followup/enviar-texto-fixo.test.ts`: ON/OFF, legenda, janela, configuração
+  desligada após preparo, identidade persistida no ledger e recibos sem sucesso.
+- `tests/unit/fluxo-envia-modelo-aprovado.test.ts`: mesmos cortes no worker,
+  corpo alterado pela cadeia, nenhuma IA, replay real pelo `sendWithLedger`
+  sem segundo transporte, e preservação dos modelos/imagens/textos anteriores.
+- `tests/unit/c01-videos-nativos.test.ts`: leitura SQL/Supabase da mesma política,
+  por organização, OFF em erro; regressão de catálogo, mídia e ledger do V1.
+- `tests/unit/c01-video-nativo-handler.test.ts`: handler real com transporte
+  simulado, inclusive URL MP4, bloqueio, janela, anti-SSRF real e formato de vídeo com legenda. DNS é simulado; não há download externo.
+- `tests/unit/followup-turn-nao-fala-por-cima-de-quem-assumiu.test.ts`: a passagem
+  humana permanece antes do envio. Nenhuma prova usou cliente ou canal real.
+
+As rodadas focadas passaram: 38 casos inline, 21 do worker/modelos, 21 de V1/leitura de política, 9 do handler e 5 de passagem humana. ESLint sem erros (dois avisos preexistentes no arquivo de modelos). Typecheck conferido na candidata.
+
+Não houve DDL, gasto de IA, mudança no laboratório compartilhado ou publicação.
+Ativação, catálogo comercial, URLs reais, prova no celular e portões da release
+ficam com a etapa de liberação da sessão principal.
 
 ## Prova e operação
 

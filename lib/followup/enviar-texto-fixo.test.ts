@@ -41,6 +41,7 @@ const JOB = {
 const statusUpdates: string[] = [];
 /** Linhas gravadas em `pacing_ledger` — é por aqui que se prova que o envio foi CONTABILIZADO. */
 const ledgerInserts: Record<string, unknown>[] = [];
+const sendLedgerInserts: Record<string, unknown>[] = [];
 const filtrosRunAfter: { op: string; col: string; v: string }[] = [];
 const settleCalls: Record<string, unknown>[] = [];
 
@@ -51,6 +52,8 @@ const settleCalls: Record<string, unknown>[] = [];
  * que vieram medir; os casos de janela mudam ESTE objeto.
  */
 const CONFIG = {
+  videoPolicy: undefined as unknown,
+  videoPolicies: [] as unknown[],
   /** `null` = a conversa não tem canal — não há janela do canal a consultar. */
   sessao: "sess-1" as string | null,
   fuso: "America/Sao_Paulo" as string | null,
@@ -79,6 +82,10 @@ const CONFIG = {
 };
 
 function reiniciarConfig() {
+  CONFIG.videoPolicy = undefined;
+  CONFIG.videoPolicies = [];
+  sendLedgerInserts.length = 0;
+  JOB.payload.fixed_body = "Oi, tudo bem?";
   CONFIG.sessao = "sess-1";
   CONFIG.fuso = "America/Sao_Paulo";
   CONFIG.knobs = {
@@ -127,6 +134,7 @@ function admin(revogado = false, falhaDeLeitura: Error | null = null) {
       single: () => Promise.resolve({data:table==="send_ledger"?{id:"ledger-1"}:{settings:{}},error:null}),
       insert: (p: Record<string, unknown>) => {
         if (table === "pacing_ledger") ledgerInserts.push(p);
+        if (table === "send_ledger") sendLedgerInserts.push(p);
         return chain;
       },
       order: () => chain,
@@ -148,7 +156,7 @@ function admin(revogado = false, falhaDeLeitura: Error | null = null) {
             data: CONFIG.ritmo.ultimoEnvioIso ? { sent_at: CONFIG.ritmo.ultimoEnvioIso } : null,
             error: null,
           });
-        if (table === "organizations") return Promise.resolve({ data: { timezone: CONFIG.fuso }, error: null });
+        if (table === "organizations") return Promise.resolve({ data: { timezone: CONFIG.fuso, settings: { c01_native_videos: CONFIG.videoPolicies.length ? CONFIG.videoPolicies.shift() : CONFIG.videoPolicy } }, error: null });
         if (table === "ai_agents") return Promise.resolve({ data: { published_version_id: "v1" }, error: null });
         if (table === "ai_agent_versions") return Promise.resolve({ data: { followup: CONFIG.followup }, error: null });
         return Promise.resolve({ data: null, error: null });
@@ -594,5 +602,71 @@ describe("enviarTextoFixoPendente · mídia com legenda (#2734)", () => {
 
     expect(await enviarTextoFixoPendente(admin())).toBe(1);
     expect(sendMessageHandler.mock.calls[0]![2]).toMatchObject({ type: "text", body: "Oi, tudo bem?" });
+  });
+});
+
+
+describe("V3: vídeo inline segue a mesma autorização", () => {
+  const video = "https://fixture.invalid/curso.mp4";
+  const policy = { enabled: true, flow_mp4: true, catalog: [] };
+  beforeEach(() => {
+    decidir.mockResolvedValue({ permite: true });
+    (JOB.payload as Record<string, unknown>).fixed_media_url = video;
+    CONFIG.videoPolicy = policy;
+  });
+  it("envia uma mensagem de vídeo com a legenda", async () => {
+    expect(await enviarTextoFixoPendente(admin())).toBe(1);
+    expect(sendMessageHandler).toHaveBeenCalledOnce();
+    expect(sendMessageHandler.mock.calls[0]![2]).toMatchObject({ type: "video", media_url: video, media_mime: "video/mp4", body: JOB.payload.fixed_body });
+  });
+  it.each([undefined, {}, { ...policy, enabled: false }, { ...policy, flow_mp4: false }])("OFF recusa sem texto de fallback", async videoPolicy => {
+    CONFIG.videoPolicy = videoPolicy;
+    expect(await enviarTextoFixoPendente(admin())).toBe(0);
+    expect(sendMessageHandler).not.toHaveBeenCalled();
+  });
+  it("legenda longa recusa com motivo, sem anúncio de vídeo inexistente", async () => {
+    JOB.payload.fixed_body = "x".repeat(1025);
+    expect(await enviarTextoFixoPendente(admin())).toBe(0);
+    expect(sendMessageHandler).not.toHaveBeenCalled();
+    expect(completeTurnForEnrollment.mock.calls[0]![4]).toMatchObject({ kind: "skipped", reason: expect.stringContaining("1024") });
+  });
+  it("janela fechada continua impedindo o vídeo", async () => {
+    CONFIG.provider = PROVIDERS_DE_MENSAGEM.find(p => !CHANNEL_CAPABILITIES[p].freeformOutsideWindow)!;
+    CONFIG.ultimoInbound = new Date(Date.now() - 30 * 3600000).toISOString();
+    expect(await enviarTextoFixoPendente(admin())).toBe(0);
+    expect(sendMessageHandler).not.toHaveBeenCalled();
+    expect(completeTurnForEnrollment.mock.calls[0]![4]).toMatchObject({ kind: "skipped", reason: expect.stringContaining("janela de 24 horas") });
+  });
+});
+
+
+describe("V3: guarda final e identidade inline", () => {
+  const video = "https://fixture.invalid/curso.mp4";
+  const policy = { enabled: true, flow_mp4: true, catalog: [] };
+  beforeEach(() => {
+    decidir.mockResolvedValue({ permite: true });
+    (JOB.payload as Record<string, unknown>).fixed_media_url = video;
+    CONFIG.videoPolicy = policy;
+  });
+  it("desligar depois do preparo impede a saída do handler", async () => {
+    // O fuso também lê organizations. Usar a primeira leitura para trocar a
+    // configuração permite confirmar o corte final, além do corte de preparo.
+    CONFIG.videoPolicies = [policy];
+    CONFIG.videoPolicy = { ...policy, enabled: false };
+    expect(await enviarTextoFixoPendente(admin())).toBe(0);
+    expect(sendMessageHandler).not.toHaveBeenCalled();
+    expect(completeTurnForEnrollment).not.toHaveBeenCalled();
+  });
+  it("o ledger identifica a mídia estável e não a legenda", async () => {
+    const { hashDoConteudo } = await import("@/lib/agent-engine/edge/crm/send-ledger");
+    expect(await enviarTextoFixoPendente(admin())).toBe(1);
+    const expected = hashDoConteudo({ body: "Outra legenda", identidade: "", media: { url: video, type: "video", mime: "video/mp4" } });
+    expect(sendLedgerInserts[0]?.body_hash).toBe(expected);
+  });
+  it.each(["failed", "queued"])("recibo %s não conclui o passo nem conta entrega", async status => {
+    sendMessageHandler.mockResolvedValueOnce({ id: "msg-1", status });
+    expect(await enviarTextoFixoPendente(admin())).toBe(0);
+    expect(completeTurnForEnrollment).not.toHaveBeenCalled();
+    expect(ledgerInserts).toHaveLength(0);
   });
 });

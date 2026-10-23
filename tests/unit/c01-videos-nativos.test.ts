@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { classificarMidiaComLegenda } from '@/lib/messaging/media/midia-com-legenda';
 import { corpoDoEnvio } from '@/lib/agent-engine/edge/crm/send-message';
 import { hashDoConteudo, sendWithLedger } from '@/lib/agent-engine/edge/crm/send-ledger';
-import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, lerPoliticaDeVideo, prepararVideoNativo, validarVideoMp4 } from '@/lib/agent-engine/agent/videos-nativos';
+import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, lerPoliticaDeVideo, lerPoliticaDeVideoSupabase, prepararVideoNativo, validarVideoMp4 } from '@/lib/agent-engine/agent/videos-nativos';
 import { AGENT_TOOL_DEFS } from '@/lib/agent-engine/agent/inbound-turn';
 import { applyPreviewPolicy, newPreviewResult, type TurnPreview } from '@/lib/agent-engine/agent/preview';
 import type { GateContext } from '@/lib/agent-engine/guardrails/before-send';
@@ -198,4 +198,16 @@ describe('fiação V1: ferramenta e prévia', () => {
     expect(send).toContain('prepararVideoNativo(pool, deps.copiarVideo ?? copiarVideoNoStorage()');
     expect(send).toContain('identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO');
   });
+});
+
+
+it('V3: leitor inline usa a mesma política por organização e falha fechado', async () => {
+  const eq = vi.fn();
+  const reply = vi.fn(async () => ({ data: { settings: { c01_native_videos: { ...config, flow_mp4: true } } }, error: null as unknown }));
+  const chain = { select: () => chain, eq: (...args: unknown[]) => { eq(...args); return chain; }, maybeSingle: reply };
+  const db = { from: vi.fn(() => chain) } as unknown as Parameters<typeof lerPoliticaDeVideoSupabase>[0];
+  expect(await lerPoliticaDeVideoSupabase(db, org)).toMatchObject({ enabled: true, flow_mp4: true });
+  expect(eq).toHaveBeenCalledWith('id', org);
+  reply.mockResolvedValueOnce({ data: { settings: { c01_native_videos: config } }, error: new Error('offline') });
+  expect((await lerPoliticaDeVideoSupabase(db, org)).enabled).toBe(false);
 });
