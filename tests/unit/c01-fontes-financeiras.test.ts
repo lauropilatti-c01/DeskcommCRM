@@ -27,8 +27,8 @@ describe("fontes financeiras autorizadas", () => {
       phone: "+5511999990001",
       status: "paid",
     });
-    expect(fetcher.mock.calls[0][0]).toBe("https://digitalmanager.guru/api/v2/transactions/tx-1");
-    expect(fetcher.mock.calls[0][1]).toMatchObject({
+    expect(fetcher.mock.calls[0]![0]).toBe("https://digitalmanager.guru/api/v2/transactions/tx-1");
+    expect(fetcher.mock.calls[0]![1]).toMatchObject({
       method: "GET",
       redirect: "error",
       cache: "no-store",
@@ -104,19 +104,19 @@ describe("boleto autoritativo e cobertura das fontes", () => {
       offerId: null,
       status: "paid",
     });
-    expect(String(fetcher.mock.calls[0][0])).toContain("org_id=eq." + BORG);
+    expect(String(fetcher.mock.calls[0]![0])).toContain("org_id=eq." + BORG);
   });
   it.each(["partial", "no_date", "no_amount", "other_org", "manual", "refund"] as const)(
     "não inventa pagamento integral: %s",
     async (mode) => {
       const r = structuredClone(boleto);
-      if (mode === "partial") r.payments[0].amount_paid = 10;
-      if (mode === "no_date") Object.assign(r.payments[0], { paid_at: null });
-      if (mode === "no_amount") Object.assign(r.payments[0], { amount_paid: null, amount: 100 });
+      if (mode === "partial") r.payments[0]!.amount_paid = 10;
+      if (mode === "no_date") Object.assign(r.payments[0]!, { paid_at: null });
+      if (mode === "no_amount") Object.assign(r.payments[0]!, { amount_paid: null, amount: 100 });
       if (mode === "other_org") r.org_id = "outro";
       if (mode === "manual")
-        Object.assign(r.payments[0], { marked_paid_manually_at: now.toISOString() });
-      if (mode === "refund") Object.assign(r.payments[0], { refunded_at: now.toISOString() });
+        Object.assign(r.payments[0]!, { marked_paid_manually_at: now.toISOString() });
+      if (mode === "refund") Object.assign(r.payments[0]!, { refunded_at: now.toISOString() });
       const f = criarFonteFinanceira(bcfg, {
         fetch: vi.fn(async () => new Response(JSON.stringify([r]))) as typeof fetch,
         now: () => now,
@@ -257,7 +257,7 @@ it("parcela paga sem recibo fica em revisão sem derrubar outras identidades", a
     productId: "p1",
     phone: "+5511999990001",
   });
-  expect(records[0].proof).toBeUndefined();
+  expect(records[0]!.proof).toBeUndefined();
   await expect(f.readPayment(row.id, new AbortController().signal)).rejects.toThrow(
     "financial_payment_not_confirmed",
   );

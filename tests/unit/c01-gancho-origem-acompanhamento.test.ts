@@ -57,7 +57,7 @@ describe('Origem do material no gancho confiável', () => {
     expect(send.mock.calls[0]?.[0]).toMatchObject({ leadId: CONTACT, c01Origin: { kind: 'cronograma', leadId: LEAD, productKey: 'produto-ficticio' } });
     expect(send.mock.calls[1]?.[0]).not.toHaveProperty('c01Origin');
     const saved = query.mock.calls.filter(([sql]) => sql.includes('update job_queue'))
-      .map(([, args]) => JSON.parse(String(args[3]))).find(x => x.situacao === 'decidido');
+      .map(([, args]) => JSON.parse(String(args?.[3]))).find(x => x.situacao === 'decidido');
     expect(saved.origem_lead_id).toBe(LEAD);
   });
 

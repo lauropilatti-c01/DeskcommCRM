@@ -360,7 +360,7 @@ describe("acompanhamento com SQL real e transporte falso", () => {
       vi.setSystemTime(now);
       vi.stubEnv("WAHA_API_BASE_URL", "http://127.0.0.1:3030");
       vi.stubEnv("WAHA_API_KEY", "fixture");
-      const transport = vi.fn(async () => Response.json({ key: { id: "falso-1" } }));
+      const transport = vi.fn<typeof fetch>(async () => Response.json({ key: { id: "falso-1" } }));
       vi.stubGlobal("fetch", transport);
       const fake = criarDubleDoHandler({
         conversation: {

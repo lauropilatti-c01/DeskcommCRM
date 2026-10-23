@@ -18,6 +18,7 @@ import {
   comAutoria,
   etapa,
   funil,
+  funilRow,
   makeDb,
   negocio,
 } from "@/tests/helpers/stages-db-double";
@@ -701,14 +702,14 @@ describe("C01: arquivamento não é atalho de confirmação financeira", () => {
       stages: funil(),
       leads: [negocio("l1", "e2")],
       pipelines: [
-        {
+        funilRow({
           id: PIPE,
           name: "Vendas",
           organization_id: ORG_ID,
           settings: {
             fields: [{ key: "pagamento_confirmado", obrigatorio_em: { ao_ganhar: true } }],
           },
-        },
+        }),
       ],
     });
     const { DELETE } = await import("./route");

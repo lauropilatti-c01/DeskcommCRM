@@ -576,9 +576,9 @@ describe("C01 compra verificada — PostgreSQL real, fonte sintética e integra�
           `insert into followup_flow_pointers(id,organization_id,name,status,active_version_id,surface)
            select $1,organization_id,'Roteiro comercial fictício',status,active_version_id,'atendimento'
            from followup_flow_pointers where organization_id=$2 and id=$3`,
-          [roteiro, f.org, f.integration.products[0].commercialFlowIds[0]],
+          [roteiro, f.org, f.integration.products[0]!.commercialFlowIds[0]],
         );
-        f.integration.products[0].commercialFlowIds.push(roteiro);
+        f.integration.products[0]!.commercialFlowIds.push(roteiro);
         await pool.query(
           "update followup_enrollments set pointer_id=$2,status='coletando' where id=$1",
           [f.enrollment, roteiro],
