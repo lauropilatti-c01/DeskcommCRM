@@ -121,8 +121,9 @@ type Consulta = {
  * O que a resposta precisa distinguir (e por quê):
  * - `crm_stages.select("id")` = etapa de PERDA da ORIGEM (a que a régua pergunta);
  * - `crm_stages.select("id, name")` = etapa terminal que o `encerraDemanda` escolhe;
- * - `crm_stages.select("id, pipeline_id, organization_id")` = etapa que o
- *   `createLeadHandler` valida antes de gravar o clone;
+ * - `crm_stages.select("id, pipeline_id, organization_id, is_won, is_lost")`
+ *   = etapa que o `createLeadHandler` valida antes de gravar o clone, incluindo
+ *   seu desfecho para a proteção financeira;
  * - `crm_pipelines` = o `settings` do funil lido no `.eq("id", …)` — a ORIGEM
  *   (a régua nova e o encerramento) ou o DESTINO (a criação do clone).
  *
@@ -211,9 +212,15 @@ function responde(
     if (c.selecao === "id, name") {
       return { data: { id: ETAPA_PERDA_A, name: "Perdido" }, error: null };
     }
-    if (c.selecao === "id, pipeline_id, organization_id") {
+    if (c.selecao === "id, pipeline_id, organization_id, is_won, is_lost") {
       return {
-        data: { id: ETAPA_DESTINO, pipeline_id: FUNIL_B, organization_id: ORG },
+        data: {
+          id: ETAPA_DESTINO,
+          pipeline_id: FUNIL_B,
+          organization_id: ORG,
+          is_won: false,
+          is_lost: false,
+        },
         error: null,
       };
     }

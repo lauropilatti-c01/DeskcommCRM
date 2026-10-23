@@ -19,6 +19,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { anotarCampos } = vi.hoisted(() => ({ anotarCampos: vi.fn() }));
+
 vi.mock("@/lib/audit", () => ({
   audit: vi.fn(async () => undefined),
   isServiceRoleConfigured: vi.fn(() => false),
@@ -35,7 +37,7 @@ vi.mock("@/lib/atendimento/origem", () => ({
 }));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: vi.fn(() => ({
-    rpc: vi.fn(() => Promise.resolve({ error: null })),
+    rpc: anotarCampos,
   })),
 }));
 
@@ -75,6 +77,18 @@ const PATCH_CHEIO = {
 /** Banco falso: ler devolve o estado, gravar nele o atualiza. */
 function bancoFalso() {
   const banco: Record<string, unknown> = { ...ANTES };
+  // O RPC real devolve o JSON mesclado. Um recibo sem `data` é falha de
+  // confirmação, não uma gravação bem-sucedida para a auditoria examinar.
+  anotarCampos.mockImplementation(async (nome: string, args: {
+    p_org: string;
+    p_lead: string;
+    p_campos: Record<string, unknown>;
+  }) => {
+    expect(nome).toBe("fn_lead_anotar_campos");
+    expect(args).toMatchObject({ p_org: ORG, p_lead: LEAD });
+    banco.custom_fields = { ...(banco.custom_fields as Record<string, unknown>), ...args.p_campos };
+    return { data: { ...(banco.custom_fields as Record<string, unknown>) }, error: null };
+  });
 
   const from = (tabela: string) => {
     if (tabela !== "crm_leads") throw new Error(`tabela inesperada: ${tabela}`);
@@ -155,7 +169,11 @@ describe("o antes-e-depois que a auditoria de lead.updated guarda", () => {
   });
 
   it("não deixa PII vazar para o audit", async () => {
-    await updateLeadHandler(bancoFalso() as never, ctx, LEAD, PATCH_CHEIO);
+    const atualizado = await updateLeadHandler(bancoFalso() as never, ctx, LEAD, PATCH_CHEIO);
+
+    // A PII foi realmente gravada pelo simulador e devolvida ao chamador;
+    // não pode sumir da operação só para a prova de privacidade passar.
+    expect(atualizado.custom_fields).toEqual(PATCH_CHEIO.custom_fields);
 
     const { metadata } = chamadaLeadUpdated();
     const tudo = JSON.stringify(metadata);
