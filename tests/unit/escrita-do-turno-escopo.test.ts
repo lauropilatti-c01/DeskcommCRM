@@ -35,6 +35,8 @@ const COMPROMISSO_DO_TURNO = "cccccccc-1111-4111-8111-111111111111";
 const COMPROMISSO_DE_B = "cccccccc-2222-4222-8222-222222222222";
 const RETORNO_DO_TURNO = "dddddddd-1111-4111-8111-111111111111";
 const RETORNO_DE_B = "dddddddd-2222-4222-8222-222222222222";
+const RETORNO_OUTRA_ORG = "dddddddd-3333-4333-8333-333333333333";
+const CRON_OUTRO_TIPO = "dddddddd-4444-4444-8444-444444444444";
 const CASO_DO_TURNO = "bbbbbbbb-1111-4111-8111-111111111111";
 const CASO_DE_B = "bbbbbbbb-2222-4222-8222-222222222222";
 
@@ -52,6 +54,8 @@ const TABELAS: Record<string, Linha[]> = {
   cron_jobs: [
     { id: RETORNO_DE_B, organization_id: ORG, contact_id: DE_B, kind: "at", job_kind: "followup_turn" },
     { id: RETORNO_DO_TURNO, organization_id: ORG, contact_id: DO_TURNO, kind: "at", job_kind: "followup_turn" },
+    { id: RETORNO_OUTRA_ORG, organization_id: DE_B, contact_id: DO_TURNO, kind: "at", job_kind: "followup_turn" },
+    { id: CRON_OUTRO_TIPO, organization_id: ORG, contact_id: DO_TURNO, kind: "interval", job_kind: "watchdog" },
   ],
   agent_cases: [
     { id: CASO_DE_B, organization_id: ORG, conversation_id: CONVERSA_DE_B },
@@ -134,6 +138,7 @@ const CASOS: Array<{ nome: string; args: (alvo: string) => Linha; doTurno: strin
   ].map((nome) => ({ nome, args: (a: string) => ({ conversation_id: a }), doTurno: CONVERSA_DO_TURNO, deB: CONVERSA_DE_B })),
   { nome: "crm_draft_proposal", args: (a) => ({ lead_id: NEGOCIO_DO_TURNO, conversation_id: a }), doTurno: CONVERSA_DO_TURNO, deB: CONVERSA_DE_B },
   { nome: "crm_cancel_followup", args: (a) => ({ followup_id: a }), doTurno: RETORNO_DO_TURNO, deB: RETORNO_DE_B },
+  { nome: "crm_schedule_followup", args: (a) => ({ contact_id: DO_TURNO, replace_pending_id: a }), doTurno: RETORNO_DO_TURNO, deB: RETORNO_DE_B },
   ...["crm_add_case_note", "crm_close_human_case"].map((nome) => ({
     nome,
     args: (a: string) => ({ case_id: a }),
@@ -230,5 +235,32 @@ describe("forma do valor num campo declarado", () => {
       target_id: contato.toUpperCase(),
     });
     expect(tag).toEqual({ permitido: true });
+  });
+});
+
+
+describe("reagendamento não amplia o alcance da conversa", () => {
+  it.each([RETORNO_DE_B, RETORNO_OUTRA_ORG, CRON_OUTRO_TIPO, INEXISTENTE])(
+    "recusa retorno alheio, de outra organização ou de outro tipo (%s)", async (retorno) => {
+      const args = { lead_id: NEGOCIO_DO_TURNO, contact_id: DO_TURNO, replace_pending_id: retorno };
+      const r = await executar("crm_schedule_followup", args, DO_TURNO);
+      const ausente = await executar("crm_schedule_followup", { ...args, replace_pending_id: INEXISTENTE }, DO_TURNO);
+      expect(r.r).toMatchObject({ permitido: false, motivo: "fora_da_conversa" });
+      expect(r.r).toEqual(ausente.r);
+      expect(r.consultas).toBe(ausente.consultas);
+      expect(r.chamou).toBe(false);
+    },
+  );
+  it.each([{ valor: [RETORNO_DO_TURNO] }, { valor: { id: RETORNO_DO_TURNO } }])("não aceita lista ou objeto no lugar do ID ($valor)", async ({ valor: retorno }) => {
+    const r = await executar("crm_schedule_followup", { contact_id: DO_TURNO, replace_pending_id: retorno }, DO_TURNO);
+    expect(r.r).toMatchObject({ permitido: false, motivo: "fora_da_conversa" });
+    expect(r.chamou).toBe(false);
+  });
+  it("consulta indisponível fecha a passagem antes de reagendar", async () => {
+    const erro = { from: () => { throw new Error("banco indisponível"); } };
+    const r = await escritaCabeNoTurno(erro as never, ORG, DO_TURNO, "crm_schedule_followup", {
+      contact_id: DO_TURNO, replace_pending_id: RETORNO_DO_TURNO,
+    });
+    expect(r).toMatchObject({ permitido: false, motivo: "indisponivel" });
   });
 });

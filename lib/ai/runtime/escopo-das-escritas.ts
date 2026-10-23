@@ -92,7 +92,9 @@ export const ESCOPO_DAS_ESCRITAS: Readonly<Record<string, Readonly<Record<string
   crm_draft_proposal: { lead_id: "negocio", conversation_id: "conversa" },
 
   // ---- retorno ----
-  crm_schedule_followup: { lead_id: "negocio", contact_id: "contato" },
+  // O ID da troca é um cron do próprio contato, como no cancelamento.
+  // Não é configuração: precisa provar organização, contato e tipo do job.
+  crm_schedule_followup: { lead_id: "negocio", contact_id: "contato", replace_pending_id: "retorno" },
   crm_cancel_followup: { followup_id: "retorno" },
   crm_enroll_followup_flow: { contact_id: "contato", flow_id: "configuracao" },
 

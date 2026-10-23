@@ -12,6 +12,8 @@ O contrato existe nos dois caminhos:
 - `schedule_followup` do motor: recebe `replace_pending_id`, devolve `pending_changed` quando a troca não venceu e `outside_send_window` quando a faixa não permite aquele horário.
 - `crm_schedule_followup` do MCP/CRM: mesmo campo opcional; devolve `retorno_alterado` ou `horario_nao_permitido` nesses casos. A capacidade continua diferente de reservar um compromisso na agenda de uma atendente.
 
+A ponte do agente declara `replace_pending_id` como retorno do contato do turno. Antes de chamar o handler, consulta `cron_jobs` com organização, contato, ID, `kind=at` e `job_kind=followup_turn`. Um ID alheio, inexistente ou de outro tipo recebe a mesma recusa, sem revelar se existe. Lista, objeto ou falha de consulta também não passam. O adaptador mantém sua conferência própria dentro da trava.
+
 Ambos chamam `agendaRetorno`. Os adaptadores reais seguram a mesma trava por organização e contato durante a consulta e a gravação. O PostgreSQL usa a conexão retida; o Supabase usa essa conexão para reter a trava e aborta a escrita HTTP se ela cair. Duas primeiras criações simultâneas não fazem dois agendamentos. Quem encontra a trava ocupada recebe recusa e não pode anunciar sucesso. Não há alteração nos outros mecanismos de acompanhamento.
 
 A troca também exige que o job continue ativo, na mesma organização e pessoa, com o horário lido. Se o scheduler, um cancelamento ou outra edição vencer, não recria o retorno. O payload mantém a conversa e a fronteira do atendimento. O histórico registra o horário anterior e o novo somente depois da gravação.
@@ -75,3 +77,10 @@ A suíte completa e a revisão independente ficam na integração da candidata. 
 Estas mudanças moram no código do Deskcomm e exigem versão C01 pelos portões normais. Não são configuração que possa entrar só pela API, nem reinstalação isolada do porteiro. Não estreiam um método novo de publicação. Voltar o programa não restaura o banco nem apaga contatos. Como o payload é aditivo, o código anterior ignora os campos novos; isso também retira as garantias novas de janela e concorrência, portanto os rascunhos permanecem desligados na volta.
 
 A sessão integradora deve atualizar o inventário C01, a história de retorno combinado, o roteiro da equipe e a evidência do guia. Não marcar um procedimento de tela como aprovado apenas por estes testes de código.
+
+
+### Correção encontrada pelo portão integrado
+
+O parâmetro de troca havia entrado na ferramenta sem entrar no contrato declarativo de escopo da ponte. O adaptador já limitava a atualização ao contato e à organização, mas faltava a recusa anterior ao handler. A declaração `replace_pending_id: "retorno"` passou a usar a guarda real existente. Foram acrescentados casos de outro contato, outra organização, outro tipo de cron, ID inexistente, lista/objeto e erro de consulta. A prova também cobre o próprio contato e o caminho sem turno, preservando o contrato do integrador.
+
+Prova da correção: 215 verificações passaram em sete arquivos de escopo, ponte e retorno; lint dos dois arquivos de código/teste e `git diff --check` passaram. Não repetiu a suíte completa, que pertence ao portão da integração.
