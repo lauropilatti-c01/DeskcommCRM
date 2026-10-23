@@ -2,7 +2,9 @@
 
 Esta bancada executa o percurso de caso → atribuição comercial → resposta interna → assumir → devolver. Usa o `supabase/baseline.sql` completo, PostgreSQL com pgvector e PostgREST. As funções de autorização, RPCs, RLS, consultas e rotas são as do programa. Somente o login/cookie e a ausência de sessão de suporte e de push são substituídos no teste. Os usuários e negócios são fictícios.
 
-Não comprova login pelo navegador, a facilidade das telas, chegada de push ou entrega no WhatsApp. Não executa modelo nem transporte de mensagem. O handler de continuidade é chamado apenas enquanto o atendimento humano precisa barrá-lo antes dessas saídas.
+Os escopos usados são cenários sintéticos: organização em `own_and_unassigned`, dois usuários `agent`, um `manager`, um `viewer` e um usuário de outra organização. Eles exercitam as permissões reais do programa, mas não foram copiados nem conferidos nas contas atuais de Maria e Priscila.
+
+Não comprova login pelo navegador, as permissões atuais dessas atendentes, a facilidade das telas, chegada de push ou entrega no WhatsApp. Não executa modelo nem transporte de mensagem. O handler de continuidade é chamado apenas enquanto o atendimento humano precisa barrá-lo antes dessas saídas.
 
 ## Executar localmente
 
