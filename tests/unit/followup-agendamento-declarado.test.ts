@@ -58,6 +58,14 @@ const DIR = join(process.cwd(), "lib", "followup");
  * `agenda` = 'nenhum' → menciona a coluna sem agendar (leitura, tradução).
  */
 const ESCRITORES: Record<string, { agenda: "agora" | "futuro" | "nenhum"; nota: string }> = {
+  "c01-acompanhamento-origens.ts": {
+    agenda: "agora",
+    nota: "A matrícula nasce vencida: omite next_eval_at no INSERT e usa o default now() do banco. Na substituição de cronograma por oferta, só desagenda a inscrição anterior com null.",
+  },
+  "c01-retorno.ts": {
+    agenda: "nenhum",
+    nota: "Só desagenda: callback combinado cancela a cadência C01 e grava next_eval_at = null. O horário do retorno fica no cron_jobs, não nesta coluna.",
+  },
   "enroll.ts": {
     agenda: "agora",
     nota: "o enrollment nasce vencido — o insert omite next_eval_at e o default now() do banco decide (0147).",

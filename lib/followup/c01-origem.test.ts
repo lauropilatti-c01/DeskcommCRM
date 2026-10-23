@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assinarOrigemC01,
+  configOrigemC01,
   conferirOrigemC01,
   tokenDaOrigemValido,
   type ConfigOrigemC01,
@@ -14,7 +15,12 @@ const cfg: ConfigOrigemC01 = {
   tokenSha256: createHash("sha256").update("token-interno").digest("hex"),
   allowedKinds: ["cronograma", "oferta"],
 };
+afterEach(() => vi.unstubAllEnvs());
 describe("origem autenticada do acompanhamento", () => {
+  it.each([undefined, "", "   ", "inválido"])("configuração ausente/vazia/inválida mantém OFF (%s)", (value) => {
+    vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", value);
+    expect(configOrigemC01()).toBeNull();
+  });
   it("assina o vínculo inteiro e recusa troca de mensagem, negócio ou organização", () => {
     const proof = assinarOrigemC01(cfg, {
       organizationId: id(1),

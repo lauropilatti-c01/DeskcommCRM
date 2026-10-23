@@ -177,10 +177,12 @@ export async function registrarOrigemEntregueC01(
           demanda_id: row.current_demanda_id,
           demanda_revision: row.demanda_revision,
         };
+        // Nasce vencido: o default now() do banco usa o mesmo relógio do claim.
+        // O relógio do processo serve à elegibilidade, nunca a este agendamento.
         await db.query(
           `insert into followup_enrollments
-        (id,organization_id,pointer_id,version_id,contact_id,conversation_id,current_node_id,status,next_eval_at,service_boundary,agent_id)
-        values($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10)`,
+        (id,organization_id,pointer_id,version_id,contact_id,conversation_id,current_node_id,status,service_boundary,agent_id)
+        values($1,$2,$3,$4,$5,$6,$7,'active',$8,$9)`,
           [
             id,
             org,
@@ -189,7 +191,6 @@ export async function registrarOrigemEntregueC01(
             row.contact_id,
             row.conversation_id,
             trigger!.id,
-            now,
             boundary,
             agents[0]!.id,
           ],

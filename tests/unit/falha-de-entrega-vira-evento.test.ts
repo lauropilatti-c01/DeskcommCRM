@@ -85,7 +85,7 @@ describe("falha de entrega emite message.failed", () => {
     vi.stubEnv("META_SYSTEM_USER_TOKEN", "tok");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("conexao recusada")));
 
-    const { supabase, capturas } = criarDubleDoHandler({ conversation: conversa() });
+    const { supabase, capturas, mensagens } = criarDubleDoHandler({ conversation: conversa() });
     const msg = await sendMessageHandler(supabase, ctxToken, {
       conversation_id: CONV,
       type: "text",
@@ -98,12 +98,14 @@ describe("falha de entrega emite message.failed", () => {
       (r) => r.nome === "emit_event" && r.args.p_event_type === "message.failed",
     );
     expect(eventos, "uma falha, um aviso").toHaveLength(1);
+    const messageId = (msg as { id: string }).id;
+    expect(messageId, "o evento precisa apontar para a mensagem persistida").toBe(mensagens[0]!.id);
     expect(eventos[0]!.args).toMatchObject({
       p_entity_kind: "message",
-      p_entity_id: "msg-1",
+      p_entity_id: messageId,
       p_organization_id: ORG,
       p_payload: {
-        message_id: "msg-1",
+        message_id: messageId,
         conversation_id: CONV,
         contact_id: CONTACT,
         contact: TELEFONE,
