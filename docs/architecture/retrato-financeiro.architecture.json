@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Retrato financeiro restrito",
+    "subtitle": "Leitura autenticada para conciliação; confirmação continua separada",
+    "output": "retrato-financeiro.html",
+    "quality_profile": "standard"
+  },
+  "lanes": [
+    { "id": "crm", "label": "CRM: autenticação e fonte" },
+    { "id": "vps", "label": "Executor privado da VPS" }
+  ],
+  "mainPath": ["token", "snapshot", "coletor", "conciliacao"],
+  "nodes": [
+    {
+      "id": "token",
+      "lane": "crm",
+      "col": 0,
+      "type": "service",
+      "label": "api_tokens",
+      "sublabel": "financial:snapshot:read + role:viewer; organização fixa, expiração/revogação"
+    },
+    {
+      "id": "dados",
+      "lane": "crm",
+      "col": 0,
+      "type": "service",
+      "label": "contacts + crm_leads",
+      "sublabel": "Somente identidade para conciliação, produto/plano e estado"
+    },
+    {
+      "id": "snapshot",
+      "lane": "crm",
+      "col": 1,
+      "type": "service",
+      "label": "GET financial/snapshot",
+      "sublabel": "Uma fotografia somente leitura; truncamento/erro recusa tudo"
+    },
+    {
+      "id": "coletor",
+      "lane": "vps",
+      "col": 2,
+      "type": "service",
+      "label": "executor_retrato_https.py",
+      "sublabel": "TLS válido, sem redirect, valida organização e frescor"
+    },
+    {
+      "id": "conciliacao",
+      "lane": "vps",
+      "col": 3,
+      "type": "service",
+      "label": "executor_confirmacao.preparar",
+      "sublabel": "Modo OFF: propostas e pendências privadas, sem POST"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "token",
+      "to": "snapshot",
+      "label": "Autoridade de leitura, sem MCP ou administração"
+    },
+    {
+      "id": "e2",
+      "from": "dados",
+      "to": "snapshot",
+      "label": "Snapshot transacional da organização autenticada"
+    },
+    {
+      "id": "e3",
+      "from": "snapshot",
+      "to": "coletor",
+      "label": "HTTPS, projeção mínima completa ou erro"
+    },
+    {
+      "id": "e4",
+      "from": "coletor",
+      "to": "conciliacao",
+      "label": "Arquivo privado validado; falha não usa foto antiga"
+    }
+  ]
+}

@@ -3,6 +3,8 @@
  * Match precedence: array order. First match wins.
  */
 export const PUBLIC_PATHS: RegExp[] = [
+  // Leitura financeira com Bearer nativo e escopo exclusivo conferidos na rota.
+  /^\/api\/v1\/integrations\/financial\/snapshot$/,
   // Credencial financeira exclusiva, validada na rota; desligada por padrão.
   /^\/api\/v1\/integrations\/financial\/confirm$/,
   // Link público persistido: org e destino são resolvidos exclusivamente no servidor.
