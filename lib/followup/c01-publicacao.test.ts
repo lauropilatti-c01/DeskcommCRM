@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { publishFollowupFlowVersion } from "./publish";
 import type { FlowGraph } from "./graph-schema";
 const org = "11111111-1111-4111-8111-111111111111",
   pointer = "22222222-2222-4222-8222-222222222222",
   connection = "33333333-3333-4333-8333-333333333333";
 interface ConsultaFalsa {
-  select(): ConsultaFalsa; eq(): ConsultaFalsa; is(): ConsultaFalsa; neq(): ConsultaFalsa;
-  maybeSingle(): Promise<{data:unknown;error:null}>;
-  then(yes:(r:unknown)=>unknown): Promise<unknown>;
+  select(): ConsultaFalsa;
+  eq(): ConsultaFalsa;
+  is(): ConsultaFalsa;
+  neq(): ConsultaFalsa;
+  maybeSingle(): Promise<{ data: unknown; error: null }>;
+  then(yes: (r: unknown) => unknown): Promise<unknown>;
 }
 function rig(previousAt?: string) {
   const rpc = vi.fn(async () => ({ data: connection, error: null }));
@@ -155,5 +159,28 @@ describe("publicação C01 verifica o servidor", () => {
       code: "validation_failed",
     });
     expect(r.rpc).not.toHaveBeenCalled();
+  });
+  it("vídeo exige copy aprovada e catálogo antes da publicação; proposta não chega ao RPC", async () => {
+    configure();
+    const cfg = JSON.parse(process.env.C01_ACOMPANHAMENTO_INTEGRATION!);
+    cfg.allowedKinds.push("video_curso");
+    cfg.videoCourse = {
+      enabled: true,
+      connectionId: connection,
+      copyStatus: "proposed",
+      question: "Ficou alguma dúvida sobre como funciona?",
+      catalog: [
+        { key: "curso-fixture", productKey: "produto", url: "https://example.invalid/curso" },
+      ],
+    };
+    const r = rig();
+    r.params.graph = JSON.parse(readFileSync("docs/c01/fixtures/video-curso-off.json", "utf8"));
+    vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(cfg));
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: false });
+    expect(r.rpc).not.toHaveBeenCalled();
+    cfg.videoCourse.copyStatus = "approved";
+    vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(cfg));
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: true });
+    expect(r.rpc).toHaveBeenCalledOnce();
   });
 });

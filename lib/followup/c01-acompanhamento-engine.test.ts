@@ -182,3 +182,34 @@ describe("C01 no motor real", () => {
     }
   });
 });
+
+it("vídeo não conclui nem marca Perdido antes do recibo do toque",async()=>{
+  const r=rig("end",{version:1,kind:"video_curso",activated_at:"2026-10-23T11:00:00.000Z"});
+  const g=await r.db.loadFlowGraph("org","version");
+  (g!.nodes[0] as {config:{outcome:string}}).config.outcome="custom";
+  r.db.decidirAcompanhamentoC01=vi.fn(async()=>({kind:"blocked" as const,reason:"entrega_sem_confirmacao"}));
+  await avancarEnrollmentAtivo(r.deps,row);
+  expect(r.db.updateEnrollment).toHaveBeenCalledWith("enrollment","org",expect.objectContaining({status:"paused_manual",last_error:"c01:entrega_sem_confirmacao"}));
+  expect(r.enqueueJob).not.toHaveBeenCalled();
+  expect(r.db.moverLeadNoFunil).not.toHaveBeenCalled();
+});
+
+it("recibo do toque único encerra como concluído, sem outro job nem perdido",async()=>{
+  const r=rig("action",{version:1,kind:"video_curso",activated_at:"2026-10-23T11:00:00.000Z"});
+  r.db.decidirAcompanhamentoC01=vi.fn(async()=>({kind:"complete" as const,reason:"toque_do_video_concluido"}));
+  await avancarEnrollmentAtivo(r.deps,row);
+  expect(r.db.updateEnrollment).toHaveBeenCalledWith("enrollment","org",expect.objectContaining({status:"completed",cancel_reason:"toque_do_video_concluido"}));
+  expect(r.enqueueJob).not.toHaveBeenCalled();
+  expect(r.db.moverLeadNoFunil).not.toHaveBeenCalled();
+});
+
+it("vídeo vencido usa job comum com texto fixo e nenhuma instrução de IA",async()=>{
+  const r=rig("action",{version:1,kind:"video_curso",activated_at:"2026-10-23T11:00:00.000Z"});
+  r.db.decidirAcompanhamentoC01=vi.fn(async()=>({kind:"send" as const,touch:1,transport:"text" as const}));
+  r.db.loadLeadFacts=vi.fn(async()=>({lead_stage:null,tags:[],custom_fields:{}}));
+  r.db.loadEnrollmentEvents=vi.fn(async()=>[]);
+  await avancarEnrollmentAtivo(r.deps,row);
+  expect(r.enqueueJob).toHaveBeenCalledTimes(1);
+  expect(r.enqueueJob).toHaveBeenCalledWith(expect.objectContaining({payload:expect.objectContaining({followup_enrollment_id:"enrollment",node_id:"touch",purpose:"send_message",fixed_body:"Mensagem de teste"})}));
+  expect(r.enqueueJob.mock.calls[0]![0].payload).not.toHaveProperty("prompt_hint");
+});

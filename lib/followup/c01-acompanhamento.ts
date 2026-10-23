@@ -3,7 +3,7 @@ import { z } from "zod";
 /** Extensão C01, opt-in no grafo JSON existente; ausência conserva o legado. */
 export const c01AcompanhamentoSchema = z.strictObject({
   version: z.literal(1),
-  kind: z.enum(["cronograma", "oferta"]),
+  kind: z.enum(["cronograma", "oferta", "video_curso"]),
   activated_at: z.string().datetime().nullable(),
   /** Parâmetros candidatos, sem autorização de ativação implícita. */
   cronograma_timing: z
@@ -49,7 +49,8 @@ export interface FatosAcompanhamento {
   contactId: string;
   opportunityId: string;
   /** Origem autenticada + entrega reconciliada, nunca um custom_field da IA. */
-  anchor: { kind: "cronograma" | "oferta"; at: string; delivered: boolean };
+  anchor: { kind: "cronograma" | "oferta" | "video_curso"; at: string; delivered: boolean };
+  videoPolicyReady?: boolean;
   lastInboundAt: string | null;
   hasNewReply: boolean;
   offerAfterAnchor: boolean;
@@ -155,11 +156,14 @@ export function avaliarAcompanhamento(
       "respondeu",
     ],
     [config.kind === "cronograma" && f.offerAfterAnchor, "oferta_substitui_retomada_do_cronograma"],
+    [config.kind === "video_curso" && f.offerAfterAnchor, "oferta_substitui_toque_do_video"],
     [f.callbackPending, "retorno_combinado_tem_prioridade"],
     [f.anotherSequence, "outra_sequencia_viva"],
   ] as const)
     if (condition) return { kind: "cancel", reason };
   if (!config.activated_at) return bloqueio("ativacao_pendente");
+  if (config.kind === "video_curso" && !f.videoPolicyReady)
+    return bloqueio("video_desligado_ou_politica_invalida");
   if (
     !valido(config.activated_at) ||
     !valido(f.anchor.at) ||
@@ -176,6 +180,10 @@ export function avaliarAcompanhamento(
   )
     return bloqueio("relogio_incoerente");
   if (!valido(f.lastInboundAt)) return bloqueio("ultima_mensagem_desconhecida");
+  if (config.kind === "video_curso" && f.touches.length === 0) {
+    const due = Date.parse(f.anchor.at) + 15 * MIN;
+    if (+now < due) return adiar(janelaPermitida(due), "ainda_nao_venceu");
+  }
 
   if (config.kind === "cronograma" && f.touches.length === 0) {
     const horario = horarioDoCronograma(config, f);
@@ -230,6 +238,7 @@ export function avaliarAcompanhamento(
   const max = config.kind === "oferta" ? 4 : 1;
   if (touches.length > max) return bloqueio("toques_incoerentes");
   if (touches.length === max) {
+    if (config.kind === "video_curso") return { kind: "complete", reason: "toque_do_video_concluido" };
     if (config.kind === "cronograma")
       return { kind: "complete", reason: "retomada_unica_concluida" };
     const ultimo = Math.max(
@@ -246,6 +255,10 @@ export function avaliarAcompanhamento(
     return { kind: "lost", reason: "sem_resposta_apos_quatro_entregas" };
   }
   if (config.kind === "cronograma") return { kind: "send", touch: 1, transport: "text" };
+  if (config.kind === "video_curso") {
+    if (+now - Date.parse(f.lastInboundAt) >= 24 * H) return bloqueio("janela_do_video_fechada");
+    return { kind: "send", touch: 1, transport: "text" };
+  }
   const due = Date.parse(f.anchor.at) + [2, 24, 72, 168][touches.length]! * H;
   if (+now < due) return adiar(janelaPermitida(due), "ainda_nao_venceu");
   const aberta = +now - Date.parse(f.lastInboundAt) < 24 * H;

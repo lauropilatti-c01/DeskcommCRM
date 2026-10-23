@@ -4,7 +4,7 @@
 
 Extensão C01 no fork, opt-in. Ausência de configuração preserva o caminho legado e bloqueia todo fluxo marcado como C01. A entrega é candidata para publicação posterior: nenhum fluxo, agente, conector ou envio real foi ativado por esta frente. Não há migration, coluna, tabela ou função própria; usam-se mensagens, recibos, jobs, inscrições e eventos já existentes.
 
-O escopo une duas modalidades: retomada do cronograma e acompanhamento de oferta. Retorno combinado tem prioridade sobre ambas. Só existe uma sequência viva por pessoa, incluindo estados pausado, dormente e coletando. Um cadastro não vira oportunidade nova só para receber acompanhamento.
+O escopo une retomada do cronograma, acompanhamento de oferta e o toque opcional após vídeo do curso. Retorno combinado tem prioridade sobre as três modalidades. A candidata de vídeo está descrita em `docs/C01-RETOMADA-VIDEO.md`, com fixture OFF e pergunta ainda proposta. Só existe uma sequência viva por pessoa, incluindo estados pausado, dormente e coletando. Um cadastro não vira oportunidade nova só para receber acompanhamento.
 
 ## Configuração mantida desligada
 
@@ -16,8 +16,9 @@ O escopo une duas modalidades: retomada do cronograma e acompanhamento de oferta
 | `organizationId`    | Organização única autorizada.                                                      |
 | `tokenSha256`       | SHA-256 do segredo exclusivo do produtor de origens. Não é token comum de API/MCP. |
 | `signingKey`        | Segredo com pelo menos 32 caracteres para assinar a origem e o consentimento.      |
-| `allowedKinds`      | Lista contendo `cronograma`, `oferta` ou ambas.                                    |
+| `allowedKinds`      | Lista contendo `cronograma`, `oferta` e/ou `video_curso`.                                    |
 | `offerConnectionId` | Conexão real da base comercial, obrigatória para a modalidade oferta.              |
+| `videoCourse` | Opcional/OFF: conexão, catálogo de vídeo, pergunta e estado de aprovação comercial. `copyStatus:proposed` bloqueia publicação e envio. |
 | `callbackTemplate` | Opcional; `enabled`, `connectionId`, `templateId` e `contentHash` do modelo de retorno. Ausente/OFF preserva a recusa fora de 24 horas. |
 
 Não há valores de credencial neste documento. O operador injeta os segredos pelo mecanismo já usado na instalação. Mudança de segredo de assinatura invalida provas antigas: deve ser tratada como rotação coordenada, sem reativar inscrições antigas em massa.
@@ -28,7 +29,7 @@ As duas fontes financeiras são configuradas em `C01_FINANCIAL_INTEGRATIONS_JSON
 
 ## Preparar os fluxos e os modelos
 
-1. Criar os grafos pelo construtor/API normal, usando os textos e intervalos aprovados no plano de operação. Salvar como rascunho. `settings.c01_acompanhamento` contém `version:1`, `kind:"cronograma"` ou `kind:"oferta"` e `activated_at:null`.
+1. Criar os grafos pelo construtor/API normal, usando os textos e intervalos aprovados no plano de operação. Salvar como rascunho. `settings.c01_acompanhamento` contém `version:1`, `kind:"cronograma"`, `kind:"oferta"` ou `kind:"video_curso"` e `activated_at:null`.
 2. Usar nós de ação compatíveis com o canal. Para fora da janela de 24 horas, cadastrar o modelo Meta e aguardar aprovação na conta correta. Um rótulo local de “aprovado” não cria um modelo na Meta. O contrato atual aceita modelo sem variáveis pendentes; falta de modelo ou canal conectado bloqueia o envio.
 3. Associar os IDs dos fluxos à configuração do agente e aos mapas financeiros. O produtor só encontra uma inscrição se houver exatamente um agente automático publicado e habilitado para o fluxo.
 4. Conferir o rascunho. Com ativação nula ele continua recusado como `c01_integracao_pendente`; isso é esperado durante a preparação.
@@ -42,6 +43,8 @@ Não há inscrição retroativa. Uma mensagem enviada antes da ativação contin
 **Cronograma.** O serviço de entrada marca somente o balão decidido pelo motor confiável com `c01_origin:{kind:"cronograma",product_key}`. O gancho preserva o negócio original da decisão; o transporte interno passa `HandlerCtx.c01Origin={kind,leadId,productKey}`. Isso não atravessa o texto do modelo.
 
 **Oferta.** O runtime captura exclusivamente o resultado executado de `crm_query_external_data` na conexão autorizada, schema `c01`, tabelas `agente_pagina` e `agente_links`. Vincula o produto ao filtro efetivamente consultado. Na consulta de links, completa a projeção real com produto, plano, status e autorização antes de executar. Só produz origem quando a URL exata autorizada aparece na mensagem que será enviada e existe uma única oportunidade aberta com o produto correspondente. Uma URL inventada, uma etapa ou JSON devolvido por outra ferramenta não servem.
+
+**Vídeo do curso.** A modalidade opcional `video_curso` reconhece exclusivamente a URL canônica consultada ou o arquivo V1 com SHA autorizado. Entrega confirmada inicia os 15 minutos. Retorno, oferta e cronograma já ativos preservam a prioridade; oferta posterior pode substituir vídeo, com histórico. É um único toque fixo, sem IA e sem Perdido. Contrato e limites: `docs/C01-RETOMADA-VIDEO.md`.
 
 **Persistência.** A porta real de envio reserva o UUID da mensagem e assina organização, contato, conversa, negócio, produto, modalidade e hash do conteúdo. `metadata.c01_origin` recebido pelo corpo público é sobrescrito: só o contexto interno pode gerar a prova. A assinatura acompanha a mensagem persistida; alteração do conteúdo invalida a prova.
 

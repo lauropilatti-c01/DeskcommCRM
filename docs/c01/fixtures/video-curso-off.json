@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    { "id": "video-inicio", "type": "trigger", "label": "Vídeo entregue", "position": { "x": 0, "y": 0 }, "config": {} },
+    { "id": "video-pergunta", "type": "action", "label": "Pergunta proposta após 15 minutos", "position": { "x": 0, "y": 120 }, "config": { "mode": "text", "body": "Ficou alguma dúvida sobre como funciona?" } },
+    { "id": "video-fim", "type": "end", "label": "Encerrar após recibo", "position": { "x": 0, "y": 240 }, "config": { "outcome": "custom", "note": "Toque único após vídeo; não conta na oferta nem marca Perdido." } }
+  ],
+  "edges": [
+    { "id": "video-e1", "source": "video-inicio", "target": "video-pergunta", "condition": { "type": "always" } },
+    { "id": "video-e2", "source": "video-pergunta", "target": "video-fim", "condition": { "type": "always" } }
+  ],
+  "settings": { "c01_acompanhamento": { "version": 1, "kind": "video_curso", "activated_at": null } }
+}

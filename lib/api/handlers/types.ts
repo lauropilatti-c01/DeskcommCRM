@@ -1,4 +1,5 @@
 import type { ProspectingDelivery } from "@/lib/prospecting/guard";
+import type { OrigemC01 } from "@/lib/followup/c01-origem";
 import type { AgentOperationContext } from "@/lib/ai/agents/operation";
 import type { ApprovedReplyContext } from "@/lib/ai/replies/delivery";
 import type { MeetingDeliveryContext, MeetingBookingContext } from "@/lib/agenda/meet-delivery";
@@ -73,7 +74,7 @@ export type Actor =
 
 export interface HandlerCtx {
   /** Intenção semântica validada pelo gancho; nunca aceita no body/metadata da API. */
-  c01Origin?: { kind: "cronograma" | "oferta"; leadId: string; productKey: string };
+  c01Origin?: OrigemC01;
   prospectingDelivery?: ProspectingDelivery;
   agentOperation?: AgentOperationContext;
   meetingDelivery?: MeetingDeliveryContext;
