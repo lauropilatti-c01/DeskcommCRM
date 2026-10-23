@@ -1,3 +1,5 @@
+import { decidirAcompanhamentoC01 } from "./c01-acompanhamento-runtime";
+import type { ConfigAcompanhamento, DecisaoAcompanhamento } from "./c01-acompanhamento";
 import type { JobClaim } from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { AgendaDeferredError } from "@/lib/agenda/protecao-followup";
@@ -135,6 +137,8 @@ export interface FollowupJobRequest {
 
 /** DB surface the engine needs — see file header for why this isn't `SupabaseClient` directly. */
 export interface AdminClient {
+  /** C01 opt-in: a ausência da fonte nunca libera o fluxo. */
+  decidirAcompanhamentoC01?(config: ConfigAcompanhamento, enrollment: EnrollmentRow, now: Date): Promise<DecisaoAcompanhamento>;
   assertServiceBoundary?(enrollment: EnrollmentRow): Promise<void>;
   assertAgenda?(enrollment:EnrollmentRow):Promise<void>;
   /**
@@ -870,6 +874,29 @@ async function processEnrollment(
 
   const node = graph.nodes.find((n) => n.id === enrollment.current_node_id);
   if (!node) throw new Error("node_not_found");
+  // C01: antes do efeito, inclusive encerramento que outra integração pode
+  // interpretar como perda. Usa estados/eventos existentes, sem enum/DDL.
+  const policy = graph.settings?.c01_acompanhamento;
+  if (policy && (node.type === "action" || node.type === "move_lead" || (node.type === "end" && node.config.outcome === "exhausted"))) {
+    const decision = db.decidirAcompanhamentoC01
+      ? await db.decidirAcompanhamentoC01(policy, enrollment, clock())
+      : { kind: "blocked" as const, reason: "integracao_aplicada_indisponivel" };
+    const expected = node.type === "action" ? "send" : "lost";
+    if (decision.kind !== expected) {
+      const reason = "reason" in decision ? decision.reason : "passo_incompativel_com_politica";
+      const terminal = decision.kind === "cancel" || decision.kind === "complete";
+      const patch: EnrollmentPatch = decision.kind === "defer"
+        ? { next_eval_at: decision.until, claimed_until: null, last_error: `c01:${reason}` }
+        : { status: terminal ? "cancelled" : "paused_manual", next_eval_at: null, claimed_until: null, last_error: `c01:${reason}`, ...(terminal ? { cancel_reason: reason, completed_at: clock().toISOString() } : {}) };
+      const event = { node_id: node.id, event_type: "c01_acompanhamento_retido", payload: { decision: decision.kind, reason }, idempotency_key: `${node.id}:${enrollment.steps_taken}:c01:${decision.kind}:${decision.kind === "defer" ? decision.until : reason}` };
+      if (db.applyEnrollmentStep) await db.applyEnrollmentStep(enrollment.id, enrollment.organization_id, patch, event);
+      else {
+        await db.insertEnrollmentEvent({ ...event, organization_id: enrollment.organization_id, enrollment_id: enrollment.id });
+        await db.updateEnrollment(enrollment.id, enrollment.organization_id, patch);
+      }
+      return;
+    }
+  }
   if (inboundBodyOverride !== undefined && node.type !== "match_reply" && node.type !== "wait") {
     return;
   }
@@ -1129,6 +1156,9 @@ export async function runFollowupTick(deps: TickDeps, opts?: { limit?: number })
 export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
   const revisions=new Map<string,number>();
   return {
+    decidirAcompanhamentoC01(config, enrollment, now) {
+      return decidirAcompanhamentoC01(config, { organizationId: enrollment.organization_id, contactId: enrollment.contact_id, enrollmentId: enrollment.id }, now);
+    },
     async assertServiceBoundary(enrollment) { if(!revisions.has(enrollment.id) && enrollment.revision!==undefined) revisions.set(enrollment.id,enrollment.revision); await assertServiceBoundarySupabase(admin, enrollment.service_boundary ?? null); },
     async retornoQueSeguraOFluxo(enrollment) {
       const quando = await quandoDoRetornoVivo(admin, enrollment.organization_id, enrollment.contact_id);

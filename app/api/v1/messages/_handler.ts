@@ -1,3 +1,4 @@
+import { assertAcompanhamentoC01Supabase } from "@/lib/followup/c01-acompanhamento-runtime";
 import { assertProspectingDelivery } from "@/lib/prospecting/guard";
 import { assertAgentOperationSupabase, mesmaOperacao } from "@/lib/ai/agents/operation";
 import {
@@ -439,7 +440,10 @@ export async function sendMessageHandler(
   if (ctx.meetingDelivery) await assertMeetingDeliverySupabase(supabase, ctx.meetingDelivery);
   if (ctx.approvedReply) await assertApprovedReplySupabase(supabase, ctx.approvedReply);
   if (ctx.agentOperation) await assertAgentOperationSupabase(supabase, ctx.agentOperation);
-  if (ctx.proactiveContext) await assertAgendaEffectSupabase(supabase, ctx.proactiveContext);
+  if (ctx.proactiveContext) {
+    await assertAgendaEffectSupabase(supabase, ctx.proactiveContext);
+    await assertAcompanhamentoC01Supabase(supabase, ctx.proactiveContext, ctx.organization_id);
+  }
   await guardAgendaEffect();
   ctx = { ...ctx, serviceBoundary: ctx.serviceBoundary ?? currentExecutionBoundary() };
   if (ctx.serviceBoundary) {
@@ -1039,7 +1043,10 @@ export async function sendMessageHandler(
         await guardAgendaEffect();
         if (ctx.prospectingDelivery) await assertProspectingDelivery(supabase, ctx.prospectingDelivery);
         if (ctx.meetingDelivery) await assertMeetingDeliverySupabase(supabase, ctx.meetingDelivery);
-        if (ctx.proactiveContext) await assertAgendaEffectSupabase(supabase, ctx.proactiveContext);
+        if (ctx.proactiveContext) {
+          await assertAgendaEffectSupabase(supabase, ctx.proactiveContext);
+          await assertAcompanhamentoC01Supabase(supabase, ctx.proactiveContext, ctx.organization_id);
+        }
         if (ctx.serviceBoundary && !fronteiraJaConferida)
           await assertServiceBoundarySupabase(supabase, ctx.serviceBoundary);
         if (ctx.approvedReply) await prepareApprovedReplySupabase(supabase, ctx.approvedReply);

@@ -17,6 +17,7 @@ import { CUSTO_NO_MOTOR, TETO_DE_PASSOS_DO_MOTOR } from './custo-no-motor';
  */
 
 export const PUBLISH_ERROR_CODES = [
+  'c01_integracao_pendente',
   'no_trigger',
   'multiple_triggers',
   'unreachable_node',
@@ -980,6 +981,12 @@ export function validateFlowForPublish(
 ): PublishValidationResult {
   const { nodes, edges } = graph;
   const errors: PublishValidationError[] = [];
+  // Esta candidata conhece a política, mas ainda não tem leitor financeiro
+  // autoritativo aplicado. A existência de um rascunho não permite publicar.
+  if (graph.settings?.c01_acompanhamento) errors.push({
+    node_id: null, code: 'c01_integracao_pendente',
+    message: 'Acompanhamento C01 bloqueado: faltam integração de compras aplicada e prova da origem e das entregas. Mantenha este fluxo pausado.',
+  });
   const surface = contexto.surface ?? 'followup';
   validarSuperficie(graph, surface, errors, contexto.roteiro);
   validarSomenteInterno(graph, surface, errors);

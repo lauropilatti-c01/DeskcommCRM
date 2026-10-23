@@ -19,6 +19,8 @@ export interface CapturasDoDubleDoHandler {
 }
 
 export interface OpcoesDoDubleDoHandler {
+  /** Leituras adicionais do sink, com dados vivos para testar corridas. */
+  tabelasDeLeitura?: Record<string, LinhaDoDuble | null | (() => LinhaDoDuble | null)>;
   conversation: LinhaDoDuble;
   channelMetadata?: LinhaDoDuble;
   templateRow?: LinhaDoDuble | null;
@@ -172,6 +174,18 @@ export function criarDubleDoHandler(
 
   const client = {
     from(tabela: string) {
+      if (opcoes.tabelasDeLeitura && tabela in opcoes.tabelasDeLeitura) {
+        capturas.filtros[tabela] ??= [];
+        const cadeia = {
+          select: () => cadeia,
+          eq: (coluna: string, valor: unknown) => { capturas.filtros[tabela]!.push({ coluna, valor }); return cadeia; },
+          maybeSingle: async () => {
+            const row = opcoes.tabelasDeLeitura![tabela];
+            return { data: typeof row === "function" ? row() : row, error: null };
+          },
+        };
+        return cadeia;
+      }
       if (tabela === "conversations") {
         return {
           select: (colunas = "") => {

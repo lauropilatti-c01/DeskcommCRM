@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { c01AcompanhamentoSchema } from './c01-acompanhamento';
 
 import { PRIORIDADES_DA_TAREFA } from '@/lib/tarefas/tipos';
 import { ehOpDeData, OPS_DE_DATA } from './condicao-por-data';
@@ -684,6 +685,8 @@ export type FlowEdgeCondition = FlowEdge['condition'];
  * antigo sem `settings` continua válido e cai nos defaults.
  */
 export const flowSettingsSchema = z.strictObject({
+  /** C01: contrato opt-in; rascunho não autoriza envio. */
+  c01_acompanhamento: c01AcompanhamentoSchema.optional(),
   /**
    * Quantas vezes uma pergunta pode ser feita SEM resposta antes de ser
    * encerrada como não respondida (deixa de ser feita e não bloqueia a
