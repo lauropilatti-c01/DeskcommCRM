@@ -28,10 +28,15 @@
  * `texto_longo.max_caracteres`, padrão 700), a trava barra também o TOTAL da resposta
  * (todas as bolhas somadas, contando os links como o cliente os vê), e o erro de ensino
  * dá os dois números de uma vez: até N parágrafos e até X caracteres no total.
+ *
+ * (C01, G2, etapa 4 de 23/10/2026) `porBolhaSemUrls`, opcional, mede cada mensagem
+ * física do mesmo divisor, descontando as URLs reconhecidas. Mantém teto de mensagens,
+ * links inteiros e limite de duas tentativas de estilo. Ausente: régua acima intacta.
  */
 import { aplicarTetoAsNovas, splitForSend, splitIntoBubbles } from '../agent/split-message';
 import type { Gate, GateVerdict } from './before-send';
 import { trechosDeLink } from './link-permitido';
+import { caracteresSemUrls } from './texto-sem-urls';
 
 /**
  * (C01, -c01.15, 2ª rodada) A SAÍDA REAL do divisor para o corpo: as mensagens físicas que
@@ -83,6 +88,32 @@ export const textoLongoGate: Gate = {
   evaluate: (ctx): GateVerdict => {
     const trava = ctx.travasDeEnvio?.textoLongo;
     if (trava === undefined || trava.restantes < 1) return { pass: true };
+    if (trava.porBolhaSemUrls !== undefined) {
+      // G2 opt-in. Mede a saída do divisor real, conservando o teto de mensagens e
+      // a integridade de links. Não corta nem reescreve o texto por conta própria.
+      const saida = trava.semDivisor === true
+        ? { naturais: 1, fisicas: [ctx.body], emendou: false, linksPartidos: 0 }
+        : saidaEmBolhas(ctx.body, trava.maxChars, trava.restantes);
+      const maiorBolha = Math.max(0, ...saida.fisicas.map(caracteresSemUrls));
+      if (!saida.emendou && saida.naturais <= trava.restantes && saida.linksPartidos === 0 && maiorBolha <= trava.porBolhaSemUrls) {
+        return { pass: true };
+      }
+      return {
+        pass: false,
+        code: 'texto_longo',
+        reason:
+          `A mensagem NÃO foi enviada: ela viraria ${saida.naturais} mensagens e a maior tem ${maiorBolha} caracteres sem URLs. ` +
+          `Reescreva para caber em até ${trava.restantes} mensagens, cada uma com até ${trava.porBolhaSemUrls} caracteres sem contar as URLs. ` +
+          'Mantenha somente o essencial, numa chamada de send_message, sem mudar ou partir nenhum link.',
+        detail: {
+          bolhas: saida.naturais,
+          restantes: trava.restantes,
+          maior_bolha_sem_urls: maiorBolha,
+          max_por_bolha_sem_urls: trava.porBolhaSemUrls,
+          links_partidos: saida.linksPartidos,
+        },
+      };
+    }
     if (trava.semDivisor === true) {
       const caracteres = [...ctx.body.trim()].length;
       if (caracteres <= trava.maxChars) return { pass: true };

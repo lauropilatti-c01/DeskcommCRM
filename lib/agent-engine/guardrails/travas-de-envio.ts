@@ -62,6 +62,17 @@
  * - `consulta_antes_de_enviar`: liga POR AGENTE (ver `consulta-antes-de-enviar.ts`). Valor
  *   com a forma errada desliga só ela, com o aviso de leitura: as outras seguem valendo.
  * - `marcador_entre_colchetes`: ver `marcador-entre-colchetes.ts`.
+ *
+ * (C01, etapa 4 de 23/10/2026) G1 e G2 nascem DESLIGADOS:
+ *
+ *   { "travas_de_envio": {
+ *       "linguagem_formal": { "ligada": true },
+ *       "texto_longo": { "ligada": true, "por_bolha_sem_urls": true } } }
+ *
+ * G1 pede reescrita apenas das expressões decididas (CRM-089/108), fora das URLs.
+ * G2 passa a medir `max_caracteres` por bolha física, descontando URLs reconhecidas.
+ * O padrão continua 700; sem `por_bolha_sem_urls`, toda a régua anterior permanece.
+ * São travas de estilo: no segundo veto se desarmam no turno, sem desligar conteúdo.
  */
 import { z } from 'zod';
 
@@ -80,7 +91,10 @@ const travaSimples = z.object({ ligada: z.boolean() }).passthrough();
 const travasDeEnvioSchema = z
   .object({
     // (C01, -c01.8) `max_caracteres`: o limite da mensagem com o divisor desligado.
-    texto_longo: travaSimples.extend({ max_caracteres: z.number().int().positive().optional() }).optional(),
+    texto_longo: travaSimples.extend({
+      max_caracteres: z.number().int().positive().optional(),
+      por_bolha_sem_urls: z.boolean().optional(),
+    }).optional(),
     // `dominios`: os domínios cujo link sai sempre (o domínio e os subdomínios dele).
     link_permitido: travaSimples.extend({ dominios: z.array(z.string()).optional() }).optional(),
     // (C01, -c01.8) `texto_afirmavel`: as colunas da linha afirmável da base externa e os
@@ -98,6 +112,7 @@ const travasDeEnvioSchema = z
       })
       .optional(),
     uma_pergunta: travaSimples.optional(),
+    linguagem_formal: travaSimples.optional(),
     // (C01, -c01.14) A `consulta_antes_de_enviar` fica fora do schema: é lida à parte, e o
     // valor errado dela não desliga as outras (`interpretarConsultaAntesDeEnviar`).
     marcador_entre_colchetes: travaSimples.optional(),
@@ -111,6 +126,10 @@ export interface TravasDeEnvioDaOrg {
   textoLongo: boolean;
   /** (C01, -c01.8) O limite da mensagem quando o divisor de bolhas está desligado. */
   textoLongoMaxCaracteres: number;
+  /** G2: opt-in por bolha física, descontando URLs; ausente preserva a régua antiga. */
+  textoLongoPorBolhaSemUrls: boolean;
+  /** G1: somente a lista de expressões já decididas; nasce desligada. */
+  linguagemFormal: boolean;
   linkPermitido: boolean;
   /** Os domínios liberados da trava de link, já normalizados (`exemplo.com.br`). */
   dominiosLiberados: readonly string[];
@@ -131,6 +150,8 @@ export interface TravasDeEnvioDaOrg {
 export const TRAVAS_DESLIGADAS: Readonly<TravasDeEnvioDaOrg> = {
   textoLongo: false,
   textoLongoMaxCaracteres: MAX_CARACTERES_SEM_DIVISOR,
+  textoLongoPorBolhaSemUrls: false,
+  linguagemFormal: false,
   linkPermitido: false,
   dominiosLiberados: [],
   valorEmDinheiro: false,
@@ -154,8 +175,19 @@ export interface TravasArmadas {
    * (`texto_longo.max_caracteres`). (C01, -c01.15) Com o divisor ligado, `maxTotal` é o
    * limite da resposta inteira, somadas as bolhas e contados os links
    * (`texto_longo.max_caracteres`); ausente = só a conta de bolhas.
+   * G2, só com `porBolhaSemUrls`: mede cada bolha física sem URLs em vez do total;
+   * conserva as demais proteções do divisor e o teto de mensagens do turno.
    */
-  textoLongo?: { maxChars: number; restantes: number; semDivisor?: true; maxTotal?: number };
+  textoLongo?: {
+    maxChars: number;
+    restantes: number;
+    semDivisor?: true;
+    maxTotal?: number;
+    /** G2: limite por bolha física sem URLs; substitui só a conta de caracteres. */
+    porBolhaSemUrls?: number;
+  };
+  /** G1: trava de estilo; ausente = não avalia. */
+  linguagemFormal?: true;
   /** Link permitido: os links e os domínios liberados neste momento do turno. */
   linkPermitido?: LinkPermitidoArmado;
   /**
@@ -223,6 +255,8 @@ export function interpretarTravasDeEnvio(
     travas: {
       textoLongo: lido.data.texto_longo?.ligada ?? false,
       textoLongoMaxCaracteres: lido.data.texto_longo?.max_caracteres ?? MAX_CARACTERES_SEM_DIVISOR,
+      textoLongoPorBolhaSemUrls: lido.data.texto_longo?.por_bolha_sem_urls ?? false,
+      linguagemFormal: lido.data.linguagem_formal?.ligada ?? false,
       linkPermitido: lido.data.link_permitido?.ligada ?? false,
       dominiosLiberados: (lido.data.link_permitido?.dominios ?? [])
         .map(normalizarDominio)

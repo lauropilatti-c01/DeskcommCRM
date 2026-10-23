@@ -98,6 +98,10 @@ const NAO_AVALIAVEIS_SEM_TURNO: ReadonlyArray<{ gate: string; porque: string }> 
     gate: "texto_longo",
     porque: "depende de quantas mensagens ainda cabem na resposta e da configuração da organização",
   },
+  {
+    gate: "linguagem_formal",
+    porque: "depende da configuração da organização, que esta checagem textual não lê",
+  },
   { gate: "disclosure", porque: "depende de esta ser a primeira mensagem ao contato" },
   {
     gate: "clinical_claim",
