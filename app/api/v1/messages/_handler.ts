@@ -1,4 +1,6 @@
-import { assertAcompanhamentoC01Supabase } from "@/lib/followup/c01-acompanhamento-runtime";
+import { registrarTentativaEnvioC01, assertAcompanhamentoC01Supabase, comEnvioAcompanhamentoC01, conexaoDoAcompanhamentoC01 } from "@/lib/followup/c01-acompanhamento-runtime";
+import { assinarOrigemC01, configOrigemC01, hashDoConteudoDaOrigem } from "@/lib/followup/c01-origem";
+import { randomUUID } from "node:crypto";
 import { assertProspectingDelivery } from "@/lib/prospecting/guard";
 import { assertAgentOperationSupabase, mesmaOperacao } from "@/lib/ai/agents/operation";
 import {
@@ -432,6 +434,11 @@ export async function sendMessageHandler(
   ctx: HandlerCtx,
   input: SendMessageInput,
 ): Promise<Message> {
+  return comEnvioAcompanhamentoC01(supabase, ctx.proactiveContext, ctx.organization_id,
+    () => sendMessageComAutoridade(supabase, ctx, input));
+}
+
+async function sendMessageComAutoridade(supabase: SB, ctx: HandlerCtx, input: SendMessageInput): Promise<Message> {
   // Organização parada (suspensa, redigida, arquivada) não envia nada. Esta é a
   // porta de saída de TODOS os chamadores, e fecha a corrida de quem passou pelo
   // gate antes da suspensão. O erro é terminal (`terminal: true`).
@@ -444,7 +451,7 @@ export async function sendMessageHandler(
     await assertAgendaEffectSupabase(supabase, ctx.proactiveContext);
     await assertAcompanhamentoC01Supabase(supabase, ctx.proactiveContext, ctx.organization_id);
   }
-  await guardAgendaEffect();
+  await guardAgendaEffect(conexaoDoAcompanhamentoC01());
   ctx = { ...ctx, serviceBoundary: ctx.serviceBoundary ?? currentExecutionBoundary() };
   if (ctx.serviceBoundary) {
     if (
@@ -845,8 +852,15 @@ export async function sendMessageHandler(
     );
   }
 
+  const messageId = ctx.internalMessageId ?? randomUUID();
+  const originConfig = configOrigemC01();
+  const originProof = ctx.c01Origin && originConfig?.enabled && c.contact_id
+    ? assinarOrigemC01(originConfig, { ...ctx.c01Origin, organizationId: ctx.organization_id,
+        contactId: c.contact_id, conversationId: c.id, messageId, createdAt: now,
+        contentHash: hashDoConteudoDaOrigem({ ...input, metadata: { ...input.metadata, interactive: input.interactive ?? null } }) })
+    : null;
   const insertRow = {
-    ...(ctx.internalMessageId ? { id: ctx.internalMessageId } : {}),
+    id: messageId,
     organization_id: c.organization_id,
     // Guardado mesmo quando o canal não sabe citar: o fio existe no NOSSO
     // histórico de qualquer jeito, e é o que a tela desenha.
@@ -870,6 +884,8 @@ export async function sendMessageHandler(
     sent_at: now,
     metadata: {
       ...(input.metadata ?? {}),
+      // Chave reservada sobrescrita mesmo quando o chamador tentou forjá-la.
+      c01_origin: originProof,
       // (C01, -c01.5) O objeto que de fato sai: a linha é `text` e o botão, a
       // lista ou o formulário só existem aqui.
       ...(input.interactive ? { interactive: input.interactive } : {}),
@@ -1039,8 +1055,8 @@ export async function sendMessageHandler(
       const fronteiraJaConferida = mesmaFronteira(currentExecutionBoundary(), ctx.serviceBoundary ?? null);
       const operacaoJaConferida = mesmaOperacao(currentExecutionAgentOperation(), ctx.agentOperation);
       const checkBoundary = async () => {
-        await guardServiceEffect();
-        await guardAgendaEffect();
+        await guardServiceEffect(conexaoDoAcompanhamentoC01());
+        await guardAgendaEffect(conexaoDoAcompanhamentoC01());
         if (ctx.prospectingDelivery) await assertProspectingDelivery(supabase, ctx.prospectingDelivery);
         if (ctx.meetingDelivery) await assertMeetingDeliverySupabase(supabase, ctx.meetingDelivery);
         if (ctx.proactiveContext) {
@@ -1052,6 +1068,7 @@ export async function sendMessageHandler(
         if (ctx.approvedReply) await prepareApprovedReplySupabase(supabase, ctx.approvedReply);
         if (ctx.agentOperation && !operacaoJaConferida)
           await assertAgentOperationSupabase(supabase, ctx.agentOperation);
+        await registrarTentativaEnvioC01(ctx.proactiveContext, messageId);
       };
       // O que separa mídia de texto é a presença de `media` no envelope — o
       // adapter preserva o mesmo branch (e a mesma mensagem de erro de cada

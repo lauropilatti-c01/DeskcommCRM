@@ -78,7 +78,7 @@ const HORARIO_CRONOGRAMA_CANDIDATO = {
   minimum_wait_minutes: 120,
   window_margin_minutes: 15,
 };
-const BLOQUEIOS_META = new Set(["131047", "131049", "132015"]);
+const BLOQUEIOS_META = new Set(["131042", "131047", "131049", "132015"]);
 const valido = (value: string | null): value is string =>
   value !== null && Number.isFinite(Date.parse(value));
 
@@ -135,8 +135,7 @@ function adiar(at: number, reason: string): DecisaoAcompanhamento {
 
 /**
  * Mesmo contrato na seleção e imediatamente antes do envio. O leitor de fatos
- * financeiro ainda é indisponível no runtime: ver c01-acompanhamento-runtime.
- * Testes injetam fatos autenticados fictícios, nunca liberam produção.
+ * financeiro relê as fontes no runtime. Falta de cobertura mantém bloqueado.
  */
 export function avaliarAcompanhamento(
   config: ConfigAcompanhamento,

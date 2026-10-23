@@ -1,4 +1,5 @@
 import { decidirAcompanhamentoC01 } from "./c01-acompanhamento-runtime";
+import { inscreverOrigensConfirmadasC01 } from "./c01-acompanhamento-origens";
 import type { ConfigAcompanhamento, DecisaoAcompanhamento } from "./c01-acompanhamento";
 import type { JobClaim } from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
@@ -139,6 +140,7 @@ export interface FollowupJobRequest {
 export interface AdminClient {
   /** C01 opt-in: a ausência da fonte nunca libera o fluxo. */
   decidirAcompanhamentoC01?(config: ConfigAcompanhamento, enrollment: EnrollmentRow, now: Date): Promise<DecisaoAcompanhamento>;
+  inscreverOrigensConfirmadasC01?(): Promise<void>;
   assertServiceBoundary?(enrollment: EnrollmentRow): Promise<void>;
   assertAgenda?(enrollment:EnrollmentRow):Promise<void>;
   /**
@@ -1114,6 +1116,8 @@ async function processEnrollment(
 export async function runFollowupTick(deps: TickDeps, opts?: { limit?: number }): Promise<TickSummary> {
   const summary: TickSummary = { claimed: 0, advanced: 0, scheduled: 0, failed: 0, dead: 0 };
 
+  try { await deps.db.inscreverOrigensConfirmadasC01?.(); }
+  catch (err) { logger.error("followup: matrícula C01 indisponível; fluxos existentes seguem seus próprios portões", { error: String(err) }); }
   let claimed: EnrollmentRow[];
   try {
     claimed = await deps.db.claimDueEnrollments(opts?.limit ?? DEFAULT_CLAIM_LIMIT, CLAIM_LEASE_SECONDS);
@@ -1156,6 +1160,7 @@ export async function runFollowupTick(deps: TickDeps, opts?: { limit?: number })
 export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
   const revisions=new Map<string,number>();
   return {
+    inscreverOrigensConfirmadasC01: () => inscreverOrigensConfirmadasC01(),
     decidirAcompanhamentoC01(config, enrollment, now) {
       return decidirAcompanhamentoC01(config, { organizationId: enrollment.organization_id, contactId: enrollment.contact_id, enrollmentId: enrollment.id }, now);
     },

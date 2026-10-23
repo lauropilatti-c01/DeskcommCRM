@@ -1,3 +1,4 @@
+import { prepararRetornoComercialC01, JANELA_RETORNO_C01 } from "@/lib/followup/c01-retorno";
 /**
  * Tool schedule_followup (F3-02) — o agente agenda o PRÓPRIO retorno ao lead: o
  * motor da continuidade (dor nº 4 do dono). Valida o que o modelo prometeu e cria
@@ -40,6 +41,9 @@ export interface FollowupWindowKnobs {
 
 /** Whitelist EXATA do que o modelo promete — .strict() rejeita o resto (mesmo padrão da F2-10). */
 export const scheduleFollowupInputSchema = z.strictObject({
+  consent_message_id: z.string().uuid().optional(),
+  consent_excerpt: z.string().min(1).max(2000).optional(),
+  offered_message_id: z.string().uuid().optional(),
   replace_pending_id: z.string().min(1).max(64).optional(),
   reason: z.string().min(1).max(500),
   promised_at: z.string().min(1).max(64),
@@ -62,7 +66,8 @@ const PAYLOAD_TEACHING =
   'Campos aceitos: reason (por que agendar), promised_at (data ISO 8601 do retorno, no futuro), ' +
   'promise (o que você prometeu ao lead), context_snapshot (contexto curto para o run futuro), ' +
   'replace_pending_id (id já existente, somente para mudar um retorno a pedido do cliente) — ' +
-  'nada além. Lead e organização vêm do runtime, nunca do payload da tool.';
+  'consent_message_id, consent_excerpt e offered_message_id (prova do horário confirmado). ' +
+  'Nada além. Lead e organização vêm do runtime, nunca do payload da tool.';
 
 function teachInvalidPayload(issues: string): ScheduleFollowupResult {
   return {
@@ -79,8 +84,8 @@ function teachInvalidPayload(issues: string): ScheduleFollowupResult {
  */
 export async function applyScheduleFollowup(
   db: pg.Pool,
-  cfg: { clock: () => Date; knobs: FollowupWindowKnobs; horario?: JanelaDeAtendimento | null },
-  ids: { tenantId: string; leadId: string; agentId?: string | null },
+  cfg: { clock: () => Date; knobs: FollowupWindowKnobs; horario?: JanelaDeAtendimento | null; c01Callback?: boolean },
+  ids: { tenantId: string; leadId: string; agentId?: string | null; sourceJobId?: string },
   rawInput: unknown,
 ): Promise<ScheduleFollowupResult> {
   const forbidden = findForbiddenKey(rawInput);
@@ -95,13 +100,18 @@ export async function applyScheduleFollowup(
 
   // Um relógio só para decidir E para ensinar — ver o ⚠️ das mensagens abaixo.
   const agora = cfg.clock();
+  const comercial = cfg.c01Callback ? await prepararRetornoComercialC01(db, {
+    organizationId: ids.tenantId, contactId: ids.leadId, sourceJobId: ids.sourceJobId, promisedAt: input.promised_at, consent: input,
+  }) : undefined;
+  const horario = cfg.c01Callback ? JANELA_RETORNO_C01 : cfg.horario;
   const resultado = await agendaRetorno(
     criaRetornoDbPg(db),
-    { agora, janela: cfg.knobs, horario: cfg.horario },
+    { agora, janela: cfg.knobs, horario },
     // No harness, "lead" É o contato (inbound-turn: leadId = job.contact_id) — é
     // exatamente o que `cron_jobs.contact_id` guarda.
     { orgId: ids.tenantId, contactId: ids.leadId },
     {
+      comercial,
       substituirRetornoId: input.replace_pending_id,
       agenteId: ids.agentId ?? undefined,
       motivo: input.reason,
@@ -148,7 +158,7 @@ export async function applyScheduleFollowup(
       }
       case 'horario_nao_permitido':
         return { ok: false, error: { code: 'outside_send_window', message:
-          `O horário fica fora da faixa permitida (${cfg.horario?.start}–${cfg.horario?.end}, ${cfg.horario?.timezone}). Combine outro horário; nenhum retorno foi criado ou alterado.` } };
+          `O horário fica fora da faixa permitida (${horario?.start}–${horario?.end}, ${horario?.timezone}). Combine outro horário; nenhum retorno foi criado ou alterado.` } };
       case 'retorno_alterado':
         return { ok: false, error: { code: 'pending_changed', message:
           'O retorno foi cancelado, disparou ou mudou enquanto você tentava alterar. Não prometa o novo horário nem crie outro automaticamente; confira o estado atual.' } };

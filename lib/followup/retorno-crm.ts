@@ -1,3 +1,4 @@
+import { cederCadenciaAoRetornoC01, prepararRetornoComercialC01, JANELA_RETORNO_C01 } from "./c01-retorno";
 import { comTravaDeEfeito, type TravaDeEfeito } from "@/lib/agent-engine/db/trava-de-efeito";
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { lerJanelaDeFollowup } from "@/lib/agent-engine/agent/janela-de-followup";
@@ -96,6 +97,11 @@ function adaptadorSupabase(admin: SupabaseClient, trava?: TravaDeEfeito): Retorn
     admin.from("cron_jobs").select(COLUNAS).eq("kind", "at").eq("job_kind", "followup_turn");
 
   return {
+    cederCadenciaComercial: async (org, contact) => {
+      if (!trava) throw new Error("c01_callback_lock_missing");
+      await trava.conferir();
+      await cederCadenciaAoRetornoC01(trava.db, org, contact);
+    },
     async buscaRetornoVivo(orgId, contactId) {
       const { data, error } = await base()
         .eq("organization_id", orgId)
@@ -369,6 +375,7 @@ async function registraAtividade(
 // ---------------------------------------------------------------------------
 
 export interface DepsDoRetorno {
+  sourceJobId?: string;
   admin: SupabaseClient;
   orgId: string;
   actor: Actor;
@@ -424,6 +431,7 @@ export async function agendaRetornoNoCrm(
   const agora = deps.agora ?? new Date();
   const agenteId = deps.actor.type === "ai_agent" ? deps.actor.agent_id : undefined;
   let horario = null;
+  let c01Callback = false;
   if (agenteId) {
     const { data: agente, error: erroAgente } = await deps.admin.from("ai_agents")
       .select("published_version_id").eq("organization_id", deps.orgId).eq("id", agenteId).maybeSingle();
@@ -434,6 +442,7 @@ export async function agendaRetornoNoCrm(
         .select("followup").eq("organization_id", deps.orgId).eq("id", agente.published_version_id).maybeSingle();
       if (erroVersao) throw new Error(`retorno_version_query_failed: ${erroVersao.message}`);
       if (!versao) throw new Error("retorno_version_missing");
+      c01Callback = versao.followup?.c01_callback === true;
       if (versao.followup?.callback_enabled === false) throw new Error("retorno_callback_disabled");
       if (versao?.followup?.send_window) {
         const { data: org, error: erroOrg } = await deps.admin.from("organizations").select("timezone").eq("id", deps.orgId).maybeSingle();
@@ -443,11 +452,16 @@ export async function agendaRetornoNoCrm(
       }
     }
   }
+  const comercial = c01Callback ? await prepararRetornoComercialC01(getRequestPool(), {
+    organizationId: deps.orgId, contactId: alvo.alvo.contactId, leadId: alvo.alvo.leadId, sourceJobId: deps.sourceJobId,
+    promisedAt: input.prometidoPara, consent: input.consentimento ?? {},
+  }) : undefined;
+  if (c01Callback) horario = JANELA_RETORNO_C01;
   const resultado = await agendaRetorno(
     criaRetornoDbSupabase(deps.admin),
     { agora, janela: janelaDe(deps), horario },
     { orgId: deps.orgId, contactId: alvo.alvo.contactId },
-    { ...input, agenteId },
+    { ...input, comercial, agenteId },
   );
   if (!resultado.ok) return { ...resultado, alvo: alvo.alvo };
 

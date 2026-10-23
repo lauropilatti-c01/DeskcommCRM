@@ -1,3 +1,5 @@
+import { configOrigemC01 } from "@/lib/followup/c01-origem";
+import { completarConsultaOfertaC01, ofertasDaConsultaC01, origemDaOfertaEnviadaC01, type OfertaConsultadaC01 } from "@/lib/followup/c01-origem-oferta";
 import { lerJanelaDeFollowup } from './janela-de-followup';
 import { prospectingConversationContext } from "@/lib/prospecting/context";
 import { setExecutionAgentOperation } from '@/lib/atendimento/fronteira-server';
@@ -440,12 +442,17 @@ export const AGENT_TOOL_DEFS = {
       'Agenda o SEU próprio retorno a este lead num momento futuro (follow-up). Use sempre que ' +
       'prometer voltar a falar depois (ex.: "te retorno amanhã de manhã", "confirmo na segunda"). ' +
       'Um agendamento por promessa; o sistema fará o follow-up sozinho no horário combinado — ' +
-      'Só confirme depois de ok=true. Para mudança pedida pelo cliente, use replace_pending_id devolvido pela recusa; depois encerre o turno.',
+      'Só confirme depois de ok=true. Para mudança pedida pelo cliente, use replace_pending_id devolvido pela recusa; depois encerre o turno. ' +
+      'Na política C01, o servidor usa a confirmação desta mensagem: pedido direto com dia e hora, ou sim à proposta imediatamente anterior. ' +
+      'Proposta demonstrável: Posso te chamar amanhã às 10h? Alternativas, condição e horário vago pedem confirmação; nunca prometa se a ferramenta recusar.',
     // Schema LARGO para o SDK (o modelo vê os campos); a validação REAL é a whitelist
     // .strict() + guard de prototype pollution dentro de applyScheduleFollowup — campo
     // extra/forjado e data inválida viram erro de ENSINO ao modelo, nunca exceção do SDK.
     inputSchema: z
       .object({
+        consent_message_id: z.string().uuid().optional().describe('Mensagem em que a pessoa confirmou o retorno'),
+        consent_excerpt: z.string().optional().describe('Trecho literal da confirmação'),
+        offered_message_id: z.string().uuid().optional().describe('Mensagem imediatamente anterior que propôs dia e hora, quando a resposta foi sim'),
         replace_pending_id: z.string().optional().describe('ID do retorno existente, somente se o cliente pediu para mudar seu horário'),
         reason: z.string().describe('por que agendar o retorno'),
         promised_at: z
@@ -4110,6 +4117,7 @@ async function executarTurnoDoAgente(
   // A trava "link permitido" as libera; o gate de vocabulário interno libera a ocorrência
   // exata de cada uma — e só ela: o link de vídeo legítimo carrega um UUID.
   const urlsDaBase = new Set<string>();
+  const ofertasConsultadasC01: OfertaConsultadaC01[] = [];
   // (C01, -c01.7) O que as ferramentas de CONSULTA devolveram neste turno — as URLs e os
   // valores (em centavos) que a trava "link e valor de ferramenta" libera. As de consulta
   // são a base externa (`FERRAMENTA_DA_BASE`), a base RAG (`search_knowledge`) e a
@@ -4174,7 +4182,9 @@ async function executarTurnoDoAgente(
     // (C01, rodada 7) A dica de posição: a primeira falhada da execução anterior, se
     // houver; senão a próxima depois da maior aceita.
     const falhada = falhadas[0];
-    const resultado = await liveChannel().send({ ...envio, seq: falhada?.seq ?? posicao + 1 });
+    const origemOferta = !preview && leadId && envio.body && !opcoes?.fraseDeEspera
+      ? await origemDaOfertaEnviadaC01(pool, tenantId, leadId, envio.body, ofertasConsultadasC01) : undefined;
+    const resultado = await liveChannel().send({ ...envio, ...(origemOferta ? { c01Origin: origemOferta } : {}), seq: falhada?.seq ?? posicao + 1 });
     // (C01, -c01.3, rodada 3) A evidência de resposta é marcada logo depois do aceite,
     // antes de qualquer outra espera: se a consulta da posição falhada cair depois de
     // um `sent`, o `catch` da última tentativa já vê o lead respondido e não manda a
@@ -6284,8 +6294,8 @@ async function executarTurnoDoAgente(
           }
           const res = await applyScheduleFollowup(
             pool,
-            { clock, knobs: followupKnobs, horario: horarioDoRetorno },
-            { tenantId, leadId, agentId: agentConfig?.agentId ?? null },
+            { clock, knobs: followupKnobs, horario: horarioDoRetorno, c01Callback: !!configDoRetorno && typeof configDoRetorno === 'object' && 'c01_callback' in configDoRetorno && configDoRetorno.c01_callback === true },
+            { tenantId, leadId, agentId: agentConfig?.agentId ?? null, sourceJobId: liveJob().id },
             raw,
           );
           if (!res.ok) {
@@ -6701,7 +6711,12 @@ async function executarTurnoDoAgente(
               rawTools[name] = {
                 ...mcpTool,
                 execute: (async (...args: Parameters<typeof executeOriginal>) => {
+                  const configOrigem = configOrigemC01();
+                  if (configOrigem?.enabled && configOrigem.organizationId === tenantId && configOrigem.offerConnectionId)
+                    args[0] = completarConsultaOfertaC01(args[0]) as typeof args[0];
                   const resultado = await executeOriginal(...args);
+                  if (configOrigem?.enabled && configOrigem.organizationId === tenantId && configOrigem.offerConnectionId)
+                    ofertasConsultadasC01.push(...ofertasDaConsultaC01(args[0], resultado, configOrigem.offerConnectionId));
                   for (const url of urlsNoResultado(resultado)) urlsDaBase.add(url);
                   // (C01, -c01.7) O erro da consulta não é fonte: repete o que o modelo pediu
                   // (a coluna "salario_6700"). A base externa o devolve sem `isError`.

@@ -72,6 +72,8 @@ export type Actor =
   | { type: "webhook_source"; id: string; textoEscritoPelaIA?: true };
 
 export interface HandlerCtx {
+  /** Intenção semântica validada pelo gancho; nunca aceita no body/metadata da API. */
+  c01Origin?: { kind: "cronograma" | "oferta"; leadId: string; productKey: string };
   prospectingDelivery?: ProspectingDelivery;
   agentOperation?: AgentOperationContext;
   meetingDelivery?: MeetingDeliveryContext;

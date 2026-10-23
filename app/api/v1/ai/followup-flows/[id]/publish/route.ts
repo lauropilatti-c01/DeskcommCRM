@@ -1,3 +1,4 @@
+import { conferirPublicacaoC01 } from "@/lib/followup/c01-publicacao";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/ai/followup-flows/:id/publish — valida o draft_graph
@@ -169,7 +170,11 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     });
   }
 
-  const graph = pointer.draft_graph as unknown as FlowGraph;
+  const graph = structuredClone(pointer.draft_graph) as unknown as FlowGraph;
+  // O clique publica com ativação do servidor, depois de provar a configuração.
+  // O rascunho OFF não é regravado e o validador puro continua recusando null.
+  const c01Blocked = await conferirPublicacaoC01(admin, { orgId: activeOrg.orgId, pointerId: id, graph });
+  if (c01Blocked) return fail("validation_failed", c01Blocked, 422, { requestId });
   // A regra de etapa guarda o `stage_id`, e só o banco diz se a etapa existe e
   // está ativa — sem esta leitura, uma regra que nunca decide publicaria calada.
   const citadas = await carregaEtapasCitadas(admin, activeOrg.orgId, graph.nodes);
@@ -250,6 +255,7 @@ export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> 
     createdBy: user.id,
   });
   if (!result.ok) {
+    if (result.code === "validation_failed") return fail("validation_failed", result.message, 422, { requestId });
     if (result.code === "pointer_not_found") {
       return fail("not_found", t("Fluxo não encontrado."), 404, { requestId });
     }

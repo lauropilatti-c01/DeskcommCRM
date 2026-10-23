@@ -94,6 +94,10 @@ export async function enrollFollowupFlow(
   }
 
   const graph = flowGraphSchema.parse(version.graph);
+  if (graph.settings?.c01_acompanhamento) return {
+    ok: false, code: "c01_authenticated_origin_required", status: 422,
+    message: "Este acompanhamento começa somente após a entrega confirmada de uma origem autorizada.",
+  };
   const triggerNode = graph.nodes.find((n) => n.type === "trigger");
   if (!triggerNode) {
     return { ok: false, code: "internal_error", message: "Grafo publicado sem nó trigger.", status: 500 };

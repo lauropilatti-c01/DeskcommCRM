@@ -1,0 +1,159 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { publishFollowupFlowVersion } from "./publish";
+import type { FlowGraph } from "./graph-schema";
+const org = "11111111-1111-4111-8111-111111111111",
+  pointer = "22222222-2222-4222-8222-222222222222",
+  connection = "33333333-3333-4333-8333-333333333333";
+interface ConsultaFalsa {
+  select(): ConsultaFalsa; eq(): ConsultaFalsa; is(): ConsultaFalsa; neq(): ConsultaFalsa;
+  maybeSingle(): Promise<{data:unknown;error:null}>;
+  then(yes:(r:unknown)=>unknown): Promise<unknown>;
+}
+function rig(previousAt?: string) {
+  const rpc = vi.fn(async () => ({ data: connection, error: null }));
+  const admin = {
+    rpc,
+    from: (table: string) => {
+      let many = false;
+      const q: ConsultaFalsa = {
+        select: () => q,
+        eq: () => q,
+        is: () => q,
+        neq: () => {
+          many = true;
+          return q;
+        },
+        maybeSingle: async () => ({
+          data:
+            table === "followup_flow_pointers"
+              ? { id: pointer, active_version_id: previousAt ? connection : null }
+              : table === "followup_flow_versions"
+                ? {
+                    graph: {
+                      settings: {
+                        c01_acompanhamento: { kind: "oferta", activated_at: previousAt },
+                      },
+                    },
+                  }
+                : { id: connection, enabled: true },
+          error: null,
+        }),
+        then: (yes: (r: unknown) => unknown) =>
+          Promise.resolve({
+            data:
+              table === "channel_sessions"
+                ? [{ id: connection, status: "WORKING" }]
+                : many
+                  ? []
+                  : null,
+            error: null,
+          }).then(yes),
+      };
+      return q;
+    },
+  };
+  const graph = {
+    settings: { c01_acompanhamento: { version: 1, kind: "oferta", activated_at: null } },
+    nodes: [],
+    edges: [],
+  } as unknown as FlowGraph;
+  return {
+    admin: admin as never,
+    rpc,
+    params: { orgId: org, pointerId: pointer, graph, createdBy: connection },
+  };
+}
+function configure() {
+  vi.stubEnv(
+    "C01_ACOMPANHAMENTO_INTEGRATION",
+    JSON.stringify({
+      enabled: true,
+      organizationId: org,
+      offerConnectionId: connection,
+      tokenSha256: "a".repeat(64),
+      signingKey: "b".repeat(32),
+      allowedKinds: ["oferta"],
+    }),
+  );
+  vi.stubEnv(
+    "C01_FINANCIAL_INTEGRATIONS_JSON",
+    JSON.stringify(
+      ["guru", "boleto"].map((provider, i) => ({
+        enabled: true,
+        integrationId: provider,
+        organizationId: org,
+        provider,
+        sourceAccountId: "fixture",
+        tokenSha256: String(i + 1).repeat(64),
+        receiptSigningKey: "c".repeat(32),
+        baseUrl: "https://example.invalid",
+        apiToken: "fixture",
+        products: [
+          {
+            productId: "product",
+            offerId: "offer",
+            crmProductKey: "produto",
+            crmOfferKey: "plano",
+            commercialFlowIds: [pointer],
+          },
+        ],
+      })),
+    ),
+  );
+}
+afterEach(() => vi.unstubAllEnvs());
+describe("publicação C01 verifica o servidor", () => {
+  it("data no grafo não substitui integração desligada", async () => {
+    const r = rig();
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({
+      ok: false,
+      code: "validation_failed",
+    });
+    expect(r.rpc).not.toHaveBeenCalled();
+  });
+  it("configuração válida e mapas equivalentes permitem o RPC; ainda há guardas por pessoa no envio", async () => {
+    configure();
+    const r = rig();
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toEqual({
+      ok: true,
+      version_id: connection,
+    });
+    expect(r.rpc).toHaveBeenCalledOnce();
+  });
+  it("primeira ativação é atribuída pelo servidor; data passada/futura do cliente não muda a origem", async () => {
+    configure();
+    for (const value of [null, "2020-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z"]) {
+      const r = rig();
+      r.params.graph.settings!.c01_acompanhamento!.activated_at = value;
+      const before = Date.now();
+      expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: true });
+      const call = r.rpc.mock.calls[0] as unknown as [string, { p_graph: FlowGraph }];
+      const at = Date.parse(call[1].p_graph.settings!.c01_acompanhamento!.activated_at!);
+      expect(at).toBeGreaterThanOrEqual(before);
+      expect(at).toBeLessThanOrEqual(Date.now());
+      expect(r.params.graph.settings!.c01_acompanhamento!.activated_at).toBe(value);
+    }
+  });
+  it("republicação preserva a ativação anterior mesmo com rascunho nulo", async () => {
+    configure();
+    const original = "2026-10-23T11:00:00.000Z",
+      r = rig(original);
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: true });
+    const call = r.rpc.mock.calls[0] as unknown as [string, { p_graph: FlowGraph }];
+    expect(call[1].p_graph.settings!.c01_acompanhamento!.activated_at).toBe(original);
+    expect(r.params.graph.settings!.c01_acompanhamento!.activated_at).toBeNull();
+  });
+  it("não publica com apenas uma fonte financeira mapeada", async () => {
+    configure();
+    vi.stubEnv(
+      "C01_FINANCIAL_INTEGRATIONS_JSON",
+      JSON.stringify(JSON.parse(process.env.C01_FINANCIAL_INTEGRATIONS_JSON!).slice(0, 1)),
+    );
+    const r = rig();
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({
+      ok: false,
+      code: "validation_failed",
+    });
+    expect(r.rpc).not.toHaveBeenCalled();
+  });
+});

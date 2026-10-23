@@ -1,3 +1,4 @@
+import { cederCadenciaAoRetornoC01 } from "./c01-retorno";
 import { comTravaDeEfeito } from "@/lib/agent-engine/db/trava-de-efeito";
 import { currentExecutionBoundary, guardServiceEffect } from "@/lib/atendimento/fronteira-server";
 /**
@@ -72,6 +73,7 @@ export function criaRetornoDbPg(pool: pg.Pool): RetornoDb {
 
 function adaptadorPg(db: Pick<pg.Pool, "query">): RetornoDb {
   return {
+    cederCadenciaComercial: (org, contact) => cederCadenciaAoRetornoC01(db, org, contact),
     async buscaRetornoVivo(orgId, contactId) {
       const { rows } = await db.query<LinhaDeCron>(
         `select ${COLUNAS}, (payload->>'promised_at') as promised_at
