@@ -82,7 +82,8 @@ const FRONTEIRAS: Fronteira[] = [
       "https://supabase.com/docs/guides/storage/uploads/file-limits — seção «File name restrictions»",
     lacuna:
       "a mesma página documenta o alfabeto do nome de arquivo e não documenta teto de comprimento da chave. Forma entra no teste; número, não.",
-    medir: () => [ORG, VERSAO, "minha skill", "SKILL.md", "assets", "referencia.md"],
+    medir: () => [ORG, VERSAO, "minha skill", "SKILL.md", "assets", "referencia.md",
+      "native-videos", `${"a".repeat(64)}.mp4`, `video-${"a".repeat(64)}.mp4`],
   },
   {
     id: "api.idempotency-key",
@@ -162,6 +163,11 @@ const SITES: { arquivo: string; fronteira: string; papel?: "gerador" | "validado
   // Storage — a chave do objeto sai daqui e vira objeto lá.
   { arquivo: "workers/lgpd-export-worker.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "workers/media-persist-worker.ts", fronteira: "storage.chave-de-objeto" },
+  // C01 V1: origem <org>/native-videos/<sha256>.mp4 e destino
+  // <org>/<conversa>/video-<sha256>.mp4. UUIDs vêm do turno, validados por z.uuid;
+  // o hash exige 64 hexadecimais. O modelo só fornece a chave do catálogo.
+  // c01-videos-nativos.test.ts prova os caminhos e recusa traversal/catálogo estranho.
+  { arquivo: "lib/agent-engine/agent/videos-nativos.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "lib/ai/skills/install.ts", fronteira: "storage.chave-de-objeto" },
   // Herança de arquivos do pacote no save textual (#2047): a chave é montada
   // com os MESMOS pedaços do install — org (uuid do JWT), name (vem da

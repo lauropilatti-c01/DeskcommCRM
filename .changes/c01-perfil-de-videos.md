@@ -1,1 +1,11 @@
-A5 C01: resolvedor opt-in dos filtros de escolaridade/empresa/inscrição na busca de vídeos do canal. Usa o card confiável do contato do turno, conserva o isolamento e permite somente o fallback específico de inscrição após sucesso vazio. OFF por padrão, sem DDL ou mudança de prompt. Prova: docs/c01/filtros-do-card.md.
+---
+impacto: nada_mudou
+secao: adicionado
+titulo: Consulta opcional de vídeos pelo perfil do contato
+---
+
+A busca de vídeos do canal pode usar escolaridade, empresa e inscrição do card
+da pessoa atendida, quando a opção estiver configurada e habilitada. A consulta
+preserva o isolamento e só retira a preferência de inscrição depois de uma
+consulta válida sem resultados. Nasce desligada, sem mudança de banco ou de
+instruções comerciais. Provas e limites em `docs/c01/filtros-do-card.md`.

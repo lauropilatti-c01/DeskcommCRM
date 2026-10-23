@@ -508,8 +508,9 @@ describe("a forma da cadeia", () => {
     const nomes = BEFORE_SEND_GATES.map((g) => g.name);
     expect(nomes.indexOf("factual_claim")).toBe(nomes.indexOf("semantic_promise") + 1);
     expect(nomes.indexOf("factual_claim")).toBeGreaterThan(nomes.indexOf("promise"));
-    // (C01, junção da 1.86) A v9 do autor é a v15 da cadeia juntada (nossas v8–v13 + as duas dele).
-    expect(BEFORE_SEND_CHAIN_VERSION).toBe(15);
+    // (C01) A v16 acrescenta linguagem_formal sem alterar a ordem das camadas de fato/promessa.
+    expect(BEFORE_SEND_CHAIN_VERSION).toBe(16);
+    expect(nomes.indexOf("linguagem_formal")).toBe(nomes.indexOf("texto_longo") + 1);
   });
 });
 
