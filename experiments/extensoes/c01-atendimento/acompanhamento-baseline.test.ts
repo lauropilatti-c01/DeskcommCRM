@@ -26,6 +26,7 @@ import {
   conferirRetornoNoEnvioC01,
   cederCadenciaAoRetornoC01,
 } from "@/lib/followup/c01-retorno";
+import { applyScheduleFollowup } from "@/lib/agent-engine/agent/schedule-followup";
 import { criarDubleDoHandler } from "@/tests/helpers/duble-do-handler";
 const databaseUrl = process.env.C01_P2_DATABASE_URL;
 if (!databaseUrl) throw new Error("Banco local c01_p2_* obrigatório");
@@ -393,6 +394,72 @@ describe("acompanhamento com SQL real e transporte falso", () => {
       }),
     ).rejects.toThrow("template_required_before_promise");
   });
+  it.each([false, true])(
+    "ferramenta nativa agenda usando o consentimento do turno, sem IDs do modelo (confirmação curta=%s)",
+    async (short) => {
+      const sentAt = new Date(+base + 60000);
+      await pool.query("update messages set body='Posso te chamar hoje às 12h?' where id=$1", [
+        message,
+      ]);
+      await pool.query(
+        "insert into messages(id,organization_id,contact_id,conversation_id,channel_session_id,direction,type,body,status,sent_at) values($1,$2,$3,$4,$7,'inbound','text',$5,'received',$6)",
+        [
+          consent,
+          org,
+          contact,
+          conversation,
+          short ? "Sim!" : "Pode me chamar hoje às 12h.",
+          sentAt,
+          channel,
+        ],
+      );
+      await pool.query("update conversations set last_inbound_at=$1 where id=$2", [
+        sentAt,
+        conversation,
+      ]);
+      await pool.query(
+        "insert into job_queue(id,organization_id,contact_id,kind,status,payload) values($1,$2,$3,'inbound_turn','running',$4)",
+        [job, org, contact, { inbound_message_id: consent }],
+      );
+      const settings = {
+        clock: () => sentAt,
+        c01Callback: true,
+        knobs: { minAheadMs: 0, maxAheadMs: 7 * 86400000, staggerWindowMs: 0 },
+      };
+      const trusted = { tenantId: org!, leadId: contact!, sourceJobId: job! };
+      const input = {
+        reason: "Retorno solicitado",
+        promised_at: now.toISOString(),
+        promise: "Conversar no horário combinado",
+      };
+      const result = await applyScheduleFollowup(pool, settings, trusted, input);
+      expect(result.ok).toBe(true);
+      const rows = (
+        await pool.query("select payload,next_run_at from cron_jobs where organization_id=$1", [
+          org,
+        ])
+      ).rows;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].payload).toMatchObject({
+        scope: "commercial",
+        lead_id: lead,
+        c01_callback: {
+          message_id: consent,
+          offered_message_id: message,
+          promised_at: now.toISOString(),
+        },
+      });
+      expect(+new Date(rows[0].next_run_at)).toBe(+now);
+      await expect(
+        applyScheduleFollowup(pool, settings, trusted, { ...input, consent_message_id: message }),
+      ).rejects.toThrow("consent_outside_current_turn");
+      expect(
+        (await pool.query("select count(*)::int n from cron_jobs where organization_id=$1", [org]))
+          .rows[0].n,
+      ).toBe(1);
+    },
+  );
+
   it("callback cancela somente cadência C01 e jobs da mesma pessoa", async () => {
     const r = await ready();
     const otherContact = randomUUID(),
