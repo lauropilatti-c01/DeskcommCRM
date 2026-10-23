@@ -113,7 +113,7 @@ beforeAll(async () => {
  create table messages(id uuid primary key,organization_id uuid,contact_id uuid,conversation_id uuid,direction text,type text,body text,metadata jsonb default '{}',media_url text,media_storage_path text,status text,external_id text,sent_at timestamptz,delivered_at timestamptz,read_at timestamptz,error_code text,revoked_at timestamptz);
  create table followup_flow_pointers(id uuid primary key,organization_id uuid,active_version_id uuid,status text);
  create table followup_flow_versions(id uuid primary key,organization_id uuid,graph jsonb);
- create table followup_enrollments(id uuid primary key,organization_id uuid,pointer_id uuid,version_id uuid,contact_id uuid,conversation_id uuid,current_node_id text,status text,next_eval_at timestamptz,service_boundary jsonb,agent_id uuid,cancel_reason text,completed_at timestamptz,claimed_until timestamptz);
+ create table followup_enrollments(id uuid primary key,organization_id uuid,pointer_id uuid,version_id uuid,contact_id uuid,conversation_id uuid,current_node_id text,status text,next_eval_at timestamptz default now(),service_boundary jsonb,agent_id uuid,cancel_reason text,completed_at timestamptz,claimed_until timestamptz);
  create table followup_enrollment_events(id uuid primary key default gen_random_uuid(),organization_id uuid,enrollment_id uuid,node_id text,event_type text,payload jsonb,idempotency_key text,created_at timestamptz default now(),unique(enrollment_id,idempotency_key));
  create table cron_jobs(id uuid primary key default gen_random_uuid(),organization_id uuid,contact_id uuid,kind text,job_kind text,enabled boolean default true,cancelled_at timestamptz,payload jsonb,next_run_at timestamptz,cancel_reason text,last_error text,attempts integer default 0,updated_at timestamptz);
  create table job_queue(id uuid primary key,organization_id uuid,contact_id uuid,kind text,status text,payload jsonb,last_error text,created_at timestamptz default now());
@@ -212,6 +212,17 @@ describe("acompanhamento com SQL real e transporte falso", () => {
     expect((await pool.query("select count(*)::int n from followup_enrollments")).rows[0].n).toBe(
       1,
     );
+  });
+  it("matrícula vencida usa o relógio do banco mesmo com o processo adiantado", async () => {
+    const before = (await pool.query("select now() as at")).rows[0].at;
+    const processClock = new Date(Math.max(+new Date(before), +now) + 3600000);
+    const e = await registrarOrigemEntregueC01(pool, cfg, {
+      kind: "oferta", leadId: lead!, productKey: "produto-teste", messageId: message!,
+    }, processClock);
+    const row = (await pool.query("select next_eval_at,now() as database_now from followup_enrollments where id=$1", [e.enrollment_id])).rows[0];
+    expect(+new Date(row.next_eval_at)).toBeGreaterThanOrEqual(+new Date(before));
+    expect(+new Date(row.next_eval_at)).toBeLessThanOrEqual(+new Date(row.database_now));
+    expect(+new Date(row.next_eval_at)).toBeLessThan(+processClock);
   });
   it("duas matrículas simultâneas não duplicam", async () => {
     const results = await Promise.allSettled([enroll(), enroll()]);

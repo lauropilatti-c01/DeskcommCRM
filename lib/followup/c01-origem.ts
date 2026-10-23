@@ -20,7 +20,7 @@ export type ConfigOrigemC01 = z.infer<typeof configSchema>;
 export function configOrigemC01(): ConfigOrigemC01 | null {
   try {
     const parsed = configSchema.safeParse(
-      JSON.parse(process.env.C01_ACOMPANHAMENTO_INTEGRATION ?? "null"),
+      JSON.parse(process.env.C01_ACOMPANHAMENTO_INTEGRATION?.trim() || "null"),
     );
     return parsed.success ? parsed.data : null;
   } catch {
