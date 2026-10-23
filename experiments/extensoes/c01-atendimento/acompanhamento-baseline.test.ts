@@ -98,22 +98,20 @@ beforeAll(async () => {
   state.pool = pool;
 });
 beforeEach(async () => {
-  [
-    org,
-    contact,
-    conversation,
-    lead,
-    message,
-    pointer,
-    version,
-    agent,
-    job,
-    outbound,
-    consent,
-    channel,
-    pipeline,
-    stage,
-  ] = Array.from({ length: 14 }, () => randomUUID());
+  org = randomUUID();
+  contact = randomUUID();
+  conversation = randomUUID();
+  lead = randomUUID();
+  message = randomUUID();
+  pointer = randomUUID();
+  version = randomUUID();
+  agent = randomUUID();
+  job = randomUUID();
+  outbound = randomUUID();
+  consent = randomUUID();
+  channel = randomUUID();
+  pipeline = randomUUID();
+  stage = randomUUID();
   cfg.organizationId = org;
   vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(cfg));
   state.paid = false;
