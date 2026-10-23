@@ -22,8 +22,9 @@ import type pg from 'pg';
 import { withFields } from '../obs/logger';
 import type { JobRow } from '../queue/queue';
 import type { LeadContext } from '../edge/crm/get-lead-context';
-import { ritualBlocks, runAgentTurn, type InboundTurnDeps, type LeadCheckpointRow } from './inbound-turn';
+import { ritualBlocks, runAgentTurn, type AgentTurnInput, type InboundTurnDeps, type LeadCheckpointRow } from './inbound-turn';
 import type { LeadStateRow } from './lead-state';
+import type { RespostaDoCasoNoTurno } from './links-da-resposta-do-caso';
 
 /**
  * Payload enfileirado pela rota humana (Wave 5) ao agir sobre um caso.
@@ -80,20 +81,21 @@ async function resolveCaseConversation(
   tenantId: string,
   caseId: string,
   action: ReentryAction,
+  contactId: string,
 ): Promise<CaseConversationRow | null> {
-  const { rows } = await pool.query<{ status: string; conversation_id: string; channel_session_id: string | null }>(
-    `select ac.status, ac.conversation_id, conv.channel_session_id
+  const { rows } = await pool.query<{ status: string; conversation_id: string; channel_session_id: string | null; contact_id: string | null }>(
+    `select ac.status, ac.conversation_id, conv.channel_session_id, conv.contact_id
        from agent_cases ac
        join conversations conv
          on conv.id = ac.conversation_id and conv.organization_id = ac.organization_id
-      where ac.organization_id = $1 and ac.id = $2`,
-    [tenantId, caseId],
+      where ac.organization_id = $1 and ac.id = $2 and conv.contact_id = $3`,
+    [tenantId, caseId, contactId],
   );
   const row = rows[0];
   if (row === undefined) {
     return null;
   }
-  if (row.status !== EXPECTED_STATUS_FOR_ACTION[action] || row.channel_session_id === null) {
+  if (row.status !== EXPECTED_STATUS_FOR_ACTION[action] || row.channel_session_id === null || row.contact_id !== contactId) {
     return null;
   }
   return { conversationId: row.conversation_id, channelSessionId: row.channel_session_id };
@@ -158,7 +160,7 @@ export function createCaseReplyTurnHandler(deps: InboundTurnDeps) {
     }
     const action: ReentryAction = payload.action;
 
-    const caseConversation = await resolveCaseConversation(pool, tenantId, payload.case_id, action);
+    const caseConversation = await resolveCaseConversation(pool, tenantId, payload.case_id, action, leadId);
     if (caseConversation === null) {
       runLog.info('case_reply_turn no-op — caso inexistente, terminal ou sem número associado', {
         action: payload.action,
@@ -166,11 +168,15 @@ export function createCaseReplyTurnHandler(deps: InboundTurnDeps) {
       return;
     }
 
-    await runAgentTurn(deps, job, pool, ctx, {
+    // (C01, G3) Referência, não autorização: o turno relê a resposta persistida
+    // antes de usar suas URLs nas duas travas. O corpo nunca libera preço.
+    const input: AgentTurnInput & { respostaDoCaso: RespostaDoCasoNoTurno } = {
       channelSessionId: caseConversation.channelSessionId,
       conversationId: caseConversation.conversationId,
+      respostaDoCaso: { caseId: payload.case_id, action, body: payload.body },
       buildOpening: ({ previous, leadState, context, notesIndexBlock, projeta }) =>
         buildCaseReplyOpeningMessage(action, payload.case_id, payload.body, previous, leadState, context, notesIndexBlock, projeta),
-    });
+    };
+    await runAgentTurn(deps, job, pool, ctx, input);
   };
 }
