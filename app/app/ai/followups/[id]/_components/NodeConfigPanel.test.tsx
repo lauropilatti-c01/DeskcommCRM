@@ -172,3 +172,15 @@ describe("NodeConfigPanel — o roteiro que recomeça", () => {
     expect(gravado).toEqual({ max_tentativas_pergunta: 4, gatilhos: ["agendar"] });
   });
 });
+
+
+describe("configuração opt-in C01", () => {
+  it("editar uma opção visível não apaga a política do grafo", async () => {
+    const onSettingsChange = vi.fn();
+    const policy = { version: 1 as const, kind: "oferta" as const, activated_at: null };
+    montarCom("trigger", { settings: { max_tentativas_pergunta: 3, c01_acompanhamento: policy }, onSettingsChange });
+    const chave = screen.getByTestId("somente-interno").querySelector('[role="switch"]');
+    await userEvent.setup({ delay: null }).click(chave!);
+    expect(onSettingsChange).toHaveBeenCalledWith(expect.objectContaining({ c01_acompanhamento: policy }));
+  });
+});

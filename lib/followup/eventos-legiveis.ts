@@ -375,6 +375,15 @@ export function descreveEvento(
   const cliente = { onde, autor: "cliente" as const };
 
   switch (evento.event_type) {
+    case "c01_acompanhamento_retido":
+      return {
+        titulo: p.decision === "defer" ? "Acompanhamento adiado" : p.decision === "cancel" ? "Acompanhamento cancelado" : "Acompanhamento bloqueado",
+        detalhe: p.reason === "integracao_aplicada_indisponivel"
+          ? "A conferência de compras ainda não está ligada a este fluxo. Nenhuma mensagem foi enviada."
+          : p.reason === "ativacao_pendente" ? "Este fluxo permanece em preparação. Nenhuma mensagem foi enviada."
+            : `Motivo registrado: ${texto(p.reason) ?? "conferência pendente"}`,
+        ...motor,
+      };
     case "node_advanced":
       // Com `class`, o avanço É a classificação que o motor decidiu: a carência
       // do classificar venceu sem resposta. "Seguiu em frente" esconderia o porquê.
