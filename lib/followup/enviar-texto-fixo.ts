@@ -18,6 +18,7 @@ import type { EnrollmentRow } from "@/lib/followup/node-handlers";
 import { completeTurnForEnrollment, type TurnBridgeAdminClient } from "@/lib/followup/turn-bridge";
 import { logger } from "@/lib/logger";
 import { classificarMidiaComLegenda } from "@/lib/messaging/media/midia-com-legenda";
+import { lerPoliticaDeVideoSupabase, legendaDoVideoValida, IDENTIDADE_DA_LEGENDA_DO_VIDEO } from "@/lib/agent-engine/agent/videos-nativos";
 import { recusaDeMidiaForaDaJanela } from "@/lib/messaging/media/recusa-de-midia-fora-da-janela";
 import { OrgNaoOperanteError } from "@/lib/organizacao/operante";
 
@@ -128,28 +129,30 @@ export async function enviarTextoFixoPendente(
       const conversationId = boundary!.conversation_id;
       // #2734 — MÍDIA DO PASSO DE MENSAGEM, quando o nó de ação a declara: o
       // `fixed_body` deixa de ser a mensagem inteira e vira a LEGENDA de uma
-      // imagem/PDF. A classificação é CONFIGURAÇÃO: o que não é imagem nem PDF não
+      // imagem/PDF ou MP4 com opt-in V3. A classificação é CONFIGURAÇÃO; outro tipo não
       // vira um "documento qualquer", e retry não conserta — o job fecha com o
       // motivo em vez de ficar re-tentando.
       const mediaUrl =
         typeof payload.fixed_media_url === "string" && payload.fixed_media_url.trim()
           ? payload.fixed_media_url.trim()
           : null;
-      let midia: { type: "image" | "document"; mime: string } | null = null;
+      let midia: { type: "image" | "document" | "video"; mime: string } | null = null;
       if (mediaUrl) {
-        const classificada = classificarMidiaComLegenda(mediaUrl);
-        if (!classificada.ok) {
+        const video = await lerPoliticaDeVideoSupabase(admin, job.organization_id);
+        const classificada = classificarMidiaComLegenda(mediaUrl, undefined, { videoMp4: video.enabled && video.flow_mp4 });
+        if (!classificada.ok || (classificada.type === "video" && !legendaDoVideoValida(body))) {
+          const motivo = !classificada.ok ? classificada.motivo : "A legenda do vídeo precisa ter de 1 a 1024 caracteres; nada foi enviado.";
           logger.warn("[followup] texto fixo com mídia recusada", {
             organization_id: job.organization_id,
             enrollment_id: enrollmentId,
-            motivo: classificada.motivo,
+            motivo,
           });
           // O desfecho VOLTA para o enrollment como `skipped` com o motivo, igual ao
           // caminho do worker (`runFlowDrivenTurn`): fechar só o job deixava o nó de
           // ação em recheck até o dead-man matar a inscrição com
           // `action_turn_never_completed`, um motivo falso no lugar deste.
-          await completeTurnForEnrollment(ponte, job.organization_id, enrollmentId, nodeId, { kind: "skipped", reason: classificada.motivo }, undefined, job.id, jobClaim);
-          await settle(job.organization_id, job.id, jobClaim.acquired_at, true, classificada.motivo);
+          await completeTurnForEnrollment(ponte, job.organization_id, enrollmentId, nodeId, { kind: "skipped", reason: motivo }, undefined, job.id, jobClaim);
+          await settle(job.organization_id, job.id, jobClaim.acquired_at, true, motivo);
           continue;
         }
         midia = { type: classificada.type, mime: classificada.mime };
@@ -295,15 +298,23 @@ export async function enviarTextoFixoPendente(
           continue;
         }
       }
-      const resultado=await sendWithLedger(supabaseSendLedger(admin),{tenantId:job.organization_id,leadId:contactId,jobId:job.id,seq:1,body},async(key,messageId)=>sendMessageHandler(
+      const identidadeVideo = midia?.type === "video"
+        ? { identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO, media: { url: mediaUrl!, mime: midia.mime, type: midia.type } } : {};
+      const resultado=await sendWithLedger(supabaseSendLedger(admin),{tenantId:job.organization_id,leadId:contactId,jobId:job.id,seq:1,body,...identidadeVideo},async(key,messageId)=>{
+        if (midia?.type === "video") {
+          const policy = await lerPoliticaDeVideoSupabase(admin, job.organization_id);
+          if (!policy.enabled || !policy.flow_mp4 || !legendaDoVideoValida(body))
+            throw new Error("video_desligado_ou_legenda_invalida_antes_do_envio");
+        }
+        return sendMessageHandler(
         admin,
         {organization_id:job.organization_id,actor:{type:"webhook_source",id:enrollmentId},serviceBoundary:boundary,proactiveContext,internalMessageId:messageId,requestId:key},
         // Com mídia: o `body` é a LEGENDA e o `type` diz ao canal o que é o arquivo
-        // (imagem × PDF). Sem mídia: `type: "text"`, como sempre saiu daqui.
+        // (imagem, PDF ou vídeo). Sem mídia: `type: "text"`, como sempre saiu daqui.
         (midia
           ? {conversation_id:conversationId,type:midia.type,body,media_url:mediaUrl,media_mime:midia.mime,metadata:{idempotency_key:key}}
           : {conversation_id:conversationId,type:"text",body,metadata:{idempotency_key:key}}) as Parameters<typeof sendMessageHandler>[2],
-      ));
+      );});
       if(resultado.kind!=="sent" && resultado.kind!=="already_sent") throw new Error(`message_${resultado.kind}`);
       // CONTABILIZA. Sem esta linha o envio não entrava no `pacing_ledger` e o
       // agente seguia achando o número folgado — o teto protegia metade dele.

@@ -31,11 +31,12 @@
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type * as LedgerModule from "@/lib/agent-engine/edge/crm/send-ledger";
 import type { JobRow } from "@/lib/agent-engine/queue/queue";
 
 const runBeforeSend = vi.fn(async (args: Record<string, unknown>) => {
-  await (args.send as (b: string) => Promise<unknown>)(args.body as string);
-  return { status: "sent", outcome: { kind: "sent" }, trace: [] };
+  const outcome = await (args.send as (b: string) => Promise<unknown>)(args.body as string);
+  return { status: "sent", outcome, trace: [] };
 });
 vi.mock("@/lib/agent-engine/guardrails/before-send", () => ({ runBeforeSend }));
 
@@ -96,6 +97,8 @@ function job(payload: Record<string, unknown>): JobRow {
 const CORPO = "¡Hola! ¿Seguís pensando en el Pico? Sale ₲125.000. ¿Te lo reservamos?";
 
 interface Cenario {
+  videoPolicy?: unknown;
+  videoPolicies?: unknown[];
   /** corpo em `message_templates` (texto pronto) */
   texto?: string;
   /** a linha do modelo do canal, ou ausente */
@@ -106,6 +109,7 @@ interface Cenario {
 
 function fakePool(c: Cenario) {
   const query = vi.fn(async (sql: string): Promise<{ rows: Array<Record<string, unknown>> }> => {
+    if (sql.includes("c01_native_videos")) return { rows: [{ policy: c.videoPolicies?.shift() ?? c.videoPolicy }] };
     if (sql.includes("d.fechada_em::text")) return { rows: [{ ...boundary, status: "open", demanda_fechada_em: null }] };
     // A ordem importa: a definição da conexão e a janela citam outras tabelas no corpo.
     if (/from meta_templates t/.test(sql)) {
@@ -134,7 +138,7 @@ function fakePool(c: Cenario) {
 }
 
 function deps() {
-  const send = vi.fn(async (_input: Record<string, unknown>) => ({ ok: true }));
+  const send = vi.fn(async (_input: Record<string, unknown>): Promise<unknown> => ({ kind: "sent" }));
   const completeFollowupTurn = vi.fn(async () => undefined);
   const d = {
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
@@ -292,4 +296,92 @@ describe("passo de texto fixo com mídia (#2734)", () => {
     expect(send.mock.calls[0]![0]).toMatchObject({ body: "Olha a oferta", media: { url: URL_DA_MIDIA, mime: "image/png", type: "image" } });
     expect(resultado(completeFollowupTurn).kind).toBe("sent");
   });
+});
+
+
+describe("V3: vídeo MP4 no acompanhamento, opt-in", () => {
+  const video = "https://fixture.invalid/curso.mp4";
+  const policy = { enabled: true, flow_mp4: true, catalog: [] };
+  const payload = { fixed_body: "Legenda fictícia.", fixed_media_url: video };
+  it("ON envia vídeo e legenda juntos pela cadeia, sem IA", async () => {
+    const { d, send, completeFollowupTurn } = deps();
+    await criarHandler(d)(job(payload), fakePool({ ultimoInboundHa: 2, videoPolicy: policy }), { workerId: "w1" });
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0]![0]).toMatchObject({ body: payload.fixed_body, identidade: "", media: { url: video, mime: "video/mp4", type: "video" } });
+    expect(resultado(completeFollowupTurn).kind).toBe("sent");
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+  it.each([undefined, {}, { ...policy, enabled: false }, { ...policy, flow_mp4: false }])("OFF ou configuração inválida recusa o passo inteiro", async videoPolicy => {
+    const { d, send, completeFollowupTurn } = deps();
+    await criarHandler(d)(job(payload), fakePool({ ultimoInboundHa: 2, videoPolicy }), { workerId: "w1" });
+    expect(send).not.toHaveBeenCalled();
+    expect(resultado(completeFollowupTurn).kind).toBe("skipped");
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+  it("legenda acima de 1024 não vira texto isolado", async () => {
+    const { d, send, completeFollowupTurn } = deps();
+    await criarHandler(d)(job({ ...payload, fixed_body: "x".repeat(1025) }), fakePool({ ultimoInboundHa: 2, videoPolicy: policy }), { workerId: "w1" });
+    expect(send).not.toHaveBeenCalled();
+    expect(resultado(completeFollowupTurn)).toMatchObject({ kind: "skipped", reason: expect.stringContaining("1024") });
+  });
+  it("janela de 24 h fechada impede vídeo e legenda", async () => {
+    const { d, send, completeFollowupTurn } = deps();
+    await criarHandler(d)(job(payload), fakePool({ ultimoInboundHa: 30, videoPolicy: policy }), { workerId: "w1" });
+    expect(send).not.toHaveBeenCalled();
+    expect(resultado(completeFollowupTurn)).toMatchObject({ kind: "skipped", reason: expect.stringContaining("janela de 24 horas") });
+  });
+});
+
+
+describe("V3: reconferência do vídeo na saída da cadeia", () => {
+  const policy = { enabled: true, flow_mp4: true, catalog: [] };
+  const payload = { fixed_body: "Legenda fictícia.", fixed_media_url: "https://fixture.invalid/curso.mp4" };
+  it("desligar depois do preparo impede o canal", async () => {
+    const { d, send, completeFollowupTurn } = deps();
+    await expect(criarHandler(d)(job(payload), fakePool({ ultimoInboundHa: 2, videoPolicies: [policy, { ...policy, flow_mp4: false }] }), { workerId: "w1" })).rejects.toThrow("video_desligado");
+    expect(send).not.toHaveBeenCalled();
+    expect(completeFollowupTurn).not.toHaveBeenCalled();
+  });
+  it("a legenda ampliada pela cadeia também não sai em separado", async () => {
+    const { d, send, completeFollowupTurn } = deps();
+    runBeforeSend.mockImplementationOnce(async args => {
+      const outcome = await (args.send as (b: string) => Promise<unknown>)("x".repeat(1025));
+      return { status: "sent", outcome, trace: [] };
+    });
+    await expect(criarHandler(d)(job(payload), fakePool({ ultimoInboundHa: 2, videoPolicy: policy }), { workerId: "w1" })).rejects.toThrow("video_legenda_invalida");
+    expect(send).not.toHaveBeenCalled();
+    expect(completeFollowupTurn).not.toHaveBeenCalled();
+  });
+  it("falha ou recibo queued não são conclusão do passo", async () => {
+    for (const kind of ["failed", "queued"] as const) {
+      const { d, send, completeFollowupTurn } = deps();
+      send.mockResolvedValueOnce({ kind });
+      await expect(criarHandler(d)(job(payload), fakePool({ ultimoInboundHa: 2, videoPolicy: policy }), { workerId: "w1" })).rejects.toThrow();
+      expect(completeFollowupTurn).not.toHaveBeenCalled();
+    }
+  });
+});
+
+
+it("V3: replay do mesmo job com outra legenda reutiliza o recibo, sem segundo transporte", async () => {
+  const { sendWithLedger, hashDoConteudo } = await vi.importActual<typeof LedgerModule>("@/lib/agent-engine/edge/crm/send-ledger");
+  const policy = { enabled: true, flow_mp4: true, catalog: [] };
+  const { d, send } = deps();
+  let acceptedHash: string | null = null;
+  const transport = vi.fn(async () => ({ id: "message", status: "sent" }));
+  const store: Parameters<typeof sendWithLedger>[0] = {
+    create: vi.fn(async () => "receipt"), find: vi.fn(async () => null), rotate: vi.fn(async () => "new"),
+    message: vi.fn(async () => null), update: vi.fn(async () => {}),
+    findAccepted: vi.fn(async (_input, hash) => hash === acceptedHash ? { id: "receipt", status: "accepted" as const, crm_message_id: "message", body_hash: hash } : null),
+  };
+  send.mockImplementation(async input => {
+    const result = await sendWithLedger(store, input as never, transport);
+    acceptedHash = hashDoConteudo(input as never);
+    return result;
+  });
+  for (const body of ["Legenda original.", "Legenda refeita."]) {
+    await criarHandler(d)(job({ fixed_body: body, fixed_media_url: "https://fixture.invalid/curso.mp4" }), fakePool({ ultimoInboundHa: 2, videoPolicy: policy }), { workerId: "w1" });
+  }
+  expect(transport).toHaveBeenCalledOnce();
+  expect(store.create).toHaveBeenCalledOnce();
 });

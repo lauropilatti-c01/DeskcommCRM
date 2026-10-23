@@ -40,6 +40,7 @@ import { runBeforeSend } from '../guardrails/before-send';
 import { estadoDaJanela } from '@/lib/channels/janela';
 import { contextoDoContato, renderizarTextoDeFollowup } from '@/lib/automation/texto-do-followup';
 import { classificarMidiaComLegenda } from '@/lib/messaging/media/midia-com-legenda';
+import { lerPoliticaDeVideo, legendaDoVideoValida, IDENTIDADE_DA_LEGENDA_DO_VIDEO } from './videos-nativos';
 import { camadaLigada, lerCamadasDaOrg } from '../guardrails/camadas-da-org';
 import { classifyPromise } from '../guardrails/promise/semantic';
 import { scheduleCronJob } from '../cron/scheduler';
@@ -993,8 +994,8 @@ type PassoSemIa =
     }
   | { tipo: 'recusado'; motivo: string };
 
-/** #2734 — mídia do passo: imagem ou PDF, por URL, com o `body` como LEGENDA. */
-export type MidiaComLegenda = { url: string; type: 'image' | 'document'; mime: string };
+/** Mídia do passo por URL: imagem/PDF; MP4 somente com opt-in V3 da organização. */
+export type MidiaComLegenda = { url: string; type: 'image' | 'document' | 'video'; mime: string };
 
 async function resolveFlowSendBody(
   pool: pg.Pool,
@@ -1016,7 +1017,7 @@ async function resolveFlowSendBody(
   // do cadastro como modelo — por isso aqui ele só ganha a volta, nunca o contexto.
   if (input.fixedBody !== undefined) {
     const body = interpolarVoltaDoPayload(input.fixedBody, input.voltaIndex, input.voltaTotal);
-    // #2734 — MÍDIA DO PASSO. O que não é imagem nem PDF é recusa de CONFIGURAÇÃO:
+    // MÍDIA DO PASSO. Imagem/PDF e, com opt-in V3, MP4. Outro tipo é recusa:
     // o passo é pulado com o motivo (mesmo desfecho do modelo que não pode sair) em
     // vez de a fila re-tentar algo que tempo não conserta — e em vez de mandar o
     // texto solto, que era o comportamento equivalente a prometer uma imagem que
@@ -1024,8 +1025,11 @@ async function resolveFlowSendBody(
     if (input.fixedMediaUrl !== undefined) {
       const url = input.fixedMediaUrl.trim();
       if (url.length === 0) return { tipo: 'texto', body };
-      const classificada = classificarMidiaComLegenda(url);
+      const video = await lerPoliticaDeVideo(pool, tenantId);
+      const classificada = classificarMidiaComLegenda(url, undefined, { videoMp4: video.enabled && video.flow_mp4 });
       if (!classificada.ok) return { tipo: 'recusado', motivo: classificada.motivo };
+      if (classificada.type === 'video' && !legendaDoVideoValida(body))
+        return { tipo: 'recusado', motivo: 'A legenda do vídeo precisa ter de 1 a 1024 caracteres; nada foi enviado.' };
       return { tipo: 'texto', body, midia: { url, type: classificada.type, mime: classificada.mime } };
     }
     return { tipo: 'texto', body };
@@ -1120,7 +1124,7 @@ async function sendFixedOutbound(
    */
   modelo?: { name: string; language: string; values: Record<string, string> },
   /**
-   * #2734 — presente = o envio sai como MÍDIA (imagem ou PDF) e o `body` é a LEGENDA.
+   * Presente = MÍDIA (imagem/PDF ou MP4 opt-in), com `body` como LEGENDA.
    * O caminho é o de sempre: `channel.send` → `sendTurnMessage` → `sendMessageHandler`,
    * o MESMO que o Inbox e as campanhas usam. `storagePath` (foto de produto) e `url`
    * (mídia do passo) convivem no mesmo campo — ver `ChannelSendInput`.
@@ -1195,13 +1199,22 @@ async function sendFixedOutbound(
             ),
         }
       : {}),
-    send: (finalBody) =>
-      channel.send({
+    send: async (finalBody) => {
+      if (midia?.type === 'video') {
+        const policy = await lerPoliticaDeVideo(pool, tenantId);
+        if (!policy.enabled || !policy.flow_mp4)
+          return { kind: 'unavailable', reason: 'video_desligado_antes_do_envio' };
+        if (!legendaDoVideoValida(finalBody))
+          return { kind: 'unavailable', reason: 'video_legenda_invalida: limite de 1024 caracteres' };
+      }
+      return channel.send({
         tenantId, leadId, jobId: job.id, jobClaim: claimOfJob(job), seq: 1, conversationId, body: finalBody,
         ...(modelo !== undefined ? { template: modelo } : {}),
         // #2734 — mídia do passo: o `body` acima é a LEGENDA dela.
         ...(midia !== undefined ? { media: { url: midia.url, mime: midia.mime, type: midia.type } } : {}),
-      }),
+        ...(midia?.type === 'video' ? { identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO } : {}),
+      });
+    },
   });
 
   if (chain.status === 'vetoed') {

@@ -4,6 +4,7 @@
  * O envio continua no handler comum, com seus guardas, assinatura curta e ledger.
  */
 import { createHash } from 'node:crypto';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { createAdminClient } from '@/lib/supabase/admin';
 import type { ChannelSendResult } from '../channel-adapter';
@@ -24,6 +25,19 @@ const BUCKET = 'whatsapp-media';
 /** Limite conservador desta capacidade; não muda o limite geral do Inbox. */
 export const MAX_VIDEO_NATIVO_BYTES = 16 * 1024 * 1024;
 export const MAX_LEGENDA_VIDEO = 1024;
+export const legendaDoVideoValida = (body: string): boolean => !!body.trim() && body.length <= MAX_LEGENDA_VIDEO;
+function politicaDoValor(raw: unknown): PoliticaDeVideo {
+  const parsed = policySchema.safeParse(raw);
+  return parsed.success ? parsed.data : desligada();
+}
+
+/** Mesma política para o executor inline; ausência/erro permanece OFF. */
+export async function lerPoliticaDeVideoSupabase(admin: SupabaseClient, tenantId: string): Promise<PoliticaDeVideo> {
+  try {
+    const { data, error } = await admin.from('organizations').select('settings').eq('id', tenantId).maybeSingle();
+    return error ? desligada() : politicaDoValor(data?.settings?.c01_native_videos);
+  } catch { return desligada(); }
+}
 
 export async function lerPoliticaDeVideo(db: Queryable, tenantId: string): Promise<PoliticaDeVideo> {
   try {
@@ -31,8 +45,7 @@ export async function lerPoliticaDeVideo(db: Queryable, tenantId: string): Promi
       "select settings->'c01_native_videos' as policy from organizations where id = $1",
       [tenantId],
     );
-    const parsed = policySchema.safeParse(rows[0]?.policy);
-    return parsed.success ? parsed.data : desligada();
+    return politicaDoValor(rows[0]?.policy);
   } catch { return desligada(); }
 }
 
@@ -102,7 +115,7 @@ export async function enviarVideoComLegenda(
   body: string, media: VideoParaEnvio,
   enviar: (body: string, media: VideoParaEnvio) => Promise<ChannelSendResult>,
 ): Promise<ChannelSendResult> {
-  if (!body.trim() || body.length > MAX_LEGENDA_VIDEO) {
+  if (!legendaDoVideoValida(body)) {
     return { kind: 'unavailable', reason: 'video_legenda_invalida: use de 1 a 1024 caracteres; nada foi enviado' };
   }
   return enviar(body, media);
