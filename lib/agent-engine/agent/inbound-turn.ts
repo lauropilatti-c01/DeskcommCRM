@@ -136,6 +136,7 @@ import {
   type LeadCheckpointRow,
 } from "./abertura/checkpoint";
 import { buildOpeningMessage, ritualBlocks } from "./abertura/ritual";
+import { lerLinksDaRespostaDoCaso, type RespostaDoCasoNoTurno } from "./links-da-resposta-do-caso";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
 import {
   acrescentarEnviadasAntesNoContexto,
@@ -2524,6 +2525,8 @@ export function semRespostasDeFormulario(messages: readonly LeadContextMessage[]
  * no SUFIXO — depois do prefixo cacheável, sem invalidar o cache F2-17).
  */
 export interface AgentTurnInput {
+  /** (C01, G3) Referência do caso; URLs só valem depois da releitura da resposta humana persistida. */
+  respostaDoCaso?: RespostaDoCasoNoTurno;
   resolvedAgent?: TurnAgentResolution;
   /**
    * (C01, -c01.3, rodada 3) Até onde a preparação do turno chegou — preenchida pelo
@@ -4138,6 +4141,21 @@ async function executarTurnoDoAgente(
   // cliente citou ou o link que o modelo inventou sairia como se viesse da base.
   const urlsDaConsulta = new Set<string>();
   const valoresDaConsulta = new Set<number>();
+  // (C01, G3) Só URLs literais da reentrada humana confirmada. Nunca usar
+  // registrarConsulta no corpo do caso: isso também autorizaria valores.
+  if (job.kind === 'case_reply_turn' && input.respostaDoCaso) {
+    try {
+      for (const url of await lerLinksDaRespostaDoCaso(pool, {
+        tenantId, contactId: leadId, conversationId: input.conversationId, jobId: job.id,
+        respostaDoCaso: input.respostaDoCaso,
+      })) {
+        urlsDaBase.add(url);
+        urlsDaConsulta.add(url);
+      }
+    } catch {
+      runLog.warn('G3: resposta humana não pôde ser conferida; nenhuma URL do caso foi autorizada');
+    }
+  }
   const registrarConsulta = (resultado: unknown): void => {
     for (const url of urlsNoResultado(resultado)) urlsDaConsulta.add(url);
     valoresNoResultado(resultado, valoresDaConsulta);
