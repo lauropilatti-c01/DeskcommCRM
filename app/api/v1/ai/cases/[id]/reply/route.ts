@@ -42,6 +42,8 @@ import {
   type CheckpointParaBriefing,
 } from "@/lib/escalacao/briefing-da-passagem";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
+import { conversasVisiveisDosCasos } from "@/lib/escalacao/chamados";
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { createLogger } from "@/lib/agent-engine/obs/logger";
 import { enqueueJob } from "@/lib/agent-engine/queue/queue";
@@ -105,6 +107,18 @@ export async function POST(req: NextRequest, { params }: RouteParams): Promise<R
   }
   const { action, body } = parsed.data;
 
+  // O pool do engine ignora RLS. Resolver o mesmo recorte do GET com a sessão
+  // antes de consultar estado ou produzir qualquer efeito, inclusive enqueue.
+  let conversasVisiveis: string[];
+  try {
+    conversasVisiveis = await conversasVisiveisDosCasos(await createClient(), org.orgId, { caseId });
+  } catch {
+    return fail("unavailable", t("Não foi possível conferir o acesso ao caso."), 503, { requestId });
+  }
+  if (conversasVisiveis.length === 0) {
+    return fail("not_found", t("Caso não encontrado."), 404, { requestId });
+  }
+
   let pool;
   try {
     pool = getRequestPool();
@@ -117,8 +131,8 @@ export async function POST(req: NextRequest, { params }: RouteParams): Promise<R
        from agent_cases ac
        join conversations conv
          on conv.id = ac.conversation_id and conv.organization_id = ac.organization_id
-      where ac.organization_id = $1 and ac.id = $2`,
-    [org.orgId, caseId],
+      where ac.organization_id = $1 and ac.id = $2 and conv.id = any($3::uuid[])`,
+    [org.orgId, caseId, conversasVisiveis],
   );
   const caseRow = rows[0];
   if (caseRow === undefined) {
