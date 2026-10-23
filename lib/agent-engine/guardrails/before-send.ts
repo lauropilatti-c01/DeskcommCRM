@@ -1221,7 +1221,7 @@ export interface RunBeforeSendArgs {
    * corpo FINAL (o disclosureGate F4-05 pode emendá-lo via `amendBody`): quem monta o send DEVE
    * enviar este `body`, não o corpo original capturado antes da cadeia.
    */
-  send: (body: string) => Promise<ChannelSendResult>;
+  send: (body: string, dbUnderLock: Queryable) => Promise<ChannelSendResult>;
 }
 
 /** Pure chain shared by real delivery and preview; no locks, writes or transport. */
@@ -1610,7 +1610,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
     // ctx.body é o corpo FINAL (emendado pelo disclosureGate F4-05 quando aplicável).
     if (args.approvedReply && ctx.body !== args.body)
       throw new Error('reply_body_changed_reapproval_required');
-    const outcome = await args.send(ctx.body);
+    const outcome = await args.send(ctx.body, client);
 
     // Registra pacing + copy SÓ no envio físico fresco ('sent'). 'already_sent'/'queued'
     // já foram (ou serão) contabilizados na tentativa original — o ledger F2-06 faz as

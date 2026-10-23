@@ -48,8 +48,9 @@ const strip = (body: string, literal: string): string => body.replace(pattern(li
 
 /** Os únicos links candidatos vêm da consulta estruturada de páginas/ofertas.
  * Vídeo ou outro link auxiliar não muda o escopo. Sem página comprovada, legado.
- * O job atual resolve uma página enviada em chamada separada; seus próprios
- * recibos NÃO são deduplicados aqui: replay continua a cargo do ledger nativo.
+ * O job atual também resolve página enviada em chamada separada. Só um corpo
+ * idêntico já registrado mantém o replay do ledger; nova chamada é conferida.
+ * db é o client da transação de before-send, nunca o pool com esse client retido.
  */
 export async function prepararMatriculaUmaVez(
   db: Queryable, alvo: Alvo, policy: PoliticaMatricula, body: string, paginas: ReadonlySet<string>,
@@ -57,6 +58,7 @@ export async function prepararMatriculaUmaVez(
   const unchanged: Resultado = { body, reason: 'none' };
   if (!policy.enabled || !pattern(policy.literal).test(body) || paginas.size === 0) return unchanged;
   let rows: EnvioMatricula[];
+  await db.query('savepoint c01_matricula_read');
   try {
     // Sem limite temporal/quantitativo que esqueça a primeira matrícula da conversa.
     // O agrupamento reconstrói o literal se o divisor o separou em várias bolhas.
@@ -74,10 +76,16 @@ export async function prepararMatriculaUmaVez(
       ) select e.* from envios e join candidatos c using (job_id) order by e.job_id, e.seq`,
     [alvo.organizationId, alvo.contactId, alvo.conversationId, alvo.jobId, normalize(policy.literal)])).rows;
   } catch {
+    // A consulta pode abortar a transação; preserva a conexão do canal utilizável.
+    await db.query('rollback to savepoint c01_matricula_read');
     // Sem prova não inventamos entrega nem nova tentativa do mesmo literal.
     // A resposta útil e a página permanecem disponíveis; só o fechamento espera.
     return { body: strip(body, policy.literal), reason: 'pending' };
+  } finally {
+    await db.query('release savepoint c01_matricula_read');
   }
+  // O ledger nativo concilia o corpo exato; não mudar sua identidade neste replay.
+  if (rows.some(r => r.job_id === alvo.jobId && r.body === body && r.status !== 'failed')) return unchanged;
   const relevantPages = (text: string): string[] => linksNoTexto(text).filter(url => paginas.has(url));
   const currentPages = new Set(relevantPages(body));
   if (currentPages.size === 0) {
@@ -88,7 +96,6 @@ export async function prepararMatriculaUmaVez(
   if (currentPages.size === 0) return unchanged;
   const byJob = new Map<string, EnvioMatricula[]>();
   for (const row of rows) {
-    if (row.job_id === alvo.jobId) continue;
     const list = byJob.get(row.job_id) ?? [];
     list.push(row); byJob.set(row.job_id, list);
   }
@@ -104,17 +111,19 @@ export async function prepararMatriculaUmaVez(
       text += normalize(row.body ?? '');
       return { row, start, end: text.length };
     });
-    const start = text.indexOf(normalize(policy.literal));
-    if (start === -1) continue;
-    const end = start + normalize(policy.literal).length;
-    const involved = spans.filter(s => s.start < end && s.end > start).map(s => s.row);
-    if (involved.length === 0 || involved.some(r => r.status === 'failed')) continue;
-    const accepted = involved.every(r => ['sent', 'delivered', 'read'].includes(r.status ?? ''));
-    const last = involved.at(-1)!;
-    const result: Resultado = { body: strip(body, policy.literal), reason: accepted ? 'accepted' : 'pending',
-      receipt: { messageId: last.message_id, idempotencyKey: last.ledger_id } };
-    if (accepted) return result;
-    pending = result;
+    // Uma tentativa falhada não apaga outra cópia aceita/pendente do mesmo job.
+    for (const occurrence of text.matchAll(pattern(policy.literal))) {
+      const start = occurrence.index;
+      const end = start + occurrence[0].length;
+      const involved = spans.filter(s => s.start < end && s.end > start).map(s => s.row);
+      if (involved.length === 0 || involved.some(r => r.status === 'failed')) continue;
+      const accepted = involved.every(r => ['sent', 'delivered', 'read'].includes(r.status ?? ''));
+      const last = involved.at(-1)!;
+      const result: Resultado = { body: strip(body, policy.literal), reason: accepted ? 'accepted' : 'pending',
+        receipt: { messageId: last.message_id, idempotencyKey: last.ledger_id } };
+      if (accepted) return result;
+      pending = result;
+    }
   }
   return pending ?? unchanged;
 }

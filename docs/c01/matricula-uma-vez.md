@@ -18,7 +18,8 @@ auxiliar não identifica a página da matrícula.
 
 No envio, depois dos guardas e sob o lock já usado pelo canal, o helper consulta
 mensagens outbound ligadas ao `send_ledger`, da mesma organização, pessoa e
-conversa. Agrupa as bolhas por job. Não usa atividade do card nem declaração da IA
+conversa. Usa a conexão já retida pelo canal, sem pedir outra ao pool; um
+SAVEPOINT recupera a transação se a consulta falhar. Agrupa as bolhas por job. Não usa atividade do card nem declaração da IA
 como prova de envio. Não há limite de dias que faça esquecer a primeira ocorrência.
 
 - `sent` significa aceite do envio. É suficiente para não enviar outra cópia,
@@ -26,12 +27,14 @@ como prova de envio. Não há limite de dias que faça esquecer a primeira ocorr
 - `queued`, `sending` e estado desconhecido de uma mensagem registrada seguram
   somente o literal; não viram entrega confirmada e não autorizam outra cópia.
 - Se uma parte do literal falhou explicitamente, aquela tentativa não prova o
-  parágrafo completo. Uma nova tentativa permanece possível.
+  parágrafo completo. Uma nova tentativa permanece possível se nenhuma outra
+  ocorrência estiver aceita ou pendente, inclusive dentro do mesmo job.
 - Em falha da consulta, somente o literal aguarda conciliação; o link e a resposta
   útil continuam. Se sobraria corpo vazio e não há recibo real, devolve indisponibilidade.
 - Página e literal podem estar em bolhas diferentes, inclusive chamadas separadas
   de `send_message` no mesmo job. O envio atual resolve sua página pelos recibos
-  desse job; replay do próprio job permanece a cargo do ledger nativo.
+  desse job. Nova chamada com corpo diferente também é conferida; somente corpo
+  idêntico já registrado segue diretamente para a conciliação do ledger nativo.
 - Se há repetição, retira apenas o literal configurado. Pergunta, resposta nova,
   página e condições particulares fora dele permanecem no corpo.
 
@@ -54,7 +57,7 @@ fechamento foi removido e seu motivo, sem copiar conteúdo ou dados da pessoa.
 
 ## Prova desta fatia
 
-22 casos em `tests/unit/c01-matricula-uma-vez.test.ts`: primeira página, aceite,
+27 casos em `tests/unit/c01-matricula-uma-vez.test.ts`: primeira página, aceite,
 entrega/leitura, estados pendentes, falha confirmada, bolhas separadas, chamada do
 literal sem URL, vídeo auxiliar, página nova, replay, URL sem consulta, fragmentos
 do literal, erro de leitura, escopo SQL, OFF e recibo real da supressão integral.
@@ -64,10 +67,31 @@ de dois turnos usa o divisor real e comprova duas páginas, uma matrícula e a
 pergunta nova preservada nas mensagens físicas fictícias.
 
 Passaram também os 20 casos adjacentes de origem da oferta e divisão de mensagens,
-o typecheck (`tsc --noEmit --incremental false`, limite de memória de 8 GiB),
-o lint dos arquivos novos e `git diff --check`. A revisão independente continua
-separada destas provas do autor.
+o lint dos arquivos novos e `git diff --check`. A revisão independente é separada
+destas provas do autor.
 
 O release precisa da revisão independente, portões da versão e configuração
 relida antes de se anunciar a capacidade como habilitada. O literal vigente a
 configurar é o do texto aprovado; esta mudança não aprova P4.
+
+### Correções da revisão independente
+
+A revisão reproduziu dois bloqueadores: exclusão indiscriminada do job atual e
+leitura só da primeira ocorrência do literal, mesmo quando falhava. Ambos foram
+corrigidos. Quatro testes nasceram vermelhos (dois status na segunda ocorrência,
+nova chamada no mesmo job e client do before-send) e passaram após a correção.
+As 27 provas T5, as 3 provas de transação e mais 32 casos adjacentes de
+estilo, espera fora do lock, classificador e liberação de conexão passaram nesta
+rodada. Nenhum teste precisou afrouxar a expectativa do envio.
+A leitura falhada também comprova rollback até o SAVEPOINT e liberação dele antes
+de continuar; nenhum segredo da falha entra no log.
+
+O pool retido foi tratado neste caminho novo. Isso não corrige os usos legados de
+outras conexões pelo transporte dentro do lock, descritos no teste de transação
+existente. A integração final e seus portões permanecem com a sessão principal.
+
+A última checagem geral de tipos (`tsc --noEmit --incremental false -p
+tsconfig.typecheck.json`, 8 GiB) terminou com o erro de tipo conhecido na fixture
+A5 (`dados-externos-perfil-c01.test.ts:34`). A coordenação já corrigiu essa fixture
+no main, commit `52d00bcaf`; não foi alterada nesta branch T5. Portanto esta
+execução não está aprovada: o portão integrado confirmará a árvore final.

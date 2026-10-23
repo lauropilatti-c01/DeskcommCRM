@@ -5547,11 +5547,11 @@ async function executarTurnoDoAgente(
             },
             // `finalBody` = corpo após a cadeia (o disclosureGate F4-05 pode prependar o
             // disclosure via inject); é ELE que vai ao canal, não o `body` capturado da tool.
-            send: async (finalBody: string) => {
+            send: async (finalBody: string, dbUnderLock: Queryable) => {
               // T5: leitura sob o lock de before-send. Só o literal repetido sai;
               // o resto passou pelas mesmas travas. Replay e mídia mantêm o caminho original.
               if (!preview && leadId && !videoNativo && fotosDoProduto.length === 0 && retomada === null) {
-                const matricula = await prepararMatriculaUmaVez(pool, {
+                const matricula = await prepararMatriculaUmaVez(dbUnderLock, {
                   organizationId: tenantId, contactId: leadId,
                   conversationId: input.conversationId, jobId: liveJob().id,
                 }, politicaMatricula, finalBody, paginasMatricula);

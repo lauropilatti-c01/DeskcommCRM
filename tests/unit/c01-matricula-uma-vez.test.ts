@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { prepararMatriculaUmaVez, lerPoliticaMatricula, reciboDaMatriculaSuprimida, type EnvioMatricula } from '../../lib/agent-engine/agent/c01-matricula-uma-vez';
+import type pg from 'pg';
+import { runBeforeSend } from '../../lib/agent-engine/guardrails/before-send';
 import type { Queryable } from '../../lib/agent-engine/queue/queue';
 import { sendInBubbles } from '../../lib/agent-engine/agent/split-message';
 
@@ -58,6 +60,52 @@ describe('T5: só o fechamento literal repetido', () => {
     const body = `${page}\n\n${literal}`;
     expect((await run(body, [part(body, 'sent', 'current')])).body).toBe(body);
   });
+  it('nova chamada no mesmo job preserva a pergunta, mas não repete o literal', async () => {
+    const initial = `${page}\n\n${literal}`;
+    const out = await run(`${initial}\n\nConseguiu abrir?`, [part(initial, 'sent', 'current')]);
+    expect(out.reason).toBe('accepted');
+    expect(out.body).toBe(`${page}\n\nConseguiu abrir?`);
+  });
+  it.each(['sent', 'queued'])('ocorrência posterior %s vence a primeira falhada', async status => {
+    const out = await run(`${page}\n\n${literal}\n\nResposta nova.`, [
+      part(`${page}\n\n${literal}`, 'failed'), part(literal, status, 'prior', 2),
+    ]);
+    expect(out.reason).toBe(status === 'sent' ? 'accepted' : 'pending');
+    expect(out.body).toBe(`${page}\n\nResposta nova.`);
+    expect(out.receipt?.messageId).toBe('prior-2');
+  });
+  it('todas as ocorrências falhadas no mesmo job permitem nova tentativa', async () => {
+    const body = `${page}\n\n${literal}\n\nResposta nova.`;
+    expect((await run(body, [part(`${page}\n${literal}`, 'failed', 'current'),
+      part(literal, 'failed', 'current', 2)])).body).toBe(body);
+  });
+  it('before-send fornece o client já retido para T5 sem pedir outra conexão', async () => {
+    let transaction = false;
+    const client = { query: vi.fn(async (sql: string) => {
+      if (sql === 'begin') transaction = true;
+      if (sql === 'commit' || sql === 'rollback') transaction = false;
+      return { rows: sql.includes('with envios') ? [part(`${page}\n${literal}`)] : [], rowCount: 0 };
+    }), release: vi.fn() };
+    const pool = { connect: vi.fn(async () => client), query: vi.fn(async () => {
+      if (transaction) throw new Error('pool não pode emprestar outra conexão durante T5');
+      return { rows: [], rowCount: 0 };
+    }) };
+    const result = await runBeforeSend({
+      pool: pool as unknown as pg.Pool, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      tenantId: 'org', leadId: 'contact', channelSessionId: 'channel', body: `${page}\n\n${literal}`,
+      optedOutThisTurn: false, crmDailyLimit: null, now: new Date('2026-10-23T15:00:00Z'),
+      gates: [], sleep: async () => {},
+      send: async (body, dbUnderLock) => {
+        expect(dbUnderLock).toBe(client);
+        const out = await prepararMatriculaUmaVez(dbUnderLock, alvo, policy, body, new Set([page]));
+        expect(out.body).toBe(page);
+        return { kind: 'sent', messageId: 'new', idempotencyKey: 'new-ledger' };
+      },
+    });
+    expect(result.status).toBe('sent');
+    expect(pool.connect).toHaveBeenCalledTimes(1);
+    expect(transaction).toBe(false);
+  });
   it('não considera URL que não veio da consulta de páginas', async () => {
     const body = `${page}\n\n${literal}`;
     expect((await run(body, [part(body)], [])).body).toBe(body);
@@ -70,16 +118,24 @@ describe('T5: só o fechamento literal repetido', () => {
     expect(failed.reason).toBe('none');
   });
   it('erro de leitura segura só o literal e preserva a resposta útil', async () => {
-    const store = { query: vi.fn().mockRejectedValue(new Error('segredo não deve vazar')) } as unknown as Queryable;
+    let aborted = false;
+    const store = { query: vi.fn(async (sql: string) => {
+      if (sql.includes('with envios')) { aborted = true; throw new Error('segredo não deve vazar'); }
+      if (sql.startsWith('rollback to savepoint')) aborted = false;
+      if (aborted) throw new Error('transação abortada');
+      return { rows: [], rowCount: 0 };
+    }) } as unknown as Queryable;
     const out = await prepararMatriculaUmaVez(store, alvo, policy, `${page}\n\n${literal}\n\nResposta útil.`, new Set([page]));
     expect(out.body).toBe(`${page}\n\nResposta útil.`);
     expect(out.reason).toBe('pending');
     expect(out.receipt).toBeUndefined();
+    expect(aborted).toBe(false);
+    expect(vi.mocked(store.query).mock.calls.at(-1)?.[0]).toBe('release savepoint c01_matricula_read');
   });
   it('consulta cerca organização, pessoa, conversa e mensagem outbound com ledger', async () => {
     const store = db([]);
     await prepararMatriculaUmaVez(store, alvo, policy, `${page}\n${literal}`, new Set([page]));
-    const [sql, args] = vi.mocked(store.query).mock.calls[0]!;
+    const [sql, args] = vi.mocked(store.query).mock.calls.find(([sql]) => String(sql).includes('with envios'))!;
     expect(args?.slice(0, 4)).toEqual(['org', 'contact', 'conversation', 'current']);
     expect(sql).toContain('sl.organization_id = $1');
     expect(sql).toContain('sl.contact_id = $2');
