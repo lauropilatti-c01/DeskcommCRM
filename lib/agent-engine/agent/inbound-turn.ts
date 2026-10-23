@@ -111,6 +111,7 @@ import {
   PASTA_DE_TESTE_DE_MIDIA,
   type FotoParaEnvio,
 } from './fotos-do-produto';
+import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, MAX_LEGENDA_VIDEO, prepararVideoNativo, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
 import {
   applyLeadStateUpdate,
@@ -409,6 +410,11 @@ export const AGENT_TOOL_DEFS = {
           'código de um produto do catálogo (o `codigo` de crm_search_products) que tem `fotos`: ' +
             'as fotos dele vão junto, e o texto vira a legenda da primeira',
         ),
+      video_chave: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/).optional().describe(
+        'Chave de vídeo nativo aprovado no catálogo da organização. Só use chave confirmada; nunca URL. ' +
+        'O corpo vira a legenda do vídeo (até 1024 caracteres). Não combine com produto_codigo. ' +
+        'Capacidade desligada ou mídia ausente recusa o envio inteiro.',
+      ),
     }),
   },
   update_lead_state: {
@@ -2336,6 +2342,8 @@ export interface InboundTurnDeps {
    * teste (a real, `copiarFotoNoStorage`, fala com o Storage). Default = a real.
    */
   copiarFoto?: CopiarFoto;
+  /** V1: seam de Storage para testes locais; produção valida bytes e identidade. */
+  copiarVideo?: CopiarVideo;
   /**
    * O Jev no turno — na camada anti-manipulação e no roteador de intenção.
    * Injetável só para teste (chave e `fetch` dublês). Default = a chave da
@@ -4432,7 +4440,7 @@ async function executarTurnoDoAgente(
     },
   });
   /** (C01) Uma mensagem física do envio: texto puro, ou foto com (ou sem) legenda. */
-  type MensagemPlanejada = { body: string; media?: FotoParaEnvio };
+  type MensagemPlanejada = { body: string; media?: FotoParaEnvio | VideoParaEnvio; identidade?: string };
   /** (C01) Este conteúdo já tem recibo neste job (aceito, ou pendente a retomar)? O preview não tem job. */
   const conhecido = (envio: MensagemPlanejada & { template?: object; identidade?: string }): Promise<boolean> =>
     preview ? Promise.resolve(false) : conteudoRegistradoNoJob(pool, { tenantId, jobId: liveJob().id, ...envio });
@@ -4505,6 +4513,7 @@ async function executarTurnoDoAgente(
   const planejarRetomada = async (
     textoDoModelo: string,
     fotos: readonly FotoParaEnvio[],
+    video?: VideoParaEnvio | null,
   ): Promise<{ conhecidas: MensagemPlanejada[]; novas: number }> => {
     // A identidade no ledger é o texto com que a cadeia começa (ajustes de estilo da
     // organização; a emenda da apresentação fica de fora): a mesma régua aqui.
@@ -4513,7 +4522,9 @@ async function executarTurnoDoAgente(
     const bolhas: MensagemPlanejada[] = (naturais.length === 0 ? [texto] : naturais).map((body) => ({ body }));
     const [capa, ...demais] = fotos;
     const plano: MensagemPlanejada[] =
-      capa === undefined
+      video
+        ? [{ body: texto, media: video, identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO }]
+        : capa === undefined
         ? bolhas
         : texto.length <= LIMITE_DA_LEGENDA
           ? [{ body: texto, media: capa }, ...demais.map((media) => ({ body: '', media }))]
@@ -5088,13 +5099,19 @@ async function executarTurnoDoAgente(
     }),
     send_message: tool({
       ...AGENT_TOOL_DEFS.send_message,
-      execute: async ({ body: corpoDoModelo, produto_codigo }, opcoes) => {
+      execute: async ({ body: corpoDoModelo, produto_codigo, video_chave }, opcoes) => {
         tentativasDeEnvio += 1;
         // O texto sai no formato do WhatsApp — sem `\n` literal nem
         // `**negrito**` de Markdown na tela do cliente. Antes de qualquer gate,
         // para que o corpo vazio, as bolhas e a pausa humana meçam o que sai.
         // Ver `formato-whatsapp.ts`.
         const body = formatarParaWhatsApp(corpoDoModelo);
+        // V1: uma única mensagem de vídeo e legenda. Nenhuma degradação para
+        // texto, nenhum lote de fotos/vídeo e nenhuma cópia no preview.
+        if (video_chave !== undefined && (produto_codigo !== undefined || body.length > MAX_LEGENDA_VIDEO || preview)) {
+          return { ok: false, error: { code: 'video_configuracao_invalida', message:
+            'Vídeo nativo exige legenda de até 1024 caracteres, sem produto_codigo. A prévia não executa vídeo; não considere o anexo enviado.' } };
+        }
         // (C01, -c01.8) Uma tentativa nova substitui a que o estilo vetou.
         envioVetadoPorEstilo = null;
         // (C01, -c01.14) As tabelas cobradas cujo resultado NÃO estava no que o modelo leu
@@ -5248,6 +5265,7 @@ async function executarTurnoDoAgente(
         // precisa alcançar a cadeia; envolver a reserva não altera o caminho do gate —
         // ele segue inteiramente síncrono do `checar` até a reserva.
         let fotosDoProduto: FotoParaEnvio[] = [];
+        let videoNativo: VideoParaEnvio | null = null;
         let fotosQueFaltaram = 0;
         // (C01) Ligado pelo fail-safe de vocabulário interno antes de mandar a frase de
         // espera: é o ÚNICO envio que passa pela reconferência de `enviarPeloCanal`
@@ -5306,6 +5324,16 @@ async function executarTurnoDoAgente(
           // fora do lock do número — a cópia no Storage é rede. Código errado volta
           // ao modelo sem enviar nada; foto que não copiou sai do envio e o texto
           // segue (degradar para só texto). Ver `agent/fotos-do-produto.ts`.
+          if (video_chave !== undefined) {
+            const preparado = await prepararVideoNativo(pool, deps.copiarVideo ?? copiarVideoNoStorage(), {
+              tenantId, conversationId: input.conversationId, chave: video_chave,
+            });
+            if (!preparado.ok) {
+              dupTrava.liberar(body);
+              return { ok: false, error: { code: preparado.code, message: preparado.message } };
+            }
+            videoNativo = preparado.media;
+          }
           if (produto_codigo !== undefined && produto_codigo.trim() !== '' && !preview) {
             const preparadas = await prepararFotosDoProduto(pool, deps.copiarFoto ?? copiarFotoNoStorage(runLog), {
               tenantId,
@@ -5324,7 +5352,7 @@ async function executarTurnoDoAgente(
           // físicas deste envio, separadas entre as que o ledger já conhece e as novas.
           // Nenhuma conhecida = intenção nova: recusa por teto, como sempre. Alguma
           // conhecida: a cadeia roda e o `send` manda SÓ elas (ver `enviarSoAsConhecidas`).
-          retomada = tetoCheio() ? await planejarRetomada(body, fotosDoProduto) : null;
+          retomada = tetoCheio() ? await planejarRetomada(body, fotosDoProduto, videoNativo) : null;
           if (retomada !== null && retomada.conhecidas.length === 0) {
             dupTrava.liberar(body);
             return recusaPorTeto();
@@ -5507,7 +5535,7 @@ async function executarTurnoDoAgente(
                 Math.floor(Math.random() * (pacingDoTurno?.knobs.jitterMaxMs ?? 800));
               const enviar = (
                 corpo: string,
-                media?: FotoParaEnvio,
+                media?: FotoParaEnvio | VideoParaEnvio,
               ): Promise<ChannelSendResult> =>
                 enviarPeloCanal(
                   {
@@ -5520,10 +5548,19 @@ async function executarTurnoDoAgente(
                     body: corpo,
                     ...(media ? { media } : {}),
                     ...identidadeDoEnvio(corpo, finalBody, comoACadeiaComeca(corpoDaCadeia())),
+                    ...(media && 'type' in media && media.type === 'video' ? { identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO } : {}),
                   },
                   { fraseDeEspera: enviandoFraseDeEspera },
                 );
-              if (retomada !== null) return enviarSoAsConhecidas(retomada.conhecidas, { enviar, sleep, jitter });
+              if (retomada !== null) return enviarSoAsConhecidas(retomada.conhecidas, {
+                enviar: (corpo, media) => media && 'type' in media && media.type === 'video'
+                  ? enviarVideoComLegenda(corpo, media as VideoParaEnvio, enviar)
+                  : enviar(corpo, media),
+                sleep, jitter,
+              });
+              // V1: só depois de TODOS os guardas, pelo mesmo canal e ledger.
+              // A legenda final (inclusive apresentação) precisa caber inteira.
+              if (videoNativo) return enviarVideoComLegenda(finalBody, videoNativo, enviar);
               // Cada foto é uma mensagem física: só vão as que cabem no que resta do teto
               // do turno (a checagem de `max_sends_per_turn` acima roda uma vez, antes).
               // O resto é medido ANTES DE CADA FOTO, depois do texto: o texto acima do

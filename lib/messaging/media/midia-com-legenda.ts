@@ -25,8 +25,8 @@ import { kindFromMime } from "./upload-validation";
 /** O que a legenda pode acompanhar. `document` aqui é SEMPRE PDF — ver o corte abaixo. */
 export type TipoDeMidiaComLegenda = "image" | "document";
 
-export type ClassificacaoDeMidia =
-  | { ok: true; type: TipoDeMidiaComLegenda; mime: string }
+export type ClassificacaoDeMidia<T extends string = TipoDeMidiaComLegenda> =
+  | { ok: true; type: T; mime: string }
   | { ok: false; motivo: string };
 
 /** Extensão → MIME, só o que a régua aceita. Chave minúscula, sem o ponto. */
@@ -64,10 +64,22 @@ function extensaoDaUrl(url: string): string | null {
 export function classificarMidiaComLegenda(
   url: string,
   mime?: string | null,
-): ClassificacaoDeMidia {
+): ClassificacaoDeMidia;
+/** V3: MP4 é opt-in; consumidores antigos continuam recusando vídeo. */
+export function classificarMidiaComLegenda(
+  url: string,
+  mime: string | null | undefined,
+  opcoes: { videoMp4: boolean },
+): ClassificacaoDeMidia<TipoDeMidiaComLegenda | 'video'>;
+export function classificarMidiaComLegenda(
+  url: string,
+  mime?: string | null,
+  opcoes?: { videoMp4: boolean },
+): ClassificacaoDeMidia<TipoDeMidiaComLegenda | 'video'> {
   const declarado = (mime ?? "").split(";")[0]!.trim().toLowerCase();
   const daUrl = extensaoDaUrl(url);
-  const efetivo = declarado || (daUrl ? (MIME_POR_EXTENSAO[daUrl] ?? "") : "");
+  const efetivo = declarado || (daUrl === 'mp4' && opcoes?.videoMp4 ? 'video/mp4' : daUrl ? (MIME_POR_EXTENSAO[daUrl] ?? "") : "");
+  if (opcoes?.videoMp4 && efetivo === 'video/mp4') return { ok: true, type: 'video', mime: efetivo };
   const kind = efetivo ? kindFromMime(efetivo) : null;
   if (kind === "image") return { ok: true, type: "image", mime: efetivo };
   if (kind === "document" && efetivo === "application/pdf") {

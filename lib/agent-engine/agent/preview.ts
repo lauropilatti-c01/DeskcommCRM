@@ -315,6 +315,13 @@ export function applyPreviewPolicy(
           ...definition,
           execute: async (args: unknown) => {
             if (name === 'send_message') {
+              // V1: o simulador ainda não prepara vídeo. Recusa explícita evita
+              // aprovar uma legenda como se o anexo tivesse sido conferido.
+              if (args && typeof args === 'object' && 'video_chave' in args) {
+                const error = { code: 'video_preview_indisponivel', message: 'O vídeo nativo não foi preparado nem enviado nesta prévia.' };
+                p.result.impediments.push(error);
+                return { ok: false, error };
+              }
               const body =
                 args && typeof args === 'object' && 'body' in args && typeof args.body === 'string'
                   ? args.body

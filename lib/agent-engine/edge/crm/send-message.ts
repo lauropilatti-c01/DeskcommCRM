@@ -73,8 +73,8 @@ export interface SendMessageInput {
    * (#2734), que o operador aponta direto e o handler confere antes de buscar.
    */
   media?:
-    | { storagePath: string; mime: string }
-    | { url: string; mime: string; type: 'image' | 'document' };
+    | { storagePath: string; mime: string; type?: 'image' | 'video' }
+    | { url: string; mime: string; type: 'image' | 'document' | 'video' };
   /**
    * (C01) O texto que identifica o envio no ledger quando difere do `body` entregue
    * (corpo antes das emendas da cadeia). Só o hash o usa; o handler recebe `body`.
@@ -114,7 +114,7 @@ export function corpoDoEnvio(
               media_mime: input.media.mime,
             }
           : {
-              type: 'image' as const,
+              type: input.media.type ?? 'image' as const,
               media_storage_path: input.media.storagePath,
               media_mime: input.media.mime,
             }
