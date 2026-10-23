@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { recusarEscritaFinanceiraGenerica } from "@/lib/leads/confirmacao-financeira";
 
 import type { ReplySaveTo } from "./graph-schema";
 import { latestRepeatIndex, type EnrollmentEventRef } from "./node-handlers";
@@ -31,6 +32,9 @@ export async function persistirRespostaFollowupSupabase(
   admin: SupabaseClient,
   input: PersistirRespostaInput,
 ): Promise<void> {
+  if (input.save_to.kind === "lead_custom") {
+    recusarEscritaFinanceiraGenerica({ [input.save_to.key]: input.value }, "followup-save-to");
+  }
   const value = recorteDaResposta(input.value);
   if (value.length === 0) return;
 
@@ -56,7 +60,9 @@ export async function persistirRespostaFollowupSupabase(
   if (!lead) return;
 
   const prev =
-    lead.custom_fields && typeof lead.custom_fields === "object" && !Array.isArray(lead.custom_fields)
+    lead.custom_fields &&
+    typeof lead.custom_fields === "object" &&
+    !Array.isArray(lead.custom_fields)
       ? (lead.custom_fields as Record<string, unknown>)
       : {};
   const { error } = await admin
@@ -74,6 +80,9 @@ export async function persistirRespostaFollowupPg(
   query: (sql: string, params: unknown[]) => Promise<unknown>,
   input: PersistirRespostaInput,
 ): Promise<void> {
+  if (input.save_to.kind === "lead_custom") {
+    recusarEscritaFinanceiraGenerica({ [input.save_to.key]: input.value }, "followup-save-to");
+  }
   const value = recorteDaResposta(input.value);
   if (value.length === 0) return;
 

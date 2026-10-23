@@ -3,6 +3,8 @@
  * Match precedence: array order. First match wins.
  */
 export const PUBLIC_PATHS: RegExp[] = [
+  // Credencial financeira exclusiva, validada na rota; desligada por padrão.
+  /^\/api\/v1\/integrations\/financial\/confirm$/,
   // Link público persistido: org e destino são resolvidos exclusivamente no servidor.
   /^\/api\/v1\/rastreio\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
   /^\/$/,
