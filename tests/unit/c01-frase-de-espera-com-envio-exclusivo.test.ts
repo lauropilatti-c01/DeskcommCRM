@@ -92,14 +92,14 @@ describe("(C01) o `send` exclusivo da frase de espera", () => {
 
   it("o `send` do modelo continua com o plano da retomada do teto cheio (é dos envios DELE), e vem antes do fail-safe", () => {
     const sendDoModelo = trecho(
-      "send: (finalBody: string) => {",
+      "send: async (finalBody: string, dbUnderLock: Queryable) => {",
       "let chain = await cadeiaDeEnvio(",
     );
     expect(sendDoModelo).toMatch(
-      /if \(retomada !== null\) return enviarSoAsConhecidas\(retomada\.conhecidas, \{ enviar, sleep, jitter \}\);/,
+      /if \(retomada !== null\) return enviarSoAsConhecidas\(retomada\.conhecidas, \{\s*enviar: \(corpo, media\) => media && 'type' in media && media\.type === 'video'\s*\? enviarVideoComLegenda\(corpo, media as VideoParaEnvio, enviar\)\s*: enviar\(corpo, media\),\s*sleep, jitter,\s*\}\);/,
     );
     expect(sendDoModelo).toMatch(/return enviarComFotos\(finalBody, fotosDoProduto, \{/);
-    expect(sendMessage.indexOf("send: (finalBody: string) => {")).toBeLessThan(
+    expect(sendMessage.indexOf("send: async (finalBody: string, dbUnderLock: Queryable) => {")).toBeLessThan(
       sendMessage.indexOf("send: enviarFraseDeEspera,"),
     );
   });

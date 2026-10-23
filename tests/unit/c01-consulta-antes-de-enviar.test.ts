@@ -209,7 +209,7 @@ describe("(C01) a ligação no turno e na cadeia, pelo código", () => {
 
   it("o send_message confere o que o modelo leu (as mensagens do passo) e arma só no agente ligado", () => {
     // Junção da 1.86: o autor recebe o corpo como `corpoDoModelo` e formata (`formatarParaWhatsApp`).
-    expect(TURNO).toMatch(/execute: async \(\{ body(?:: corpoDoModelo)?, produto_codigo \}, opcoes\) => \{/);
+    expect(TURNO).toMatch(/execute: async \(\{ body: corpoDoModelo, produto_codigo, video_chave \}, opcoes\) => \{/);
     expect(TURNO).toMatch(/tabelasCobradas\.filter\(\(tabela\) => !leuConsultaDaTabela\(opcoes\?\.messages, tabela\)\)/);
     expect(TURNO).toMatch(/consultaAntes\.agentes\.includes\(agentConfig\.agentId\)/);
     expect(TURNO).toMatch(/travasArmadas\(\{ consultasFaltando \}\)/);

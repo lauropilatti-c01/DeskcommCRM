@@ -191,7 +191,7 @@ describe('fiação V1: ferramenta e prévia', () => {
     const start = source.indexOf('send_message: tool({');
     const end = source.indexOf('update_lead_state: tool({', start);
     const send = source.slice(start, end);
-    const callback = send.indexOf('send: (finalBody: string) =>');
+    const callback = send.indexOf('send: async (finalBody: string, dbUnderLock: Queryable) =>');
     expect(callback).toBeGreaterThan(0);
     expect(send.indexOf('enviarVideoComLegenda(finalBody, videoNativo, enviar)')).toBeGreaterThan(callback);
     expect(send).toContain('cadeiaDeEnvio(() => runBeforeSend(beforeSendArgs))');
