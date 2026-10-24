@@ -2,6 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { criarFonteFinanceira, type FonteConfig } from "@/lib/leads/fontes-financeiras";
 import { configuracoesFinanceiras } from "@/lib/leads/configuracao-financeira";
 import { intervaloDoPagamento } from "@/lib/leads/periodo-financeiro";
+import {
+  contratoFicticio,
+  clicksignFicticio,
+  documentoFicticio,
+} from "../helpers/boleto-contrato-ficticio";
 afterEach(() => {
   vi.unstubAllEnvs();
 });
@@ -20,10 +25,11 @@ const cfg: FonteConfig = {
     environment: "production",
     walletId,
     apiToken: "asaas-ficticio",
+    clicksign: clicksignFicticio,
   },
 };
 function fixture() {
-  return {
+  const order = {
     id: orderId,
     org_id: org,
     status: "completed",
@@ -44,6 +50,9 @@ function fixture() {
         org_id: org,
         order_id: orderId,
         asaas_payment_id: "pay_ficticio",
+        type: "installment_boleto",
+        installment_number: 1,
+        due_date: "2026-11-21",
         status: "paid",
         amount: 100,
         amount_paid: 96.5,
@@ -55,6 +64,7 @@ function fixture() {
       },
     ],
   };
+  return contratoFicticio(order, [100], 0);
 }
 function provider() {
   return {
@@ -68,6 +78,7 @@ function provider() {
     originalValue: null,
     interestValue: null,
     paymentDate: "2026-10-21",
+    dueDate: "2026-11-21",
     clientPaymentDate: "2026-10-21",
     deleted: false,
     refunds: [],
@@ -77,6 +88,7 @@ function harness(order = fixture(), payment = provider(), config = cfg, wallet =
   const fetcher = vi.fn<typeof fetch>(async (url) => {
     const u = new URL(String(url));
     if (u.hostname === "example.supabase.co") return Response.json([order]);
+    if (u.hostname.endsWith("clicksign.com")) return Response.json(documentoFicticio(order));
     if (u.pathname === "/v3/wallets/")
       return Response.json({ hasMore: false, totalCount: 1, data: [{ id: wallet }] });
     if (u.pathname === "/v3/payments/pay_ficticio") return Response.json(payment);
@@ -215,12 +227,24 @@ describe("boleto: confirmação atual de quitação integral no Asaas", () => {
   it("confirma todas as parcelas e ignora o líquido e a data locais atrasados", async () => {
     const order = fixture();
     order.total_value = 200;
-    order.payments.push({ ...order.payments[0]!, id: "local2", asaas_payment_id: "pay_segundo" });
+    order.payments.push({
+      ...order.payments[0]!,
+      id: "local2",
+      asaas_payment_id: "pay_segundo",
+      installment_number: 2,
+      due_date: "2026-11-22",
+    });
+    contratoFicticio(order, [100, 100], 0);
     Object.assign(order.payments[0]!, { status: "pending", amount_paid: null, paid_at: null });
     const { fetcher } = harness(order);
     const fetchFull = vi.fn<typeof fetch>(async (url, init) =>
       String(url).endsWith("/pay_segundo")
-        ? Response.json({ ...provider(), id: "pay_segundo", paymentDate: "2026-10-22" })
+        ? Response.json({
+            ...provider(),
+            id: "pay_segundo",
+            paymentDate: "2026-10-22",
+            dueDate: "2026-11-22",
+          })
         : fetcher(url, init),
     );
     const source = criarFonteFinanceira(cfg, { fetch: fetchFull, now: () => now });
