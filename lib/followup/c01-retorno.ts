@@ -15,6 +15,10 @@ export const JANELA_RETORNO_C01 = {
   weekdays: [0, 1, 2, 3, 4, 5, 6],
 };
 
+/** A política recusou prometer este retorno (consentimento, horário, estado da conversa,
+ * compra): nada foi criado e nada falhou. Configuração e infraestrutura seguem `Error`. */
+export class RecusaRetornoC01 extends Error {}
+
 export interface ConsentimentoRetornoC01 {
   consent_message_id?: string;
   consent_excerpt?: string;
@@ -133,10 +137,10 @@ export async function prepararRetornoComercialC01(
       typeof source !== "string" ||
       (consent.consent_message_id && consent.consent_message_id !== source)
     )
-      throw new Error("c01_callback_consent_outside_current_turn");
+      throw new RecusaRetornoC01("c01_callback_consent_outside_current_turn");
     consent.consent_message_id = source;
   }
-  if (!consent.consent_message_id) throw new Error("c01_callback_consent_missing");
+  if (!consent.consent_message_id) throw new RecusaRetornoC01("c01_callback_consent_missing");
   const message = (
     await db.query(
       `select id,conversation_id,body,sent_at from messages
@@ -148,9 +152,9 @@ export async function prepararRetornoComercialC01(
     !message?.body ||
     (consent.consent_excerpt && !message.body.includes(consent.consent_excerpt))
   )
-    throw new Error("c01_callback_consent_not_found");
+    throw new RecusaRetornoC01("c01_callback_consent_not_found");
   if (!input.sourceJobId && !consent.consent_excerpt?.trim())
-    throw new Error("c01_callback_consent_missing");
+    throw new RecusaRetornoC01("c01_callback_consent_missing");
   if (input.sourceJobId && !consent.offered_message_id) {
     const prior = (
       await db.query(
@@ -177,7 +181,7 @@ export async function prepararRetornoComercialC01(
         ],
       )
     ).rows[0];
-    if (!row) throw new Error("c01_callback_offer_not_found");
+    if (!row) throw new RecusaRetornoC01("c01_callback_offer_not_found");
     const between = (
       await db.query(
         `select id from messages where organization_id=$1 and contact_id=$2
@@ -191,7 +195,7 @@ export async function prepararRetornoComercialC01(
         ],
       )
     ).rows;
-    if (between.length) throw new Error("c01_callback_offer_not_immediate");
+    if (between.length) throw new RecusaRetornoC01("c01_callback_offer_not_immediate");
     offer = { id: row.id, body: row.body, sent_at: new Date(row.sent_at).toISOString() };
   }
   const promised = horarioConfirmadoC01(
@@ -201,12 +205,12 @@ export async function prepararRetornoComercialC01(
     offer?.sent_at,
   );
   if (!promised || promised !== new Date(input.promisedAt).toISOString())
-    throw new Error("c01_callback_time_not_confirmed");
+    throw new RecusaRetornoC01("c01_callback_time_not_confirmed");
   const requiresTemplate = Date.parse(promised) - +new Date(message.sent_at) >= 24 * 3600000;
   if (requiresTemplate && !cfg.callbackTemplate?.enabled)
-    throw new Error("c01_callback_template_required_before_promise");
+    throw new RecusaRetornoC01("c01_callback_template_required_before_promise");
   const promisedHour = new Date(Date.parse(promised) - 3 * 3600000).getUTCHours();
-  if (promisedHour < 8 || promisedHour >= 21) throw new Error("c01_callback_outside_send_window");
+  if (promisedHour < 8 || promisedHour >= 21) throw new RecusaRetornoC01("c01_callback_outside_send_window");
   const leads = (
     await db.query(
       `select id,custom_fields from crm_leads where organization_id=$1 and contact_id=$2
@@ -215,7 +219,7 @@ export async function prepararRetornoComercialC01(
     )
   ).rows;
   if (leads.length !== 1 || !leads[0]!.custom_fields?.produto_chave)
-    throw new Error("c01_callback_opportunity_ambiguous");
+    throw new RecusaRetornoC01("c01_callback_opportunity_ambiguous");
   const state = (
     await db.query(
       `select cv.last_inbound_at,cv.assignee_kind,cv.status,cv.bot_silenced_until,cv.channel_session_id,
@@ -240,7 +244,7 @@ export async function prepararRetornoComercialC01(
     state.bot_silenced_until === "infinity" ||
     (state.bot_silenced_until && +new Date(state.bot_silenced_until) > +checkedAt)
   )
-    throw new Error("c01_callback_current_state_forbids_promise");
+    throw new RecusaRetornoC01("c01_callback_current_state_forbids_promise");
   let template: ProvaRetornoC01["template"];
   if (requiresTemplate) {
     template = {
@@ -252,7 +256,7 @@ export async function prepararRetornoComercialC01(
       throw new Error("c01_callback_template_connection_mismatch");
     if (!input.agentId) throw new Error("c01_callback_agent_missing");
     const agent = await conferirCallbackAntesDoTurno(db, input.organizationId, input.agentId, new Date(promised), true);
-    if (agent.tipo !== "seguir") throw new Error("c01_callback_agent_not_authorized");
+    if (agent.tipo !== "seguir") throw new RecusaRetornoC01("c01_callback_agent_not_authorized");
     await resolverModeloDoRetornoC01(db, input.organizationId, template);
   }
   const { lerSituacaoFinanceira } = await import("@/lib/leads/fonte-financeira");
@@ -266,7 +270,7 @@ export async function prepararRetornoComercialC01(
     signal: AbortSignal.timeout(10_000),
   });
   if (financial.status !== "nao_comprou_confirmado" || !financial.complete)
-    throw new Error("c01_callback_financial_capability_unavailable_before_promise");
+    throw new RecusaRetornoC01("c01_callback_financial_capability_unavailable_before_promise");
   const body = {
     version: 1 as const,
     organization_id: input.organizationId,

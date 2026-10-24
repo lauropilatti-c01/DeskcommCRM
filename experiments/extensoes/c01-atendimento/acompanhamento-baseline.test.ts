@@ -448,9 +448,12 @@ describe("acompanhamento com SQL real e transporte falso", () => {
         },
       });
       expect(+new Date(rows[0].next_run_at)).toBe(+now);
-      await expect(
-        applyScheduleFollowup(pool, settings, trusted, { ...input, consent_message_id: message }),
-      ).rejects.toThrow("consent_outside_current_turn");
+      expect(
+        await applyScheduleFollowup(pool, settings, trusted, { ...input, consent_message_id: message }),
+      ).toMatchObject({
+        ok: false,
+        error: { code: "callback_not_confirmed", message: expect.stringContaining("consent_outside_current_turn") },
+      });
       expect(
         (await pool.query("select count(*)::int n from cron_jobs where organization_id=$1", [org]))
           .rows[0].n,
