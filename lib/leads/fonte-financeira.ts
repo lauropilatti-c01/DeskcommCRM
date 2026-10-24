@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { Queryable } from "@/lib/agent-engine/queue/queue";
 import { configuracoesFinanceiras } from "./configuracao-financeira";
 import { criarFonteFinanceira } from "./fontes-financeiras";
+import type { ColetaFinanceira } from "./coleta-financeira";
 export { criarFonteFinanceira } from "./fontes-financeiras";
 export interface SituacaoFinanceira {
   status: "confirmado" | "revisao" | "indisponivel" | "nao_comprou_confirmado";
@@ -10,6 +11,7 @@ export interface SituacaoFinanceira {
   complete: boolean;
   reason: string;
   evidenceHash?: string;
+  collection?: ColetaFinanceira;
 }
 export async function lerSituacaoFinanceira(input: {
   db: Queryable;

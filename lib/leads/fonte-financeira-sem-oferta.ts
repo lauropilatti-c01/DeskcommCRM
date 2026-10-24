@@ -126,8 +126,45 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
       if (
         !projection.complete ||
         !["confirmado", "nao_comprou_confirmado"].includes(projection.status)
-      )
+      ) {
+        if (projection.collection) {
+          // A consulta temporária também precisa sobreviver à releitura da pessoa.
+          const reread = (
+            await input.db.query(
+              `select l.custom_fields,l.status,c.phone_number,c.email,c.is_anonymized,c.is_merged_into from crm_leads l join contacts c on c.id=l.contact_id and c.organization_id=l.organization_id where l.organization_id=$1 and l.id=$2 and c.id=$3`,
+              [input.organizationId, input.leadId, input.contactId],
+            )
+          ).rows[0];
+          const identities = (
+            await input.db.query(
+              "select id from contacts where organization_id=$1 and not is_anonymized and is_merged_into is null and (phone_number=$2 or email_normalized=$3)",
+              [input.organizationId, phone, email],
+            )
+          ).rows;
+          const leads = (
+            await input.db.query(
+              "select id from crm_leads where organization_id=$1 and contact_id=$2 and status='open'",
+              [input.organizationId, input.contactId],
+            )
+          ).rows;
+          if (
+            !reread ||
+            reread.status !== "open" ||
+            reread.is_anonymized ||
+            reread.is_merged_into ||
+            reread.phone_number !== phone ||
+            (typeof reread.email === "string" ? reread.email.trim().toLowerCase() : null) !==
+              email ||
+            (reread.custom_fields?.produto_chave ?? null) !== initialProduct ||
+            identities.length !== 1 ||
+            identities[0]?.id !== input.contactId ||
+            leads.length !== 1 ||
+            leads[0]?.id !== input.leadId
+          )
+            return answer("revisao", "identidade_ou_oportunidade_alterada");
+        }
         return projection;
+      }
       paid = projection.status === "confirmado";
       references.push(projection.evidenceHash!);
     }

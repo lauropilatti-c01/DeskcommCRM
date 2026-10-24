@@ -58,6 +58,14 @@ const DIR = join(process.cwd(), "lib", "followup");
  * `agenda` = 'nenhum' → menciona a coluna sem agendar (leitura, tradução).
  */
 const ESCRITORES: Record<string, { agenda: "agora" | "futuro" | "nenhum"; nota: string }> = {
+  "c01-continuacao-runtime.ts": {
+    agenda: "futuro",
+    nota: "Matrícula L1/L2 grava o prazo original plan.dueAt da política. A espera financeira anterior à matrícula fica no payload do job e não reinicia esse prazo.",
+  },
+  "c01-financeiro-fila.ts": {
+    agenda: "nenhum",
+    nota: "Só desagenda com next_eval_at null quando a conferência bloqueia. O adiamento temporário é aplicado pela ponte turn-bridge já declarada, dentro da mesma transação e com prazo futuro limitado.",
+  },
   "c01-acompanhamento-origens.ts": {
     agenda: "agora",
     nota: "A matrícula nasce vencida: omite next_eval_at no INSERT e usa o default now() do banco. Na substituição de cronograma por oferta, só desagenda a inscrição anterior com null.",

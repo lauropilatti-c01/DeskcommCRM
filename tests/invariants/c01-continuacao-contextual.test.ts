@@ -40,6 +40,11 @@ import {
 import { lerFatosAcompanhamentoC01 } from "@/lib/followup/c01-acompanhamento-fatos";
 import { avaliarAcompanhamento } from "@/lib/followup/c01-acompanhamento";
 import { resolverPassoC01 } from "@/lib/followup/c01-acompanhamento-conteudo";
+import {
+  EsperaFinanceiraC01Error,
+  BloqueioFinanceiroC01Error,
+} from "@/lib/followup/c01-financeiro-espera";
+import { disporJobFinanceiroC01 } from "@/lib/followup/c01-financeiro-fila";
 import { vi } from "vitest";
 if (!process.env.TEST_DB_CONTAINER) throw new Error("Use o banco descartável de test:db.");
 const pool = new pg.Pool({
@@ -69,6 +74,19 @@ afterAll(() => {
   return pool.end();
 });
 const NOW = new Date("2026-10-24T15:00:10Z");
+const temporaria = (now: Date, startedAt = new Date(+now - 120_000).toISOString()) => ({
+  status: "indisponivel" as const,
+  complete: false,
+  checkedAt: startedAt,
+  reason: "projecao_em_coleta",
+  collection: {
+    generationId: "33333333-3333-4333-8333-333333333333",
+    startedAt,
+    heartbeatAt: now.toISOString(),
+    deadlineAt: new Date(Date.parse(startedAt) + 900_000).toISOString(),
+    progress: 2,
+  },
+});
 const deps: DependenciasContinuacaoC01 = {
   financeiro: async ({ now }) => ({
     status: "nao_comprou_confirmado",
@@ -531,6 +549,79 @@ describe("continuação com PostgreSQL oficial e fontes fictícias", () => {
   });
 });
 
+describe("prazo financeiro antes da matrícula", () => {
+  it("L1 conserva primeiro prazo e intervalo de 60 s; geração nova não renova", async () => {
+    const f = await fixture();
+    let at = NOW;
+    const financial = vi.fn(async () => temporaria(at));
+    const pending = { ...deps, semOferta: financial };
+    expect((await registrarContinuacaoC01(pool, f.cfg, f.job, at, pending)).reason).toBe(
+      "projecao_em_coleta",
+    );
+    const first = (
+      await pool.query("select payload->'c01_financial_wait' as wait from job_queue where id=$1", [
+        f.job,
+      ])
+    ).rows[0].wait;
+    expect(first).toMatchObject({
+      deadlineAt: temporaria(at).collection.deadlineAt,
+      nextCheckAt: new Date(+at + 60_000).toISOString(),
+    });
+    at = new Date(+NOW + 30_000);
+    await registrarContinuacaoC01(pool, f.cfg, f.job, at, pending);
+    expect(financial).toHaveBeenCalledTimes(1);
+    at = new Date(+NOW + 61_000);
+    await registrarContinuacaoC01(pool, f.cfg, f.job, at, pending);
+    const later = (
+      await pool.query("select payload->'c01_financial_wait' as wait from job_queue where id=$1", [
+        f.job,
+      ])
+    ).rows[0].wait;
+    expect(later.deadlineAt).toBe(first.deadlineAt);
+    at = new Date(Date.parse(first.deadlineAt) + 1);
+    expect((await registrarContinuacaoC01(pool, f.cfg, f.job, at, deps)).reason).toBe(
+      "prazo_da_coleta_financeira_esgotado",
+    );
+    expect(
+      (await pool.query("select id from followup_enrollments where organization_id=$1", [f.org]))
+        .rows,
+    ).toHaveLength(0);
+    expect(
+      (
+        await pool.query(
+          "select payload?'c01_continuation_omitted' as omitted from job_queue where id=$1",
+          [f.job],
+        )
+      ).rows[0].omitted,
+    ).toBe(true);
+  });
+  it("L1 atualizando→pronta inscreve uma vez; falha real não se autorretoma", async () => {
+    const f = await fixture();
+    const pending = { ...deps, semOferta: async () => temporaria(NOW) };
+    await registrarContinuacaoC01(pool, f.cfg, f.job, NOW, pending);
+    const ready = await registrarContinuacaoC01(pool, f.cfg, f.job, new Date(+NOW + 61_000), deps);
+    expect(ready.status).toBe("enrolled");
+    expect(
+      (await registrarContinuacaoC01(pool, f.cfg, f.job, new Date(+NOW + 62_000), deps)).status,
+    ).toBe("replay");
+    const failed = await fixture();
+    await registrarContinuacaoC01(pool, failed.cfg, failed.job, NOW, pending);
+    await registrarContinuacaoC01(pool, failed.cfg, failed.job, new Date(+NOW + 61_000), {
+      ...deps,
+      semOferta: async () => ({
+        status: "indisponivel",
+        complete: false,
+        checkedAt: NOW.toISOString(),
+        reason: "projecao_falhou",
+      }),
+    });
+    expect(
+      (await registrarContinuacaoC01(pool, failed.cfg, failed.job, new Date(+NOW + 122_000), deps))
+        .status,
+    ).toBe("blocked");
+  });
+});
+
 describe("worker real da continuação com transporte fictício", () => {
   async function preparar(path: "L1" | "L2" = "L2") {
     const raw = path === "L2" ? await oferta() : await fixture();
@@ -697,6 +788,138 @@ describe("worker real da continuação com transporte fictício", () => {
     expect(fakes.semOferta).toHaveBeenCalled();
     const e = await f.db.loadEnrollmentById(f.org, f.enrollmentId);
     expect(e?.current_node_id).toBe("end");
+  });
+  it("sink segura coleta temporária sem canal e conserva o primeiro prazo", async () => {
+    const f = await preparar("L1");
+    fakes.semOferta.mockImplementation(async ({ now }) => temporaria(now));
+    await expect(f.run()).rejects.toBeInstanceOf(EsperaFinanceiraC01Error);
+    expect(f.sent).toHaveLength(0);
+    const events = (
+      await pool.query(
+        "select payload from followup_enrollment_events where organization_id=$1 and enrollment_id=$2 and event_type='c01_financeiro_em_coleta'",
+        [f.org, f.enrollmentId],
+      )
+    ).rows;
+    expect(events).toHaveLength(1);
+    expect(events[0].payload.deadlineAt).toBe(temporaria(f.at).collection.deadlineAt);
+  });
+  async function estacionar() {
+    const f = await preparar("L1");
+    fakes.semOferta.mockImplementation(async ({ now }) => temporaria(now));
+    let error: unknown;
+    try {
+      await f.run();
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(EsperaFinanceiraC01Error);
+    if (!(error instanceof EsperaFinanceiraC01Error)) throw error;
+    await disporJobFinanceiroC01(pool, f.job, error, f.at);
+    const row = (
+      await pool.query("select status,attempts,run_after from job_queue where id=$1", [f.job.id])
+    ).rows[0];
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(f.job.attempts - 1);
+    expect(row.run_after.toISOString()).toBe(new Date(+f.at + 60_000).toISOString());
+    expect((await f.db.loadEnrollmentById(f.org, f.enrollmentId))?.next_eval_at).toBe(
+      row.run_after.toISOString(),
+    );
+    expect(f.sent).toHaveLength(0);
+    return f;
+  }
+  async function retomar(f: Awaited<ReturnType<typeof estacionar>>, delay = 61_000) {
+    f.at.setTime(+f.at + delay);
+    const jobs = await claimJobs(pool, {
+      workerId: "continuidade-ficticia",
+      maxConcurrency: 30,
+      batchSize: 30,
+    });
+    const current = jobs.find((j) => j.id === f.job.id);
+    expect(current).toBeDefined();
+    Object.assign(f.job, current);
+  }
+  it("fila: coleta recuperada envia uma vez sem consumir tentativa ou IA", async () => {
+    const f = await estacionar();
+    await retomar(f);
+    fakes.semOferta.mockImplementation(async ({ now }) => ({
+      status: "nao_comprou_confirmado",
+      checkedAt: now.toISOString(),
+      complete: true,
+    }));
+    await f.run();
+    await completeJob(pool, f.job.id, "continuidade-ficticia", undefined, f.job.claim_acquired_at);
+    expect(f.sent).toHaveLength(1);
+    expect(fakes.ia).not.toHaveBeenCalled();
+    await expect(f.run()).rejects.toThrow();
+    expect(f.sent).toHaveLength(1);
+  });
+  it.each(["falhou", "expirada", "ambigua"])(
+    "fila: %s fica em revisão manual mesmo se a fonte recuperar depois",
+    async (mode) => {
+      const f = await estacionar();
+      await retomar(f);
+      fakes.semOferta.mockResolvedValue({
+        status: mode === "ambigua" ? "revisao" : "indisponivel",
+        checkedAt: f.at.toISOString(),
+        complete: false,
+        reason: `projecao_${mode}`,
+      });
+      let error: unknown;
+      try {
+        await f.run();
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(BloqueioFinanceiroC01Error);
+      if (!(error instanceof BloqueioFinanceiroC01Error)) throw error;
+      await disporJobFinanceiroC01(pool, f.job, error, f.at);
+      const e = await f.db.loadEnrollmentById(f.org, f.enrollmentId);
+      expect(e?.status).toBe("paused_manual");
+      expect(e?.next_eval_at).toBeNull();
+      expect(
+        (await pool.query("select status from job_queue where id=$1", [f.job.id])).rows[0].status,
+      ).toBe("failed");
+      fakes.semOferta.mockImplementation(async ({ now }) => ({
+        status: "nao_comprou_confirmado",
+        complete: true,
+        checkedAt: now.toISOString(),
+      }));
+      await expect(f.run()).rejects.toThrow();
+      expect(f.sent).toHaveLength(0);
+    },
+  );
+  it("fila: lease antigo não consegue estacionar uma aquisição nova", async () => {
+    const f = await estacionar(),
+      old = { ...f.job };
+    await retomar(f);
+    await expect(
+      disporJobFinanceiroC01(
+        pool,
+        old,
+        new EsperaFinanceiraC01Error(new Date(+f.at + 60_000).toISOString()),
+        f.at,
+      ),
+    ).rejects.toThrow("service_boundary_stale");
+    expect(
+      (await pool.query("select status from job_queue where id=$1", [f.job.id])).rows[0].status,
+    ).toBe("running");
+  });
+  it("fila: prazo original vencido impede nova geração e não envia retroativamente", async () => {
+    const f = await estacionar();
+    await retomar(f, 781_000);
+    fakes.semOferta.mockImplementation(async ({ now }) => temporaria(now));
+    let error: unknown;
+    try {
+      await f.run();
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(BloqueioFinanceiroC01Error);
+    if (!(error instanceof BloqueioFinanceiroC01Error)) throw error;
+    expect(error.message).toBe("prazo_da_coleta_financeira_esgotado");
+    await disporJobFinanceiroC01(pool, f.job, error, f.at);
+    expect((await f.db.loadEnrollmentById(f.org, f.enrollmentId))?.status).toBe("paused_manual");
+    expect(f.sent).toHaveLength(0);
   });
   it.each(["humano", "resposta"])("%s antes do consumo impede retomada L1", async (mode) => {
     const f = await preparar("L1");

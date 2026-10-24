@@ -6,6 +6,7 @@ import { conferirOrigemC01, hashDoConteudoDaOrigem, type ConfigOrigemC01 } from 
 import { politicaDoVideoValidaC01, videoDaOrigemValido } from "./c01-video-curso";
 import { lerFatosContinuacaoC01, type LeitorFinanceiroSemOfertaC01 } from "./c01-continuacao-runtime";
 import { resolverModeloOfertaC01 } from "./c01-acompanhamento-conteudo";
+import type { ColetaFinanceira } from "@/lib/leads/coleta-financeira";
 
 export interface EscopoFinanceiroC01 {
   db: Queryable;
@@ -21,6 +22,7 @@ export type LeitorFinanceiroC01 = (input: EscopoFinanceiroC01) => Promise<{
   checkedAt: string;
   complete: boolean;
   reason?: string;
+  collection?: ColetaFinanceira;
 }>;
 const iso = (v: unknown): string | null =>
   v instanceof Date ? v.toISOString() : typeof v === "string" ? v : null;
@@ -239,6 +241,9 @@ export async function lerFatosAcompanhamentoC01(
       !["active", "waiting_reply"].includes(row.status),
     callbackPending: protectedState?.callback === true || protectedState?.callback_queued === true,
     anotherSequence: protectedState?.another === true,
+    ...(paid.status === "indisponivel" && paid.reason === "projecao_em_coleta" && paid.collection
+      ? { financialCollection: paid.collection }
+      : {}),
     purchase:
       paid.status === "confirmado" || paid.status === "nao_comprou_confirmado"
         ? {

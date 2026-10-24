@@ -236,6 +236,22 @@
       "type": "service",
       "label": "followup-gatilho-presenca.v1 + fn_appointment_recover",
       "sublabel": "falta confirmada → inscrição ou impedimento terminal visível"
+    },
+    {
+      "id": "c01-fonte-financeira",
+      "lane": "borda",
+      "col": 7,
+      "type": "api",
+      "label": "Projeção financeira C01 (opt-in)",
+      "sublabel": "HTTPS autenticado · escopo/identidade · geração/progresso"
+    },
+    {
+      "id": "c01-espera-financeira",
+      "lane": "regra",
+      "col": 7,
+      "type": "service",
+      "label": "Espera financeira limitada",
+      "sublabel": "60 s · prazo inicial ≤ 900 s · falha mantém revisão"
     }
   ],
   "edges": [
@@ -484,6 +500,30 @@
       "from": "agenda-guarda",
       "to": "agenda-presenca",
       "label": "Radar/Central abrem o compromisso que explica a proteção"
+    },
+    {
+      "id": "e42",
+      "from": "c01-fonte-financeira",
+      "to": "c01-espera-financeira",
+      "label": "coleta viva não prova ausência de compra"
+    },
+    {
+      "id": "e43",
+      "from": "c01-espera-financeira",
+      "to": "engine",
+      "label": "defer limitado; janela/âncora/orçamento preservados"
+    },
+    {
+      "id": "e44",
+      "from": "c01-espera-financeira",
+      "to": "eventos",
+      "label": "primeiro prazo idempotente por inscrição/passo"
+    },
+    {
+      "id": "e45",
+      "from": "c01-espera-financeira",
+      "to": "bridge",
+      "label": "mesma transação/lease na fila; sem avanço nem consumo de tentativa"
     }
   ],
   "cards": [
@@ -513,6 +553,15 @@
         "É endereço que se manda para um colega (\"olha o que aconteceu com este lead\") e sobrevive ao F5 no meio de uma intervenção.",
         "Como o segmento é `[id]`, `tests/unit/navegacao-completude.test.ts` não cobra porta de menu: tela de detalhe se alcança pela lista, e a lista é a aba Fila.",
         "A promessa (`cron_jobs`) NÃO ganha link: ela é uma linha só — um horário e um motivo — e um link para uma tela vazia ensinaria que o dossiê às vezes não funciona."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Coleta financeira C01: espera não é liberação",
+      "items": [
+        "O primeiro prazo não renova ao trocar geração. Falha, expiração ou ambiguidade mantêm revisão; recuperar a fonte não reabre paused_manual.",
+        "Antes da matrícula, o prazo fica no job concluído. Depois, fica nos eventos da inscrição. Não há nova tela dedicada nem mudança de texto comercial.",
+        "Candidata OFF. Instalação do observador, configuração e ativação continuam separadas; ver docs/c01/espera-financeira-2410.md."
       ]
     }
   ]

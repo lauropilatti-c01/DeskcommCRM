@@ -342,7 +342,7 @@ function mapEnrollmentRow(row: Record<string, unknown>): EnrollmentRow {
 }
 
 /** `TurnBridgeAdminClient` sobre `pg.Pool` — produção do worker 24/7. */
-export function createPgAdminClient(pool: pg.Pool): TurnBridgeAdminClient {
+export function createPgAdminClient(pool: pg.Pool | pg.PoolClient): TurnBridgeAdminClient {
   const revisions=new Map<string,number>();
   return {
     async assertFollowupJob(orgId,jobId,enrollmentId,nodeId,claim){
