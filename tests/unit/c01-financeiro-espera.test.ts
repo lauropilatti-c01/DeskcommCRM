@@ -52,6 +52,14 @@ describe("espera financeira limitada", () => {
       falhaEsgotaAsTentativas(job, new EsperaFinanceiraC01Error(collection.deadlineAt), +now),
     ).toBe(false);
   });
+  it("oferta futura espera o horário original antes de abrir a espera financeira", () => {
+    const facts = f();
+    facts.anchor = { kind: "oferta", at: "2026-10-24T17:00:00Z", delivered: true };
+    facts.continuation = undefined;
+    expect(avaliarAcompanhamento({ ...cfg, kind: "oferta" }, facts, now)).toEqual({
+      kind: "defer", reason: "ainda_nao_venceu", until: "2026-10-24T19:00:00.000Z",
+    });
+  });
   it("coleta viva adia 60 s sem aprovar envio", () =>
     expect(avaliarAcompanhamento(cfg, f(), now)).toEqual({
       kind: "defer",

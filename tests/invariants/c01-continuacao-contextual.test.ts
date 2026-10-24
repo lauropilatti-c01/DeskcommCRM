@@ -256,6 +256,76 @@ async function fixture() {
     agentVersion,
   };
 }
+describe("abertura da espera financeira no horário elegível", () => {
+  async function cronograma() {
+    const f = await fixture(), version = randomUUID(), enrollmentId = randomUUID();
+    const policy = { version: 1 as const, kind: "cronograma" as const,
+      activated_at: "2026-10-24T10:00:00Z",
+      cronograma_timing: { minimum_wait_minutes: 120, window_margin_minutes: 15 } };
+    const graph = { ...f.graph, settings: { c01_acompanhamento: policy } };
+    await pool.query("update conversations set last_inbound_at='2026-10-24T11:00:00Z' where id=$1", [f.conversation]);
+    await pool.query("update crm_leads set custom_fields=$2 where id=$1", [f.lead, { produto_chave: "ficticio" }]);
+    const message = (await pool.query(
+      "update messages set status='delivered',sent_at='2026-10-24T11:00:00Z',delivered_at='2026-10-24T11:00:00Z' where id=$1 returning *", [f.final])).rows[0];
+    await pool.query("insert into followup_flow_versions(id,organization_id,graph) values($1,$2,$3)", [version, f.org, graph]);
+    await pool.query("update followup_flow_pointers set active_version_id=$1 where id=$2", [version, f.pointer]);
+    await pool.query("insert into followup_enrollments(id,organization_id,pointer_id,version_id,contact_id,conversation_id,current_node_id,status,steps_taken) values($1,$2,$3,$4,$5,$6,'touch','active',2)",
+      [enrollmentId,f.org,f.pointer,version,f.contact,f.conversation]);
+    const proof = assinarOrigemC01(f.cfg, { kind: "cronograma", organizationId: f.org,
+      contactId: f.contact, conversationId: f.conversation, leadId: f.lead, productKey: "ficticio",
+      messageId: f.final, createdAt: message.sent_at.toISOString(), contentHash: hashDoConteudoDaOrigem(message) });
+    await pool.query("insert into followup_enrollment_events(organization_id,enrollment_id,node_id,event_type,payload,idempotency_key) values($1,$2,'start','c01_origem_entregue',$3,'origin')", [f.org,enrollmentId,proof]);
+    vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(f.cfg));
+    const scope = { organizationId: f.org, contactId: f.contact, enrollmentId };
+    const events = async () => (await pool.query("select payload from followup_enrollment_events where organization_id=$1 and enrollment_id=$2 and event_type='c01_financeiro_em_coleta'", [f.org,enrollmentId])).rows;
+    const decide = (at: string) => decidirAcompanhamentoC01(policy,scope,new Date(at));
+    return { ...f,policy,scope,events,decide,enrollmentId };
+  }
+  it("2h sem evento financeiro; no alvo a fonte pronta permite o envio", async () => {
+    const f = await cronograma();
+    fakes.financeiro.mockImplementation(async ({now}) => temporaria(now));
+    expect(await f.decide("2026-10-24T13:00:00Z")).toEqual({
+      kind:"defer",reason:"ainda_nao_venceu",until:"2026-10-24T23:59:00.000Z",
+    });
+    expect(await f.events()).toHaveLength(0);
+    fakes.financeiro.mockImplementation(async ({now}) => ({ status:"nao_comprou_confirmado",complete:true,checkedAt:now.toISOString() }));
+    expect(await f.decide("2026-10-24T23:59:00Z")).toEqual({ kind:"send",touch:1,transport:"text" });
+    expect(await f.events()).toHaveLength(0);
+  });
+  it("alvo abre uma espera; geração e falha não renovam; pronta envia antes do prazo e vencida bloqueia", async () => {
+    const f = await cronograma();
+    fakes.financeiro.mockImplementation(async ({now}) => temporaria(now));
+    await f.decide("2026-10-24T13:00:00Z");
+    expect(await f.events()).toHaveLength(0);
+    expect(await f.decide("2026-10-24T23:59:00Z")).toEqual({ kind:"defer",reason:"projecao_em_coleta",until:"2026-10-25T00:00:00.000Z" });
+    const original=await f.events();
+    expect(original).toHaveLength(1);
+    expect(original[0].payload.deadlineAt).toBe("2026-10-25T00:00:00.000Z");
+    fakes.financeiro.mockImplementation(async ({now}) => {
+      const value=temporaria(now,now.toISOString());value.collection.generationId=randomUUID();return value;
+    });
+    expect((await f.decide("2026-10-24T23:59:10Z")).kind).toBe("defer");
+    expect(await f.events()).toEqual(original);
+    fakes.financeiro.mockResolvedValue({ status:"indisponivel",reason:"projecao_falhou",complete:false,checkedAt:"2026-10-24T23:59:10Z" });
+    expect((await f.decide("2026-10-24T23:59:20Z")).kind).toBe("blocked");
+    expect(await f.events()).toEqual(original);
+    // Não aplicamos a pausa do motor neste controle do prazo; ela não seria retomada automaticamente.
+    fakes.financeiro.mockImplementation(async ({now}) => ({ status:"nao_comprou_confirmado",complete:true,checkedAt:now.toISOString() }));
+    expect(await f.decide("2026-10-24T23:59:30Z")).toEqual({ kind:"send",touch:1,transport:"text" });
+    expect(await f.decide("2026-10-25T00:00:00Z")).toEqual({ kind:"blocked",reason:"prazo_da_coleta_financeira_esgotado" });
+    expect(await f.events()).toEqual(original);
+  });
+  it.each(["compra", "humano", "recusa"])("%s prevalece no alvo sem abrir espera", async (veto) => {
+    const f=await cronograma();
+    fakes.financeiro.mockImplementation(async ({now}) => veto==="compra"
+      ? {status:"confirmado",complete:true,checkedAt:now.toISOString()}:temporaria(now));
+    if(veto==="humano")await pool.query("update contacts set force_human=true where id=$1",[f.contact]);
+    if(veto==="recusa")await pool.query("update contacts set ai_opt_out=true where id=$1",[f.contact]);
+    expect((await f.decide("2026-10-24T23:59:00Z")).kind).toBe("cancel");
+    expect(await f.events()).toHaveLength(0);
+  });
+});
+
 async function oferta() {
   const f = await fixture(),
     pointer = randomUUID(),

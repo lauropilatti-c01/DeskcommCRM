@@ -2,6 +2,7 @@ import type { Queryable } from "@/lib/agent-engine/queue/queue";
 import { z } from "zod";
 import { coletaFinanceiraViva } from "@/lib/leads/coleta-financeira";
 import {
+  avaliarAcompanhamento,
   limiteDaColetaC01,
   type ConfigAcompanhamento,
   type FatosAcompanhamento,
@@ -41,7 +42,11 @@ export async function vincularEsperaFinanceiraC01(
       startedAt: collection.startedAt,
       deadlineAt: limiteDaColetaC01(config, facts, collection, now),
     };
-    await db.query(
+    // Acordar o nó não significa que seu horário de envio chegou (cronograma:
+    // despertar em 2 h, alvo até 23 h). Só uma espera financeira efetiva abre
+    // prazo. A leitura abaixo continua conservando qualquer prazo já gravado.
+    const decision = avaliarAcompanhamento(config, { ...facts, financialWait: proof }, now);
+    if (decision.kind === "defer" && decision.reason === "projecao_em_coleta") await db.query(
       `insert into followup_enrollment_events(organization_id,enrollment_id,node_id,event_type,payload,idempotency_key)
       select organization_id,id,current_node_id,'c01_financeiro_em_coleta',$4,$5 from followup_enrollments
       where organization_id=$1 and contact_id=$2 and id=$3 and status in ('active','waiting_reply') and current_node_id=$6 and steps_taken=$7
