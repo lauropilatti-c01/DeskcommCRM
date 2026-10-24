@@ -1,4 +1,4 @@
-import { prepararRetornoComercialC01, JANELA_RETORNO_C01 } from "@/lib/followup/c01-retorno";
+import { prepararRetornoComercialC01, JANELA_RETORNO_C01, RecusaRetornoC01 } from "@/lib/followup/c01-retorno";
 /**
  * Tool schedule_followup (F3-02) — o agente agenda o PRÓPRIO retorno ao lead: o
  * motor da continuidade (dor nº 4 do dono). Valida o que o modelo prometeu e cria
@@ -57,7 +57,7 @@ export type ScheduleFollowupResult =
   | {
       ok: false;
       error: {
-        code: 'invalid_payload' | 'promised_at_in_past' | 'promised_at_out_of_window' | 'already_pending' | 'pending_changed' | 'outside_send_window';
+        code: 'invalid_payload' | 'promised_at_in_past' | 'promised_at_out_of_window' | 'already_pending' | 'pending_changed' | 'outside_send_window' | 'callback_not_confirmed';
         message: string;
       };
     };
@@ -100,9 +100,20 @@ export async function applyScheduleFollowup(
 
   // Um relógio só para decidir E para ensinar — ver o ⚠️ das mensagens abaixo.
   const agora = cfg.clock();
-  const comercial = cfg.c01Callback ? await prepararRetornoComercialC01(db, {
-    organizationId: ids.tenantId, contactId: ids.leadId, sourceJobId: ids.sourceJobId, agentId: ids.agentId, promisedAt: input.promised_at, consent: input,
-  }) : undefined;
+  let comercial: Awaited<ReturnType<typeof prepararRetornoComercialC01>> | undefined;
+  if (cfg.c01Callback) {
+    try {
+      comercial = await prepararRetornoComercialC01(db, {
+        organizationId: ids.tenantId, contactId: ids.leadId, sourceJobId: ids.sourceJobId, agentId: ids.agentId, promisedAt: input.promised_at, consent: input,
+      });
+    } catch (err) {
+      // Recusa de política é resposta, não falha: refazer o turno não muda o que a pessoa disse.
+      if (!(err instanceof RecusaRetornoC01)) throw err;
+      return { ok: false, error: { code: 'callback_not_confirmed', message:
+        `nenhum retorno foi criado (${err.message}). Não prometa retorno nem horário; responda ao lead sem agendar ` +
+        `e, se for o caso, diga que ela pode chamar aqui quando puder.` } };
+    }
+  }
   const horario = cfg.c01Callback ? JANELA_RETORNO_C01 : cfg.horario;
   const resultado = await agendaRetorno(
     criaRetornoDbPg(db),
@@ -213,7 +224,7 @@ export async function applyScheduleFollowup(
     cronJobId: resultado.retorno.id,
     promisedAt: new Date(resultado.retorno.quando),
     message:
-      `retorno ${resultado.substituiu ? "reagendado" : "agendado"} para ${input.promised_at}. Encerre o turno agora; ` +
-      `o sistema fará o follow-up com o lead no horário combinado.`,
+      `retorno ${resultado.substituiu ? "reagendado" : "agendado"} para ${input.promised_at}. Agora confirme ao lead, numa resposta curta, ` +
+      `o dia e a hora combinados e depois encerre o turno; o sistema fará o follow-up com o lead no horário combinado.`,
   };
 }
