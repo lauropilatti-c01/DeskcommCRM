@@ -1,11 +1,17 @@
 /** Leitores GET das fontes financeiras. Nenhum corpo recebido do CRM vira prova. */
 import { createHash } from "node:crypto";
 import { CompraRecusada, type ProvaFinanceira } from "./compra-verificada";
+import {
+  asaasSettlementSchema,
+  lerLiquidacaoAsaas,
+  type ConfiguracaoLiquidacaoAsaas,
+} from "./liquidacao-boleto-asaas";
 export interface FonteConfig {
   provider: "guru" | "boleto";
   sourceAccountId: string;
   baseUrl: string;
   apiToken: string;
+  asaasSettlement?: ConfiguracaoLiquidacaoAsaas;
 }
 export interface RegistroFinanceiro {
   transactionId: string;
@@ -17,6 +23,10 @@ export interface RegistroFinanceiro {
   status: "paid" | "pending" | "review";
   proof?: ProvaFinanceira;
   reviewReason?: "comprovante_financeiro_incompleto";
+}
+interface IdentidadeConsultada {
+  phone: string | null;
+  email: string | null;
 }
 const rec = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -65,6 +75,8 @@ function email(v: unknown): string | null {
 }
 const BOLETO_SELECT =
   "id,org_id,status,total_value,created_at,customers(id,org_id,phone,email,anonymized),products(id,org_id),payments(id,org_id,status,amount_paid,paid_at,refunded_at,refund_amount,marked_paid_manually_at)";
+const BOLETO_ASAAS_SELECT =
+  "id,org_id,status,total_value,created_at,customers(id,org_id,phone,email,anonymized,external_customer_id_asaas),products(id,org_id),payments(id,org_id,order_id,asaas_payment_id,status,amount,amount_paid,paid_at,refunded_at,refund_amount,refund_lifecycle,marked_paid_manually_at)";
 export function criarFonteFinanceira(
   cfg: FonteConfig,
   deps: { fetch?: typeof fetch; now?: () => Date } = {},
@@ -72,6 +84,12 @@ export function criarFonteFinanceira(
   const fetcher = deps.fetch ?? fetch,
     now = deps.now ?? (() => new Date());
   const base = new URL(cfg.baseUrl);
+  if (
+    cfg.asaasSettlement &&
+    (cfg.provider !== "boleto" || !asaasSettlementSchema.safeParse(cfg.asaasSettlement).success)
+  )
+    erro("financial_configuration_invalid");
+  const boletoSelect = cfg.asaasSettlement?.enabled ? BOLETO_ASAAS_SELECT : BOLETO_SELECT;
   if (
     base.protocol !== "https:" ||
     base.username ||
@@ -147,7 +165,11 @@ export function criarFonteFinanceira(
     }
     return erro("financial_source_unavailable");
   }
-  function decode(raw: unknown): RegistroFinanceiro {
+  async function decode(
+    raw: unknown,
+    signal: AbortSignal,
+    identity?: IdentidadeConsultada,
+  ): Promise<RegistroFinanceiro> {
     const row = rec(raw),
       id = str(row.id);
     let p: Record<string, unknown>,
@@ -160,6 +182,7 @@ export function criarFonteFinanceira(
       status: RegistroFinanceiro["status"];
     let phone: string | null, offerId: string | null;
     let evidenceIncomplete = false;
+    let providerEvidence: unknown;
     if (cfg.provider === "guru") {
       p = rec(row.product);
       c = rec(row.contact);
@@ -211,47 +234,71 @@ export function criarFonteFinanceira(
       totalCents = money(row.total_value);
       offerId = null;
       phone = telefone(c.phone, "55");
-      const payments = row.payments;
-      if (!Array.isArray(payments) || payments.length >= 1000) erro("financial_source_incomplete");
-      const ids = new Set<string>();
-      const times: string[] = [];
-      let review = false;
-      for (const item of payments) {
-        const pay = rec(item);
-        const pid = str(pay.id);
-        if (ids.has(pid) || pay.org_id !== cfg.sourceAccountId) erro("financial_evidence_invalid");
-        ids.add(pid);
-        if (
-          pay.refunded_at ||
-          Number(pay.refund_amount) > 0 ||
-          pay.marked_paid_manually_at ||
-          ["refunded", "chargeback"].includes(String(pay.status))
-        )
-          review = true;
-        if (pay.status === "paid") {
-          try {
-            const amount = money(pay.amount_paid);
-            const date = iso(pay.paid_at);
-            paidCents += amount;
-            times.push(date);
-          } catch (error) {
-            if (!(error instanceof CompraRecusada)) throw error;
-            // Identidade e produto continuam conhecidos. A ausência do recibo
-            // bloqueia esta pessoa, sem virar ausência nem derrubar outras.
+      if (cfg.asaasSettlement?.enabled) {
+        // A guarda ainda vê todos os registros e os conflitos de identidade.
+        // Cobranças de outra pessoa não consomem o prazo da consulta atual e
+        // jamais recebem um estado negativo fabricado por não terem sido lidas.
+        const relevant =
+          !identity ||
+          (!!identity.phone && identity.phone === phone) ||
+          (!!identity.email && identity.email === email(c.email));
+        const settlement = relevant
+          ? await lerLiquidacaoAsaas(row, cfg.asaasSettlement, {
+              fetch: fetcher,
+              now: now(),
+              signal,
+            })
+          : { status: "review" as const, paidCents: 0, paidAt: null, evidence: undefined };
+        status = settlement.status;
+        paidCents = settlement.paidCents;
+        paidAt = settlement.paidAt;
+        providerEvidence = settlement.evidence;
+        evidenceIncomplete = status === "review";
+      } else {
+        const payments = row.payments;
+        if (!Array.isArray(payments) || payments.length >= 1000)
+          erro("financial_source_incomplete");
+        const ids = new Set<string>();
+        const times: string[] = [];
+        let review = false;
+        for (const item of payments) {
+          const pay = rec(item);
+          const pid = str(pay.id);
+          if (ids.has(pid) || pay.org_id !== cfg.sourceAccountId)
+            erro("financial_evidence_invalid");
+          ids.add(pid);
+          if (
+            pay.refunded_at ||
+            Number(pay.refund_amount) > 0 ||
+            pay.marked_paid_manually_at ||
+            ["refunded", "chargeback"].includes(String(pay.status))
+          )
             review = true;
-            evidenceIncomplete = true;
+          if (pay.status === "paid") {
+            try {
+              const amount = money(pay.amount_paid);
+              const date = iso(pay.paid_at);
+              paidCents += amount;
+              times.push(date);
+            } catch (error) {
+              if (!(error instanceof CompraRecusada)) throw error;
+              // Identidade e produto continuam conhecidos. A ausência do recibo
+              // bloqueia esta pessoa, sem virar ausência nem derrubar outras.
+              review = true;
+              evidenceIncomplete = true;
+            }
           }
         }
+        status =
+          review || ["cancelled", "delinquent", "refunded"].includes(String(row.status))
+            ? "review"
+            : paidCents === totalCents && paidCents > 0
+              ? "paid"
+              : paidCents > 0
+                ? "review"
+                : "pending";
+        paidAt = times.sort().at(-1) ?? null;
       }
-      status =
-        review || ["cancelled", "delinquent", "refunded"].includes(String(row.status))
-          ? "review"
-          : paidCents === totalCents && paidCents > 0
-            ? "paid"
-            : paidCents > 0
-              ? "review"
-              : "pending";
-      paidAt = times.sort().at(-1) ?? null;
     }
     const result: RegistroFinanceiro = {
       transactionId: id,
@@ -279,6 +326,7 @@ export function criarFonteFinanceira(
         offerId,
         status: "paid",
         paidAt,
+        ...(providerEvidence ? { paidAtPrecision: "day" as const } : {}),
         orderedAt,
         observedAt: now().toISOString(),
         paidCents,
@@ -286,7 +334,9 @@ export function criarFonteFinanceira(
         currency,
         phone,
         email: result.email,
-        evidenceHash: createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
+        evidenceHash: createHash("sha256")
+          .update(JSON.stringify(providerEvidence ? { raw, providerEvidence } : raw))
+          .digest("hex"),
       };
     }
     return result;
@@ -296,7 +346,7 @@ export function criarFonteFinanceira(
     const response = await get(
       cfg.provider === "guru"
         ? `transactions/${encodeURIComponent(id)}`
-        : `rest/v1/orders?select=${BOLETO_SELECT}&id=eq.${encodeURIComponent(id)}&org_id=eq.${encodeURIComponent(cfg.sourceAccountId)}&limit=2`,
+        : `rest/v1/orders?select=${boletoSelect}&id=eq.${encodeURIComponent(id)}&org_id=eq.${encodeURIComponent(cfg.sourceAccountId)}&limit=2`,
       signal,
     );
     const raw = cfg.provider === "guru" ? (rec(response).data ?? response) : response;
@@ -305,11 +355,16 @@ export function criarFonteFinanceira(
         ? raw[0]
         : erro("financial_evidence_invalid")
       : raw;
-    const result = decode(one);
+    const result = await decode(one, signal);
     if (result.transactionId !== id) erro();
     return result;
   }
-  async function scan(from: Date, to: Date, signal: AbortSignal): Promise<RegistroFinanceiro[]> {
+  async function scan(
+    from: Date,
+    to: Date,
+    signal: AbortSignal,
+    identity?: IdentidadeConsultada,
+  ): Promise<RegistroFinanceiro[]> {
     if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from > to)
       erro("financial_invalid_period");
     const found = new Map<string, RegistroFinanceiro>();
@@ -358,7 +413,7 @@ export function criarFonteFinanceira(
           return;
         }
         for (const raw of rows) {
-          const r = decode(raw);
+          const r = await decode(raw, signal, identity);
           if (
             found.has(r.transactionId) &&
             (JSON.stringify({ ...found.get(r.transactionId), proof: undefined }) !==
@@ -380,11 +435,11 @@ export function criarFonteFinanceira(
     } else {
       for (let offset = 0; ; offset += 500) {
         const rows = await limited(
-          `rest/v1/orders?select=${BOLETO_SELECT}&org_id=eq.${encodeURIComponent(cfg.sourceAccountId)}&created_at=lte.${encodeURIComponent(to.toISOString())}&order=id.asc&limit=500&offset=${offset}`,
+          `rest/v1/orders?select=${boletoSelect}&org_id=eq.${encodeURIComponent(cfg.sourceAccountId)}&created_at=lte.${encodeURIComponent(to.toISOString())}&order=id.asc&limit=500&offset=${offset}`,
         );
         if (!Array.isArray(rows)) erro("financial_source_incomplete");
         for (const raw of rows) {
-          const r = decode(raw);
+          const r = await decode(raw, signal, identity);
           if (found.has(r.transactionId)) erro("financial_source_inconsistent");
           found.set(r.transactionId, r);
         }

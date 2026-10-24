@@ -12,6 +12,7 @@ import { comTravaDeEfeito } from "@/lib/agent-engine/db/trava-de-efeito";
 import { hashDoCorpo } from "@/lib/api/idempotency";
 import { recusaDeMotivoDoGanho, validaCamposExigidos } from "@/lib/leads/campos-exigidos";
 import { campoDeConfirmacaoFinanceira } from "@/lib/leads/confirmacao-financeira";
+import { intervaloDoPagamento } from "./periodo-financeiro";
 
 const provaSchema = z
   .object({
@@ -20,7 +21,8 @@ const provaSchema = z
     productId: z.string().min(1),
     offerId: z.string().min(1).nullable(),
     status: z.literal("paid"),
-    paidAt: z.iso.datetime(),
+    paidAt: z.union([z.iso.datetime(), z.iso.date()]),
+    paidAtPrecision: z.enum(["instant", "day"]).optional(),
     orderedAt: z.iso.datetime(),
     observedAt: z.iso.datetime(),
     paidCents: z.number().int().positive().safe(),
@@ -34,7 +36,8 @@ const provaSchema = z
     /** Hash do recibo de origem relido, nunca segredo ou corpo com dados pessoais. */
     evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
   })
-  .strict();
+  .strict()
+  .refine((p) => intervaloDoPagamento(p.paidAt, p.paidAtPrecision) !== null);
 export type ProvaFinanceira = z.infer<typeof provaSchema>;
 
 export interface IntegracaoFinanceira {
@@ -166,15 +169,16 @@ export async function registrarCompraVerificada(
       const proof = parsed.data;
       const now = (deps.now ?? (() => new Date()))();
       const observed = Date.parse(proof.observedAt),
-        paid = Date.parse(proof.paidAt),
+        paid = intervaloDoPagamento(proof.paidAt, proof.paidAtPrecision)!,
         ordered = Date.parse(proof.orderedAt);
       if (
         proof.transactionId !== request.transactionId ||
         proof.sourceAccountId !== cfg.sourceAccountId ||
         now.getTime() - observed > 60_000 ||
         observed > now.getTime() + 5_000 ||
-        paid > observed ||
-        ordered > paid ||
+        (proof.paidAtPrecision === "day" && cfg.provider !== "boleto") ||
+        paid.latest > observed ||
+        ordered > paid.earliest ||
         proof.paidCents !== proof.totalCents
       )
         recusar("financial_evidence_invalid");
@@ -253,6 +257,7 @@ export async function registrarCompraVerificada(
           crmProduct: produto.crmProductKey,
           crmOffer: produto.crmOfferKey,
           paidAt: proof.paidAt,
+          ...(proof.paidAtPrecision === "day" ? { paidAtPrecision: "day" } : {}),
           orderedAt: proof.orderedAt,
           paidCents: proof.paidCents,
           totalCents: proof.totalCents,

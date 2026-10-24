@@ -213,6 +213,48 @@ async function untouched(f: F) {
 }
 
 describe("C01 compra verificada — PostgreSQL real, fonte sintética e integração desligada por padrão", () => {
+  it("boleto com data suficiente preserva dia e precisão no recibo e no replay", async () => {
+    const f = await fixture();
+    f.integration.provider = "boleto";
+    Object.assign(f.proof, {
+      paidAt: "2026-10-20",
+      paidAtPrecision: "day",
+      orderedAt: "2026-10-18T12:00:00Z",
+    });
+    const first = await registrarCompraVerificada(f.deps, f.request);
+    expect(first.status).toBe("applied");
+    const receipt = (
+      await pool.query(
+        "select payload->'financial_receipt'->'binding' as binding from orders where id=$1",
+        [first.orderId],
+      )
+    ).rows[0].binding;
+    expect(receipt).toMatchObject({ paidAt: "2026-10-20", paidAtPrecision: "day" });
+    expect(await registrarCompraVerificada(f.deps, f.request)).toMatchObject({
+      status: "replay",
+      orderId: first.orderId,
+    });
+  });
+  it.each(["mesmo-dia", "futuro", "sem-precisao", "guru"])(
+    "data insuficiente ou incompatível (%s) não escreve nem cancela",
+    async (mode) => {
+      const f = await fixture();
+      f.integration.provider = "boleto";
+      Object.assign(f.proof, {
+        paidAt: "2026-10-20",
+        paidAtPrecision: "day",
+        orderedAt: "2026-10-18T12:00:00Z",
+      });
+      if (mode === "mesmo-dia") f.proof.orderedAt = "2026-10-20T12:00:00Z";
+      if (mode === "futuro") f.proof.paidAt = "2026-10-23";
+      if (mode === "sem-precisao") delete f.proof.paidAtPrecision;
+      if (mode === "guru") f.integration.provider = "guru";
+      await expect(registrarCompraVerificada(f.deps, f.request)).rejects.toMatchObject({
+        code: "financial_evidence_invalid",
+      });
+      await untouched(f);
+    },
+  );
   it("desligada, credencial errada e falta de adaptador recusam antes da fonte", async () => {
     const f = await fixture();
     await expect(
