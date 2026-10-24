@@ -1,6 +1,6 @@
 # Continuação contextual e conteúdo de acompanhamentos — candidata OFF
 
-Estado: implementado na branch de trabalho, com provas locais isoladas. Sem instalação, publicação de fluxo, inscrição de pessoa real ou envio. Textos e políticas comerciais continuam candidatos. Não muda DDL, prompt ou skills da Marina. A revisão independente e o portão da árvore integrada são passos posteriores.
+Estado: implementado na branch de trabalho, com provas locais isoladas. Sem instalação, publicação de fluxo, inscrição de pessoa real ou envio. Textos e políticas comerciais continuam candidatos. Não muda DDL, prompt ou skills da Marina. A revisão independente aprovou a integração desligada. O portão da árvore integrada e a implantação continuam sendo passos posteriores.
 
 ## O que o servidor faz
 
@@ -75,4 +75,4 @@ CONFERENCIA_KIT_RELEASE=v1.86.0 pnpm test:db tests/invariants/c01-continuacao-co
 pnpm typecheck
 ```
 
-Evidências privadas: `~/workspace/dados/deskcomm-c01/continuacao-contextual-2410/`. Os nomes e resultados das rodadas ficam no relatório privado; a ficha não transforma o artefato em operação ativa.
+Evidências privadas: `~/workspace/dados/deskcomm-c01/continuacao-contextual-2410/`. A revisão independente repetiu 68 unitários e 15 SQL, encontrou a ausência de proteção de conteúdo no L2 sem modelos e confirmou a correção: 4 testes da fronteira e somente o worker SQL L2 foram repetidos. O vínculo é lido da inscrição persistida e oferta legada sem vínculo permanece no caminho anterior. Typecheck e lint do ajuste passaram. Os nomes e resultados das rodadas ficam no relatório privado; a ficha não transforma o artefato em operação ativa.

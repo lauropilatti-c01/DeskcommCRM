@@ -593,9 +593,16 @@ describe("worker real da continuação com transporte fictício", () => {
     const transport = {
       send: async (input: ChannelSendInput) => {
         const e = await db.loadEnrollmentById(f.org, enrollmentId);
+        const link = (
+          await pool.query(
+            "select id from followup_enrollment_events where organization_id=$1 and enrollment_id=$2 and event_type='c01_continuacao_entregue'",
+            [f.org, enrollmentId],
+          )
+        ).rows[0];
         const supa = criarDubleDoHandler({
           conversation: { id: f.conversation, organization_id: f.org, contact_id: f.contact },
           tabelasDeLeitura: {
+            followup_enrollment_events: link ?? null,
             followup_enrollments: { version_id: f.offerVersion, contact_id: f.contact },
             followup_flow_versions: { graph: f.graph },
           },
@@ -632,7 +639,10 @@ describe("worker real da continuação com transporte fictício", () => {
       llmCfg: {},
       sleep: async () => {},
       channel: () => transport,
-      completeFollowupTurn: async (_pool: pg.Pool, input: Parameters<NonNullable<FollowupTurnDeps["completeFollowupTurn"]>>[1]) =>
+      completeFollowupTurn: async (
+        _pool: pg.Pool,
+        input: Parameters<NonNullable<FollowupTurnDeps["completeFollowupTurn"]>>[1],
+      ) =>
         completeTurnForEnrollment(
           db,
           input.organizationId,
