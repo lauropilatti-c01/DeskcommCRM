@@ -114,3 +114,24 @@ casos SQL dirigidos e 11 casos dos três arquivos unitários afetados passaram;
 as fontes e o canal são fictícios. O primeiro vermelho SQL comprovou o resgate
 indevido; dois outros casos tiveram o nome de sessão fictícia corrigido para
 respeitar o índice único real. Nenhuma asserção foi retirada.
+
+
+### Abertura somente quando existe espera financeira
+
+O cronograma pode acordar após duas horas só para calcular o alvo até 23 h.
+Esse despertar não abre o prazo da coleta: o helper consulta a mesma política
+com o prazo candidato e só grava `c01_financeiro_em_coleta` quando a decisão é
+realmente `projecao_em_coleta`. Oferta ainda antes do seu toque também conserva
+o horário original. A ordem das conferências de recibos e compra fora da coleta
+permanece igual.
+
+Qualquer prazo já persistido continua sendo lido, inclusive se a fonte mudar de
+geração, falhar ou voltar pronta. Nada o apaga ou renova. Compra, atendimento
+humano e recusa continuam prioritários. A correção não muda os 900 segundos da
+fonte, o horário 08h–21h, a janela de 23/24 h ou a retomada manual após falha.
+
+Regressão no arquivo SQL de continuidade: runtime real + baseline descartável,
+fonte fictícia, duas horas sem evento; alvo com negativa pronta elegível;
+abertura no alvo, refresh e falha sem mudança do prazo; pronta antes do limite,
+expiração e os três vetos. Não representa envio pelo canal nem teste de IA.
+Provas e revisão ficam na ficha privada; instalação e ativação permanecem separadas.

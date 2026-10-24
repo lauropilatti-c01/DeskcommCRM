@@ -148,6 +148,15 @@ function adiar(at: number, reason: string): DecisaoAcompanhamento {
   return { kind: "defer", reason, until: new Date(at).toISOString() };
 }
 
+/** Mesmo relógio antes da espera financeira e depois da conferência dos recibos. */
+function esperaDoToqueDaOferta(f: FatosAcompanhamento, now: Date): DecisaoAcompanhamento | null {
+  const following = [2, 24, 72, 168][f.touches.length + 1];
+  if (f.continuation && following !== undefined && +now >= Date.parse(f.anchor.at) + following * H)
+    return { kind: "blocked", reason: "orcamento_vencido_sem_intervalo" };
+  const due = Date.parse(f.anchor.at) + [2, 24, 72, 168][f.touches.length]! * H;
+  return +now < due ? adiar(janelaPermitida(due), "ainda_nao_venceu") : null;
+}
+
 /** Congelado na primeira espera. Nunca muda a âncora ou o orçamento do toque. */
 export function limiteDaColetaC01(
   config: ConfigAcompanhamento,
@@ -272,6 +281,10 @@ export function avaliarAcompanhamento(
   const permitido = janelaPermitida(+now);
   if (permitido !== +now) return adiar(permitido, "fora_do_horario");
   if (f.financialCollection) {
+    if (config.kind === "oferta" && f.touches.length < 4) {
+      const timing = esperaDoToqueDaOferta(f, now);
+      if (timing) return timing;
+    }
     const live = coletaFinanceiraViva(f.financialCollection, now),
       wait = f.financialWait;
     if (
@@ -351,11 +364,8 @@ export function avaliarAcompanhamento(
     if (+now - Date.parse(f.lastInboundAt) >= 24 * H) return bloqueio("janela_do_video_fechada");
     return { kind: "send", touch: 1, transport: "text" };
   }
-  const following = [2, 24, 72, 168][touches.length + 1];
-  if (f.continuation && following !== undefined && +now >= Date.parse(f.anchor.at) + following * H)
-    return bloqueio("orcamento_vencido_sem_intervalo");
-  const due = Date.parse(f.anchor.at) + [2, 24, 72, 168][touches.length]! * H;
-  if (+now < due) return adiar(janelaPermitida(due), "ainda_nao_venceu");
+  const timing = esperaDoToqueDaOferta(f, now);
+  if (timing) return timing;
   const aberta = +now - Date.parse(f.lastInboundAt) < 24 * H;
   if (!aberta && (!f.template.approved || !f.template.accountReady))
     return bloqueio("modelo_ou_conta_indisponivel");
