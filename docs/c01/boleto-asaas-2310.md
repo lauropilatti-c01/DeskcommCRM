@@ -1,5 +1,12 @@
 # Boleto: prova de quitação integral — candidata de 23/10/2026
 
+**Evolução candidata em 24/10:** o contrato de valor descrito abaixo foi ampliado
+em [condições aceitas e total financiado](boleto-contrato-aceito-2410.md). A
+comparação com `orders.total_value` foi substituída pela conferência do snapshot
+e do fingerprint do contrato assinado. Ausência dessa prova fica em revisão.
+As regras de carteira, identidade, referência, recebimento, data e OFF continuam.
+O resultado de 23/10 abaixo é histórico; não prova a candidata de 24/10.
+
 Implementação opt-in, ainda sem instalação ou leitura real nesta rodada. O executor
 financeiro continua desligado; esta mudança não publica nem confirma compras na
 produção. Não há DDL. A decisão de considerar uma entrada como Ganho continua

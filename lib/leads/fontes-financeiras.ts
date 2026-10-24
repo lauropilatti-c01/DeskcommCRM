@@ -76,7 +76,7 @@ function email(v: unknown): string | null {
 const BOLETO_SELECT =
   "id,org_id,status,total_value,created_at,customers(id,org_id,phone,email,anonymized),products(id,org_id),payments(id,org_id,status,amount_paid,paid_at,refunded_at,refund_amount,marked_paid_manually_at)";
 const BOLETO_ASAAS_SELECT =
-  "id,org_id,status,total_value,created_at,customers(id,org_id,phone,email,anonymized,external_customer_id_asaas),products(id,org_id),payments(id,org_id,order_id,asaas_payment_id,status,amount,amount_paid,paid_at,refunded_at,refund_amount,refund_lifecycle,marked_paid_manually_at)";
+  "id,org_id,status,total_value,created_at,external_ref,entry_value,installment_count,installment_value,discount_applied_at,discount_applied_pct,parcelamento_snapshot,customers(id,org_id,name,cpf,phone,email,anonymized,external_customer_id_asaas),products(id,org_id,name),contracts(id,org_id,order_id,provider,status,external_id,external_envelope_id,external_signer_id,template_used,rendered_text_hash,created_at,signed_at,cancelled_at,remote_cancel_status),payments(id,org_id,order_id,asaas_payment_id,type,installment_number,due_date,status,amount,amount_paid,paid_at,refunded_at,refund_amount,refund_lifecycle,marked_paid_manually_at)";
 export function criarFonteFinanceira(
   cfg: FonteConfig,
   deps: { fetch?: typeof fetch; now?: () => Date } = {},
@@ -250,6 +250,12 @@ export function criarFonteFinanceira(
             })
           : { status: "review" as const, paidCents: 0, paidAt: null, evidence: undefined };
         status = settlement.status;
+        if (
+          settlement.status === "paid" &&
+          "totalCents" in settlement &&
+          settlement.totalCents != null
+        )
+          totalCents = settlement.totalCents;
         paidCents = settlement.paidCents;
         paidAt = settlement.paidAt;
         providerEvidence = settlement.evidence;

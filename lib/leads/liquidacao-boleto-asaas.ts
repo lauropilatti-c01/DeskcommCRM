@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { CompraRecusada } from "./compra-verificada";
 import { intervaloDoPagamento } from "./periodo-financeiro";
+import { lerContratoBoletoAceito } from "./contrato-boleto-aceito";
+import { clicksignReadSchema, conferirDocumentoClicksign } from "./documento-boleto-clicksign";
 
 /** Somente leitura. Nem URL arbitrária nem operação financeira são configuráveis. */
 export const asaasSettlementSchema = z
@@ -9,6 +11,7 @@ export const asaasSettlementSchema = z
     environment: z.enum(["production", "sandbox"]),
     walletId: z.uuid(),
     apiToken: z.string().min(1),
+    clicksign: clicksignReadSchema.optional(),
   })
   .strict();
 export type ConfiguracaoLiquidacaoAsaas = z.infer<typeof asaasSettlementSchema>;
@@ -30,6 +33,7 @@ export async function lerLiquidacaoAsaas(
   paidCents: number;
   paidAt: string | null;
   evidence: unknown;
+  totalCents?: number;
 }> {
   const config = asaasSettlementSchema.safeParse(cfg);
   if (!config.success || !config.data.enabled)
@@ -37,14 +41,19 @@ export async function lerLiquidacaoAsaas(
   const origin =
     cfg.environment === "production" ? "https://api.asaas.com" : "https://api-sandbox.asaas.com";
   const signal = AbortSignal.any([deps.signal, AbortSignal.timeout(6_000)]);
-  async function get(path: string): Promise<Objeto> {
+  async function get(path: string, document = false): Promise<Objeto> {
     let cancel = () => {};
     try {
       signal.throwIfAborted();
       const load = async () => {
-        const response = await deps.fetch(`${origin}/v3/${path}`, {
+        const url = document
+          ? `https://${cfg.environment === "production" ? "app" : "sandbox"}.clicksign.com/api/v1/${path}`
+          : `${origin}/v3/${path}`;
+        const response = await deps.fetch(url, {
           method: "GET",
-          headers: { access_token: cfg.apiToken, Accept: "application/json" },
+          headers: document
+            ? { Authorization: cfg.clicksign!.apiToken, Accept: "application/json" }
+            : { access_token: cfg.apiToken, Accept: "application/json" },
           redirect: "error",
           cache: "no-store",
           signal,
@@ -79,6 +88,18 @@ export async function lerLiquidacaoAsaas(
     throw new CompraRecusada("financial_source_account_mismatch");
   const evidence: unknown[] = [{ walletId: cfg.walletId, environment: cfg.environment }];
   const review = () => ({ status: "review" as const, paidCents: 0, paidAt: null, evidence });
+  const contract = lerContratoBoletoAceito(order, deps.now);
+  if (!contract || !cfg.clicksign) return review();
+  evidence.push(contract.evidence);
+  const document = await get(`documents/${contract.document.key}`, true);
+  const signature = conferirDocumentoClicksign(
+    document,
+    contract,
+    cfg.clicksign.accountKeySha256,
+    deps.now,
+  );
+  if (!signature) return review();
+  evidence.push(signature);
   const customer = rec(order.customers);
   const payments = order.payments;
   if (
@@ -130,6 +151,7 @@ export async function lerLiquidacaoAsaas(
       gross === null ||
       gross <= 0 ||
       gross !== expected ||
+      remote.dueDate !== local.due_date ||
       (remote.originalValue != null && cents(remote.originalValue) !== gross) ||
       (remote.interestValue != null && cents(remote.interestValue) !== 0) ||
       (rec(remote.discount).value != null && cents(rec(remote.discount).value) !== 0) ||
@@ -150,6 +172,12 @@ export async function lerLiquidacaoAsaas(
     sum += gross;
     if (!Number.isSafeInteger(sum)) return review();
   }
-  if (sum <= 0 || sum !== cents(order.total_value)) return review();
-  return { status: "paid", paidCents: sum, paidAt: dates.sort().at(-1)!, evidence };
+  if (sum <= 0 || sum !== contract.totalCents) return review();
+  return {
+    status: "paid",
+    paidCents: sum,
+    totalCents: contract.totalCents,
+    paidAt: dates.sort().at(-1)!,
+    evidence,
+  };
 }
