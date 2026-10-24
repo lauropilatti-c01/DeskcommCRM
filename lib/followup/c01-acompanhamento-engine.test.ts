@@ -213,3 +213,31 @@ it("vídeo vencido usa job comum com texto fixo e nenhuma instrução de IA",asy
   expect(r.enqueueJob).toHaveBeenCalledWith(expect.objectContaining({payload:expect.objectContaining({followup_enrollment_id:"enrollment",node_id:"touch",purpose:"send_message",fixed_body:"Mensagem de teste"})}));
   expect(r.enqueueJob.mock.calls[0]![0].payload).not.toHaveProperty("prompt_hint");
 });
+
+it("oferta C01 usa encerramento atômico e nunca o seletor genérico de negócio", async () => {
+  const r = rig("move_lead");
+  const encerrar = vi.fn(async () => ({ kind: "closed" as const }));
+  Object.assign(r.db, { encerrarOfertaC01: encerrar });
+  await avancarEnrollmentAtivo(r.deps, row);
+  expect(encerrar).toHaveBeenCalledWith(row, r.deps.clock());
+  expect(r.db.moverLeadNoFunil).not.toHaveBeenCalled();
+  expect(r.db.insertEnrollmentEvent).not.toHaveBeenCalled();
+  expect(r.db.updateEnrollment).not.toHaveBeenCalled();
+});
+
+it("falha no encerramento C01 não vira avanço nem evento de sucesso", async () => {
+  const r = rig("move_lead");
+  Object.assign(r.db, { encerrarOfertaC01: vi.fn(async () => { throw new Error("falha antes do commit"); }) });
+  await expect(avancarEnrollmentAtivo(r.deps, row)).rejects.toThrow("falha antes do commit");
+  expect(r.db.moverLeadNoFunil).not.toHaveBeenCalled();
+  expect(r.db.insertEnrollmentEvent).not.toHaveBeenCalled();
+  expect(r.db.updateEnrollment).not.toHaveBeenCalled();
+});
+
+it("sem escritor atômico a pré-checagem positiva não libera o move_lead genérico", async () => {
+  const r = rig("move_lead");
+  r.db.decidirAcompanhamentoC01 = vi.fn(async () => ({ kind: "lost" as const, reason: "sem_resposta_apos_quatro_entregas" }));
+  await avancarEnrollmentAtivo(r.deps, row);
+  expect(r.db.moverLeadNoFunil).not.toHaveBeenCalled();
+  expect(r.db.updateEnrollment).toHaveBeenCalledWith("enrollment", "org", expect.objectContaining({ status: "paused_manual" }));
+});

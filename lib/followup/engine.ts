@@ -1,3 +1,4 @@
+import { encerrarOfertaC01, type ResultadoEncerramentoC01 } from "./c01-encerrar-oferta";
 import { decidirAcompanhamentoC01 } from "./c01-acompanhamento-runtime";
 import { inscreverOrigensConfirmadasC01 } from "./c01-acompanhamento-origens";
 import type { ConfigAcompanhamento, DecisaoAcompanhamento } from "./c01-acompanhamento";
@@ -138,6 +139,7 @@ export interface FollowupJobRequest {
 
 /** DB surface the engine needs — see file header for why this isn't `SupabaseClient` directly. */
 export interface AdminClient {
+  encerrarOfertaC01?(enrollment: EnrollmentRow, now: Date): Promise<ResultadoEncerramentoC01>;
   /** C01 opt-in: a ausência da fonte nunca libera o fluxo. */
   decidirAcompanhamentoC01?(config: ConfigAcompanhamento, enrollment: EnrollmentRow, now: Date): Promise<DecisaoAcompanhamento>;
   inscreverOrigensConfirmadasC01?(): Promise<void>;
@@ -879,8 +881,15 @@ async function processEnrollment(
   // C01: antes do efeito, inclusive encerramento que outra integração pode
   // interpretar como perda. Usa estados/eventos existentes, sem enum/DDL.
   const policy = graph.settings?.c01_acompanhamento;
+  if (policy?.kind === "oferta" && node.type === "move_lead" && db.encerrarOfertaC01) {
+    const result = await db.encerrarOfertaC01(enrollment, clock());
+    if (result.kind === "closed") summary.advanced++;
+    return;
+  }
   if (policy && (node.type === "action" || node.type === "move_lead" || (node.type === "end" && (node.config.outcome === "exhausted" || policy.kind === "video_curso")))) {
-    const decision = db.decidirAcompanhamentoC01
+    const decision = policy.kind === "oferta" && node.type === "move_lead"
+      ? { kind: "blocked" as const, reason: "integracao_aplicada_indisponivel" }
+      : db.decidirAcompanhamentoC01
       ? await db.decidirAcompanhamentoC01(policy, enrollment, clock())
       : { kind: "blocked" as const, reason: "integracao_aplicada_indisponivel" };
     const expected = node.type === "action" ? "send" : policy.kind === "video_curso" && node.type === "end" ? "complete" : "lost";
@@ -1162,6 +1171,9 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
   const revisions=new Map<string,number>();
   return {
     inscreverOrigensConfirmadasC01: () => inscreverOrigensConfirmadasC01(),
+    encerrarOfertaC01(enrollment, now) {
+      return encerrarOfertaC01(enrollment, now);
+    },
     decidirAcompanhamentoC01(config, enrollment, now) {
       return decidirAcompanhamentoC01(config, { organizationId: enrollment.organization_id, contactId: enrollment.contact_id, enrollmentId: enrollment.id }, now);
     },
