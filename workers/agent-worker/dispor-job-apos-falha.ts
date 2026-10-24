@@ -1,3 +1,5 @@
+import { cancelarRetornoC01DoJob } from "@/lib/followup/c01-retorno-cancelar-job";
+import { RetornoC01CanceladoError } from "@/lib/followup/c01-retorno-cancelado";
 import type { Pool } from "pg";
 import type { Logger } from "@/lib/agent-engine/obs/logger";
 import { claimOfJob } from "@/lib/agent-engine/queue/claim";
@@ -17,6 +19,17 @@ export async function disporJobAposFalha(
   terminal: boolean,
   log: Pick<Logger, "warn">,
 ): Promise<void> {
+  if (error instanceof RetornoC01CanceladoError || error instanceof StaleServiceBoundaryError) {
+    if (
+      await cancelarRetornoC01DoJob(
+        pool,
+        job,
+        workerId,
+        error instanceof RetornoC01CanceladoError ? error.message : undefined,
+      )
+    )
+      return;
+  }
   if (
     error instanceof StaleServiceBoundaryError &&
     job.kind === "case_reply_turn" &&

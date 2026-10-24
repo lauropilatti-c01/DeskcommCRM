@@ -1,3 +1,4 @@
+import { RetornoC01CanceladoError } from "./c01-retorno-cancelado";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { Queryable } from "@/lib/agent-engine/queue/queue";
@@ -357,6 +358,7 @@ export async function conferirRetornoNoEnvioC01(
     fail("scope_mismatch");
   if (p.template && (!p.callback_agent_id || p.callback_agent_id !== job.payload.callback_agent_id))
     fail("agent_mismatch");
+  if (!Number.isFinite(+now)) fail("clock_unconfirmed");
   if (+now < Date.parse(p.promised_at)) fail("not_due");
   const hour = new Date(+now - 3 * 3600000).getUTCHours();
   if (hour < 8 || hour >= 21) fail("outside_send_window");
@@ -380,7 +382,7 @@ export async function conferirRetornoNoEnvioC01(
     new Date(row.sent_at).toISOString() !== p.consented_at ||
     row.custom_fields?.produto_chave !== p.product_key
   )
-    return fail("consent_changed");
+    throw new RetornoC01CanceladoError("consent_changed");
   if (
     row.is_blocked ||
     row.ai_opt_out ||
@@ -388,7 +390,7 @@ export async function conferirRetornoNoEnvioC01(
     row.is_merged_into ||
     ["won", "lost"].includes(row.lead_status)
   )
-    fail("restricted");
+    throw new RetornoC01CanceladoError("restricted");
   if (
     row.force_human ||
     ["human", "user"].includes(row.assignee_kind) ||
@@ -396,9 +398,10 @@ export async function conferirRetornoNoEnvioC01(
     row.bot_silenced_until === "infinity" ||
     (row.bot_silenced_until && +new Date(row.bot_silenced_until) > +now)
   )
-    fail("human");
-  if (!row.last_inbound_at || +new Date(row.last_inbound_at) > Date.parse(p.consented_at))
-    fail("new_reply");
+    throw new RetornoC01CanceladoError("human");
+  const inboundAt = row.last_inbound_at ? +new Date(row.last_inbound_at) : NaN;
+  if (!Number.isFinite(inboundAt) || inboundAt > +now + 1000) fail("inbound_unconfirmed");
+  if (inboundAt > Date.parse(p.consented_at)) throw new RetornoC01CanceladoError("new_reply");
   if (p.template) {
     if (row.channel_session_id !== p.template.connection_id) fail("template_connection_changed");
     const agent = await conferirCallbackAntesDoTurno(db, scope.organizationId, p.callback_agent_id, now, true);
@@ -413,7 +416,8 @@ export async function conferirRetornoNoEnvioC01(
         [scope.organizationId, scope.contactId, p.conversation_id, p.offered_message_id],
       )
     ).rows[0];
-    if (!offer || hash(offer.body) !== p.offered_hash) fail("offer_changed");
+    if (!offer || hash(offer.body) !== p.offered_hash)
+      throw new RetornoC01CanceladoError("offer_changed");
   }
   const paid = await financeiro({
     db,
@@ -424,13 +428,14 @@ export async function conferirRetornoNoEnvioC01(
     signal,
   });
   if (
-    paid.status !== "nao_comprou_confirmado" ||
     !paid.complete ||
     !Number.isFinite(Date.parse(paid.checkedAt)) ||
     +now - Date.parse(paid.checkedAt) > 15 * 60000 ||
     Date.parse(paid.checkedAt) > +now + 1000
   )
-    fail(paid.status === "confirmado" ? "purchased" : "purchase_unconfirmed");
+    fail("purchase_unconfirmed");
+  if (paid.status === "confirmado") throw new RetornoC01CanceladoError("purchased");
+  if (paid.status !== "nao_comprou_confirmado") fail("purchase_unconfirmed");
 }
 
 /** Executado sob a mesma trava da criação do callback. Se falhar, o callback

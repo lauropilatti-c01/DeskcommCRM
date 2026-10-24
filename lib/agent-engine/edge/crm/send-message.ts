@@ -1,3 +1,4 @@
+import { RetornoC01CanceladoError } from "@/lib/followup/c01-retorno-cancelado";
 import { assertAgentOperationPg, type AgentOperationContext } from '@/lib/ai/agents/operation';
 import { assertApprovedReplyPg, type ApprovedReplyContext } from '@/lib/ai/replies/delivery';
 import { assertMeetingDeliveryPg, type MeetingDeliveryContext } from '@/lib/agenda/meet-delivery';
@@ -220,7 +221,7 @@ export async function sendTurnMessage(
         corpoDoEnvio(input, idempotencyKey),
       );
     } catch (err) {
-      if (err instanceof AgendaDeferredError || err instanceof StaleServiceBoundaryError) throw err;
+      if (err instanceof RetornoC01CanceladoError || err instanceof AgendaDeferredError || err instanceof StaleServiceBoundaryError) throw err;
       if (err instanceof ApiError && err.status === 403) {
         throw err;
       }
