@@ -66,6 +66,13 @@ const ESCRITORES: Record<string, { agenda: "agora" | "futuro" | "nenhum"; nota: 
     agenda: "nenhum",
     nota: "Só desagenda: callback combinado cancela a cadência C01 e grava next_eval_at = null. O horário do retorno fica no cron_jobs, não nesta coluna.",
   },
+  "c01-encerrar-oferta.ts": {
+    agenda: "futuro",
+    nota:
+      "Adiamento usa decision.until da política: próximo horário permitido, espera ainda não " +
+      "vencida ou 48 h após as entregas. Não agenda para agora; cancelamento, pausa e conclusão " +
+      "somente desagendam com null.",
+  },
   "enroll.ts": {
     agenda: "agora",
     nota: "o enrollment nasce vencido — o insert omite next_eval_at e o default now() do banco decide (0147).",
