@@ -175,6 +175,32 @@ function previewOf(e: InboundMessageEvent): string {
   return previaDaMensagem(corpoDaPrevia(e), e.type);
 }
 
+/** 23505 só confirma duplicata depois de reler a mensagem no mesmo tenant/canal/sentido. */
+async function confirmarMensagemDuplicada(
+  admin: Admin,
+  organizationId: string,
+  externalId: string,
+  channelSessionId: string,
+  direction: "inbound" | "outbound",
+): Promise<IngestOutcome> {
+  try {
+    const { data, error } = await admin
+      .from("messages")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .eq("external_id", externalId)
+      .eq("channel_session_id", channelSessionId)
+      .eq("direction", direction)
+      .maybeSingle();
+    if (error || typeof data?.id !== "string" || !data.id) {
+      return { status: "failed", reason: "duplicata_nao_confirmada" };
+    }
+    return { status: "duplicate" };
+  } catch {
+    return { status: "failed", reason: "duplicata_releitura_indisponivel" };
+  }
+}
+
 export async function ingestMetaInbound(
   admin: Admin,
   e: InboundMessageEvent,
@@ -307,9 +333,10 @@ export async function ingestMetaInbound(
     .select("id")
     .maybeSingle();
 
-  // 23505 = a mesma `external_id` já entrou. Não é erro: é a Meta re-entregando.
+  // 23505 pode ser reentrega. Só a releitura exata confirma essa hipótese.
   if (erroInsert) {
-    if (erroInsert.code === "23505") return { status: "duplicate" };
+    if (erroInsert.code === "23505")
+      return confirmarMensagemDuplicada(admin, orgId, e.externalId, sessao.id, "inbound");
     return { status: "failed", reason: `mensagem: ${erroInsert.message}` };
   }
 
@@ -323,6 +350,11 @@ export async function ingestMetaInbound(
   // oficial era o pior dos três justamente onde a falha dói mais, porque é ele
   // que tem janela de 24h — e conversa sem carimbo é janela que ninguém vê
   // fechar. Quem decide o que fazer com a falha agora é uma função só.
+  const messageId = (inserida as { id?: unknown } | null)?.id;
+  if (typeof messageId !== "string" || !messageId) {
+    return { status: "failed", reason: "mensagem_sem_id_confirmado" };
+  }
+
   await marcarConversaComMensagem(admin, {
     organizationId: orgId,
     conversationId: conversationId as string,
@@ -332,7 +364,6 @@ export async function ingestMetaInbound(
     canal: "meta",
   });
 
-  const messageId = (inserida as { id: string } | null)?.id ?? "";
   if (e.media && messageId) {
     const { error: erroPersistencia } = await admin.rpc("emit_event" as never, {
       p_event_type: "media.persist_requested",
@@ -477,8 +508,14 @@ export async function ingestMetaEcho(
     .maybeSingle();
 
   if (erroInsert) {
-    if (erroInsert.code === "23505") return { status: "duplicate" };
+    if (erroInsert.code === "23505")
+      return confirmarMensagemDuplicada(admin, orgId, e.externalId, sessao.id, "outbound");
     return { status: "failed", reason: `mensagem: ${erroInsert.message}` };
+  }
+
+  const messageId = (inserida as { id?: unknown } | null)?.id;
+  if (typeof messageId !== "string" || !messageId) {
+    return { status: "failed", reason: "mensagem_sem_id_confirmado" };
   }
 
   await marcarConversaComMensagem(admin, {
@@ -490,7 +527,6 @@ export async function ingestMetaEcho(
     canal: "meta",
   });
 
-  const messageId = (inserida as { id: string } | null)?.id ?? "";
   if (e.media && messageId) {
     const { error: erroPersistencia } = await admin.rpc("emit_event" as never, {
       p_event_type: "media.persist_requested",

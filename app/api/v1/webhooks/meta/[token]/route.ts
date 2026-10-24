@@ -130,6 +130,9 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
    * indistinguível de "não chegou". Custou uma hora de diagnóstico no lugar errado.
    */
   const desfechos: string[] = [];
+  // O lote inteiro é reentregue se algum evento não pôde ser persistido.
+  // Os demais continuam: sua confirmação individual depende da idempotência.
+  let falhaTransitoria = false;
 
   for (const e of eventos) {
     // O evento chega carimbado com a WABA; se não for a desta sessão, ignoramos.
@@ -147,8 +150,9 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // as duas, com 200 na resposta (issue #236).
       const r = await ingestMetaInbound(admin, e, { organizationId: session.organizationId });
       desfechos.push(r.status);
+      if (r.status === "failed") falhaTransitoria = true;
       if (r.status === "failed" || r.status === "no_session") {
-        // 2xx continua (a Meta re-entregaria em loop), mas a falha NÃO fica muda:
+        // Falha transitória pede reentrega; no_session é descarte deliberado:
         // vai ao log estruturado e ao corpo da resposta.
         console.error("[meta.ingest] inbound não ingerido", {
           status: r.status,
@@ -168,6 +172,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // descarte de reação sem alvo.
       const r = await ingestMetaReaction(admin, e, { organizationId: session.organizationId });
       desfechos.push(`reacao:${r.status}`);
+      if (r.status === "failed") falhaTransitoria = true;
       if (r.status === "failed" || r.status === "no_session") {
         logger.error("[meta.ingest] reação não ingerida", {
           request_id: requestId,
@@ -182,9 +187,10 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
     if (e.kind === "outbound_echo") {
       // Coexistência: resposta dada pelo app WhatsApp Business. Entra na conversa
       // como saída de humano e pausa a IA — ver `ingestMetaEcho`. Mesma política
-      // de falha da recebida: 2xx sempre, falha no log e no corpo.
+      // de falha da recebida: persistência incerta pede reentrega.
       const r = await ingestMetaEcho(admin, e, { organizationId: session.organizationId });
       desfechos.push(`eco:${r.status}`);
+      if (r.status === "failed") falhaTransitoria = true;
       if (r.status === "failed" || r.status === "no_session") {
         logger.error("[meta.ingest] eco do app não ingerido", {
           request_id: requestId,
@@ -201,11 +207,12 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // Coexistência: contato criado/editado no ENDEREÇO do app. Entra no CRM com
       // o nome do celular — sem conversa, sem mensagem e sem tocar na IA, porque
       // nada foi trocado (ver `ingestMetaAppContactSync`). Mesma política de
-      // falha das outras duas: 2xx sempre, falha no log e no corpo.
+      // falha das outras duas: failed pede reentrega; descarte deliberado confirma.
       const r = await ingestMetaAppContactSync(admin, e, {
         organizationId: session.organizationId,
       });
       desfechos.push(`contato:${r.status}`);
+      if (r.status === "failed") falhaTransitoria = true;
       if (r.status === "failed" || r.status === "no_session") {
         logger.error("[meta.ingest] contato do app não sincronizado", {
           request_id: requestId,
@@ -218,13 +225,14 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
     }
 
     if (e.kind === "template_status") {
-      await admin
+      const { error } = await admin
         .from("meta_templates")
         .update({ status: e.event, rejected_reason: e.reason, updated_at: now })
         .eq("organization_id", session.organizationId)
         .eq("waba_id", e.wabaId)
         .eq("name", e.templateName)
         .eq("language", e.templateLanguage);
+      if (error) falhaTransitoria = true;
     } else if (e.status === "failed") {
       // A recusa da plataforma chega DEPOIS do 200 (131047 fora da janela,
       // 131026 número não registrado, 132015 template pausado). O evento inteiro
@@ -236,7 +244,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // para o sistema do integrador sobre a MESMA falha. Só a primeira
       // atualiza uma linha, e só a primeira devolve linha — `linha` é o gatilho
       // da emissão, então 0 linhas = 0 eventos.
-      const { data: linha } = await admin
+      const { data: linha, error } = await admin
         .from("messages")
         .update(statusUpdate(e, now))
         .eq("organization_id", session.organizationId)
@@ -246,6 +254,7 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
           "id, conversation_id, contact_id, sent_via, error_code, error_message, contacts:contact_id(phone_number)",
         )
         .maybeSingle();
+      if (error) falhaTransitoria = true;
       if (linha) {
         const falha = linha as {
           id: string;
@@ -276,21 +285,20 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // O evento inteiro vira colunas, não só `status`: quando a Meta ACEITA o
       // template e reprova a entrega depois, o motivo só existe aqui. Ver
       // `lib/channels/meta/status-update.ts`.
-      await admin
+      const { error } = await admin
         .from("messages")
         .update(statusUpdate(e, now))
         .eq("organization_id", session.organizationId)
         .eq("external_id", e.externalId);
+      if (error) falhaTransitoria = true;
     }
   }
 
-  // 200 SEMPRE que a assinatura confere, inclusive para evento que não nos
-  // interessa: a Meta re-entrega tudo que não recebe 2xx, e recusar o que
-  // ignoramos vira re-tentativa em backoff por horas.
-  // `outcomes` no corpo: quem depura vê o que aconteceu com cada evento em vez de
-  // ler um contador que não distingue sucesso de falha.
+  // Confirma persistência, duplicata comprovada ou descarte deliberado.
+  // Evento irrelevante e número não administrado não geram retry inútil.
+  // ACK não significa que os efeitos pós-entrada best-effort/turno terminaram.
   return NextResponse.json(
     { received: eventos.length, outcomes: desfechos },
-    { status: 200 },
+    falhaTransitoria ? { status: 503, headers: { "Retry-After": "30" } } : { status: 200 },
   );
 }

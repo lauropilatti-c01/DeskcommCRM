@@ -81,7 +81,25 @@ function adminFalso(): SupabaseClient {
       return chain;
     }
     if (table === "messages") {
+      const filtros = new Map<string, unknown>();
+      const leitura = {
+        eq: (campo: string, valor: unknown) => {
+          filtros.set(campo, valor);
+          return leitura;
+        },
+        maybeSingle: async () => ({
+          data:
+            filtros.get("organization_id") === "org-1" &&
+            filtros.get("channel_session_id") === "session-1" &&
+            filtros.get("external_id") === "wamid.ECO1" &&
+            filtros.get("direction") === "outbound"
+              ? { id: "message-1" }
+              : null,
+          error: null,
+        }),
+      };
       return {
+        select: () => leitura,
         insert: (payload: Record<string, unknown>) => {
           estado.insert = payload;
           return {
