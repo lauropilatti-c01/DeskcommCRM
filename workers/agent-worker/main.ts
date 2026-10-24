@@ -1,4 +1,6 @@
 import { disporJobAposFalha } from "./dispor-job-apos-falha";
+import { EsperaFinanceiraC01Error,BloqueioFinanceiroC01Error } from "@/lib/followup/c01-financeiro-espera";
+import { disporJobFinanceiroC01 } from "@/lib/followup/c01-financeiro-fila";
 import { createApprovedReplyHandler } from "@/lib/agent-engine/agent/approved-reply";
 import { turnKnobsFromEnv } from "@/lib/agent-engine/agent/turn-knobs";
 import { createMeetDeliveryHandler } from "@/lib/agent-engine/agent/meet-delivery";
@@ -455,6 +457,11 @@ export async function startWorker(
               ? "claim_missing_or_stale"
               : "settle_unavailable",
         });
+        return;
+      }
+      if(err instanceof EsperaFinanceiraC01Error || err instanceof BloqueioFinanceiroC01Error) {
+        try { await disporJobFinanceiroC01(pool,job,err); }
+        catch { log.error("espera financeira não persistida; aquisição aguarda recuperação",{job_id:job.id}); }
         return;
       }
       if (err instanceof AgendaDeferredError && err.protection.motivo !== "leitura_indisponivel") {

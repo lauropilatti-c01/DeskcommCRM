@@ -19,6 +19,9 @@ import { rotaDeContinuacaoC01 } from "./c01-continuacao-grafo";
 import { flowGraphSchema } from "./graph-schema";
 import { estadoDoToque, type FatosAcompanhamento } from "./c01-acompanhamento";
 import { resolverModeloOfertaC01 } from "./c01-acompanhamento-conteudo";
+import { coletaFinanceiraViva } from "@/lib/leads/coleta-financeira";
+import { prazoDaColetaSchema } from "./c01-financeiro-espera";
+import { z } from "zod";
 
 export type LeitorFinanceiroSemOfertaC01 = (input: {
   db: Queryable;
@@ -47,6 +50,9 @@ const terminal = new Set([
   "pedido_sem_evidencia",
   "L1_sem_janela",
   "compra_confirmada",
+  "prazo_da_coleta_financeira_esgotado",
+  "prazo_financeiro_incoerente",
+  "compras_sem_conferencia_univoca",
 ]);
 
 export async function registrarContinuacaoC01(
@@ -165,7 +171,54 @@ export async function registrarContinuacaoC01(
         Date.parse(plan.anchorAt) < Date.parse(policy.activated_at)
       )
         return finish(recusado("politica_incompativel_ou_desligada"));
+      const rawWait = (
+        await db.query(
+          "select payload->'c01_financial_wait' as wait from job_queue where organization_id=$1 and id=$2 and contact_id=$3 and status='done' for update",
+          [org, jobId, contact],
+        )
+      ).rows[0]?.wait;
+      // O prazo básico é lido separadamente porque os dois objetos são estritos.
+      const parsedWait = rawWait
+        ? prazoDaColetaSchema.safeParse({
+            generationId: rawWait.generationId,
+            startedAt: rawWait.startedAt,
+            deadlineAt: rawWait.deadlineAt,
+          })
+        : null;
+      if (
+        rawWait &&
+        (!parsedWait?.success ||
+          !z.string().datetime({ offset: true }).safeParse(rawWait.nextCheckAt).success)
+      )
+        return finish(recusado("prazo_financeiro_incoerente"));
+      const oldWait = parsedWait?.success ? parsedWait.data : null;
+      if (oldWait && +now >= Date.parse(oldWait.deadlineAt))
+        return finish(recusado("prazo_da_coleta_financeira_esgotado"));
+      if (oldWait && +now < Date.parse(rawWait.nextCheckAt))
+        return finish(recusado("projecao_em_coleta"));
       const financial = await financeiroDaContinuacao(db, p, now, deps, lock.signal);
+      const collecting =
+        financial?.status === "indisponivel" && financial.reason === "projecao_em_coleta"
+          ? coletaFinanceiraViva(financial.collection, now)
+          : null;
+      if (collecting) {
+        const end = Math.min(
+          Date.parse(oldWait?.deadlineAt ?? collecting.deadlineAt),
+          Date.parse(turn.facts.inbound.at) + 24 * 3600_000,
+        );
+        if (+now >= end) return finish(recusado("prazo_da_coleta_financeira_esgotado"));
+        const wait = {
+          generationId: oldWait?.generationId ?? collecting.generationId,
+          startedAt: oldWait?.startedAt ?? collecting.startedAt,
+          deadlineAt: new Date(end).toISOString(),
+          nextCheckAt: new Date(Math.min(+now + 60_000, end)).toISOString(),
+        };
+        await db.query(
+          "update job_queue set payload=jsonb_set(payload,'{c01_financial_wait}',$4::jsonb) where organization_id=$1 and id=$2 and contact_id=$3 and status='done'",
+          [org, jobId, contact, wait],
+        );
+        return finish(recusado("projecao_em_coleta"));
+      }
       const financialReady =
         !!financial?.complete &&
         Number.isFinite(Date.parse(financial.checkedAt)) &&
@@ -376,6 +429,9 @@ export async function lerFatosContinuacaoC01(
     restricted: turn.facts.restricted || !["active", "waiting_reply"].includes(state?.status),
     callbackPending: turn.facts.callback,
     anotherSequence: turn.facts.liveSequence,
+    ...(paid?.status === "indisponivel" && paid.reason === "projecao_em_coleta" && paid.collection
+      ? { financialCollection: paid.collection }
+      : {}),
     purchase:
       paid && ["confirmado", "nao_comprou_confirmado"].includes(paid.status)
         ? {

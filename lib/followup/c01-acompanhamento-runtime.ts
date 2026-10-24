@@ -8,6 +8,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { comTravaDeEfeito, type TravaDeEfeito } from "@/lib/agent-engine/db/trava-de-efeito";
 import { configOrigemC01 } from "./c01-origem";
+import { vincularEsperaFinanceiraC01, EsperaFinanceiraC01Error, BloqueioFinanceiroC01Error } from "./c01-financeiro-espera";
 import { lerFatosAcompanhamentoC01 } from "./c01-acompanhamento-fatos";
 import {
   avaliarAcompanhamento,
@@ -61,10 +62,19 @@ export async function decidirAcompanhamentoC01(
   fonte?: FonteAcompanhamento,
 ): Promise<DecisaoAcompanhamento> {
   if (!config.activated_at) return { kind: "blocked", reason: "ativacao_pendente" };
-  const facts = await (fonte ? fonte(scope) : fonteAplicada(scope, now));
+  let facts = await (fonte ? fonte(scope) : fonteAplicada(scope, now));
   if (!facts) return { kind: "blocked", reason: "integracao_aplicada_indisponivel" };
   if (facts.organizationId !== scope.organizationId || facts.contactId !== scope.contactId)
     return { kind: "blocked", reason: "fonte_fora_do_escopo" };
+  if (!fonte)
+    facts = await vincularEsperaFinanceiraC01(
+      envio.getStore()?.lock.db ?? getRequestPool(),
+      config,
+      scope,
+      facts,
+      now,
+    );
+  if (!facts) return { kind: "blocked", reason: "prazo_financeiro_incoerente" };
   return avaliarAcompanhamento(config, facts, now);
 }
 
@@ -214,6 +224,19 @@ export async function assertAcompanhamentoC01Supabase(
   );
   // Esta implementação não oferece uma chave para o operador afirmar que a
   // integração está pronta. Só código de uma fonte aplicada pode liberar.
+  if (decision.kind === "defer" && decision.reason === "projecao_em_coleta")
+    throw new EsperaFinanceiraC01Error(decision.until);
+  if (
+    decision.kind === "blocked" &&
+    [
+      "compras_sem_conferencia_univoca",
+      "compras_desatualizadas",
+      "prazo_da_coleta_financeira_esgotado",
+      "coleta_financeira_sem_prazo_verificado",
+      "prazo_financeiro_incoerente",
+    ].includes(decision.reason)
+  )
+    throw new BloqueioFinanceiroC01Error(decision.reason);
   if (decision.kind !== "send")
     refuse("reason" in decision ? decision.reason : "envio_nao_autorizado");
   const sourceConfig = configOrigemC01();

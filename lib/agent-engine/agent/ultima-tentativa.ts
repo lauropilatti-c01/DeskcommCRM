@@ -16,6 +16,7 @@
  * disposição do worker, muda aqui.
  */
 import { AgendaDeferredError } from '@/lib/agenda/protecao-followup';
+import { EsperaFinanceiraC01Error } from '@/lib/followup/c01-financeiro-espera';
 import { StaleServiceBoundaryError } from '@/lib/atendimento/fronteira';
 
 import { LlmBudgetExceededError } from '../edge/llm/run-model-call';
@@ -29,6 +30,7 @@ export function falhaEsgotaAsTentativas(
   agora: number = Date.now(),
 ): boolean {
   if (job.attempts < job.max_attempts) return false;
+  if (err instanceof EsperaFinanceiraC01Error) return false;
   if (err instanceof StaleServiceBoundaryError) return false;
   if (typeof err === 'object' && err !== null && (err as { terminal?: unknown }).terminal === true) {
     return false;

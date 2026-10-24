@@ -3,6 +3,7 @@ import { createHash, createHmac, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Queryable } from "@/lib/agent-engine/queue/queue";
 import type { SituacaoFinanceira } from "./fonte-financeira";
+import { coletaFinanceiraSchema, coletaFinanceiraViva } from "./coleta-financeira";
 
 const hex = z.string().regex(/^[a-f0-9]{64}$/);
 export const projecaoHistoricaSchema = z
@@ -38,6 +39,7 @@ const responseSchema = z
         complete: z.boolean(),
         checkedAt: z.string().nullable(),
         evidenceHash: hex.optional(),
+        collection: coletaFinanceiraSchema.optional(),
         identityKeys: z
           .array(z.object({ phoneHash: hex.nullable(), emailHash: hex.nullable() }).strict())
           .max(1),
@@ -128,7 +130,17 @@ export async function lerProjecaoHistorica(input: {
       r.requestHash !== createHash("sha256").update(body).digest("hex")
     )
       return unavailable();
-    if (r.status === "indisponivel") return unavailable(r.reason);
+    const collection = r.collection ? coletaFinanceiraViva(r.collection, new Date()) : null;
+    if (
+      r.collection &&
+      (!collection ||
+        r.status !== "indisponivel" ||
+        r.reason !== "projecao_em_coleta" ||
+        r.complete ||
+        Date.parse(r.checkedAt ?? "") !== Date.parse(r.collection.startedAt))
+    )
+      return unavailable();
+    if (r.status === "indisponivel" && !collection) return unavailable(r.reason);
     const at = r.checkedAt ? new Date(r.checkedAt).getTime() : NaN,
       age = Date.now() - at;
     if (
@@ -178,6 +190,7 @@ export async function lerProjecaoHistorica(input: {
       reason: r.reason,
       checkedAt: r.checkedAt!,
       evidenceHash: r.evidenceHash,
+      ...(collection ? { collection } : {}),
     };
   } catch {
     return unavailable();

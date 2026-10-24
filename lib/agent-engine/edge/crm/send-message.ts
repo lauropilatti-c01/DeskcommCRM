@@ -6,6 +6,7 @@ import type { JobClaim } from '../../queue/claim';
 import type { ChannelSendInput } from '../../channel-adapter';
 import { assertAgendaEffectPg } from '@/lib/agenda/efeito';
 import { AgendaDeferredError } from '@/lib/agenda/protecao-followup';
+import { EsperaFinanceiraC01Error,BloqueioFinanceiroC01Error } from '@/lib/followup/c01-financeiro-espera';
 import { StaleServiceBoundaryError } from '@/lib/atendimento/fronteira';
 import { requireCurrentAutonomousTurn, requireCurrentServiceBoundary } from '@/lib/atendimento/fronteira-server';
 import { parseServiceBoundary } from '@/lib/atendimento/fronteira';
@@ -221,7 +222,7 @@ export async function sendTurnMessage(
         corpoDoEnvio(input, idempotencyKey),
       );
     } catch (err) {
-      if (err instanceof RetornoC01CanceladoError || err instanceof AgendaDeferredError || err instanceof StaleServiceBoundaryError) throw err;
+      if (err instanceof EsperaFinanceiraC01Error || err instanceof BloqueioFinanceiroC01Error || err instanceof RetornoC01CanceladoError || err instanceof AgendaDeferredError || err instanceof StaleServiceBoundaryError) throw err;
       if (err instanceof ApiError && err.status === 403) {
         throw err;
       }

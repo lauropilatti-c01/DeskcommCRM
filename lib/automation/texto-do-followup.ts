@@ -67,7 +67,7 @@ export function renderizarTextoDeFollowup(texto: string, contexto: Record<string
  * que escolhem negócios diferentes dariam nomes diferentes na mesma mensagem.
  */
 export async function contextoDoContato(
-  pool: pg.Pool,
+  pool: pg.Pool | pg.PoolClient,
   organizationId: string,
   contactId: string,
 ): Promise<Record<string, unknown>> {

@@ -335,14 +335,19 @@ export async function redriveQueued(
      where m.sent_via in ('ai', 'automation', 'system') and m.status = 'queued'
        and s.status = 'WORKING'
        and c.is_blocked = false
-       -- Retorno consentido C01 só passa pelo worker e seu sink: o resgate
-       -- direto não reconcilia consentimento, compra nem revogação do job.
+       -- Retorno e inscrição C01 só passam pelo worker e seu sink: o resgate
+       -- direto não reconcilia consentimento, coleta financeira nem revogação.
        and not exists (select 1 from send_ledger sl join job_queue j
          on j.organization_id=sl.organization_id and j.id=sl.job_id
          where sl.organization_id=m.organization_id and sl.contact_id=m.contact_id
            and (sl.id=m.id or sl.crm_message_id=m.id)
-           and j.kind='followup_turn' and j.payload->>'scope'='commercial'
-           and j.payload ? 'c01_callback')
+           and j.kind='followup_turn' and (
+             (j.payload->>'scope'='commercial' and j.payload ? 'c01_callback')
+             or exists (select 1 from followup_enrollments e join followup_flow_versions fv
+               on fv.organization_id=e.organization_id and fv.id=e.version_id
+               where e.organization_id=j.organization_id and e.contact_id=j.contact_id
+                 and e.id::text=j.payload->>'followup_enrollment_id'
+                 and fv.graph->'settings' ? 'c01_acompanhamento')))
        -- ─── Só as sessões que ESTE resgate consegue alcançar ───────────────
        --
        -- Este worker fala um transporte só, direto, e não resolve adapter: ele
@@ -411,14 +416,19 @@ export async function redriveQueued(
          join channel_sessions s on s.id = m.channel_session_id and s.organization_id = m.organization_id
          join contacts c on c.id = m.contact_id and c.organization_id = m.organization_id
          where m.id = $1 and m.organization_id = $2 and m.status = 'queued'
-       -- Retorno consentido C01 só passa pelo worker e seu sink: o resgate
-       -- direto não reconcilia consentimento, compra nem revogação do job.
+       -- Retorno e inscrição C01 só passam pelo worker e seu sink: o resgate
+       -- direto não reconcilia consentimento, coleta financeira nem revogação.
        and not exists (select 1 from send_ledger sl join job_queue j
          on j.organization_id=sl.organization_id and j.id=sl.job_id
          where sl.organization_id=m.organization_id and sl.contact_id=m.contact_id
            and (sl.id=m.id or sl.crm_message_id=m.id)
-           and j.kind='followup_turn' and j.payload->>'scope'='commercial'
-           and j.payload ? 'c01_callback')`,
+           and j.kind='followup_turn' and (
+             (j.payload->>'scope'='commercial' and j.payload ? 'c01_callback')
+             or exists (select 1 from followup_enrollments e join followup_flow_versions fv
+               on fv.organization_id=e.organization_id and fv.id=e.version_id
+               where e.organization_id=j.organization_id and e.contact_id=j.contact_id
+                 and e.id::text=j.payload->>'followup_enrollment_id'
+                 and fv.graph->'settings' ? 'c01_acompanhamento')))`,
         [m.id, m.organization_id],
       );
       // ABORT DURANTE a espera de elegibilidade (#2823): a releitura terminou e

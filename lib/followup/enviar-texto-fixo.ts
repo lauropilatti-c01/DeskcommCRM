@@ -2,6 +2,9 @@ import {sendWithLedger,supabaseSendLedger} from "@/lib/agent-engine/edge/crm/sen
 import { randomUUID } from "node:crypto";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { AgendaDeferredError } from "@/lib/agenda/protecao-followup";
+import { EsperaFinanceiraC01Error,BloqueioFinanceiroC01Error } from "./c01-financeiro-espera";
+import { disporJobFinanceiroC01 } from "./c01-financeiro-fila";
+import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { parseServiceBoundary, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
 import { assertServiceBoundarySupabase } from "@/lib/atendimento/origem";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -334,6 +337,10 @@ export async function enviarTextoFixoPendente(
       },undefined,job.id,jobClaim);
       await settle(job.organization_id,job.id,jobClaim.acquired_at,true);
     } catch (err) {
+      if(err instanceof EsperaFinanceiraC01Error || err instanceof BloqueioFinanceiroC01Error) {
+        await disporJobFinanceiroC01(getRequestPool(),{id:job.id,organization_id:job.organization_id,contact_id:contactId,payload,locked_by:workerId,claim_acquired_at:jobClaim.acquired_at},err);
+        continue;
+      }
       const message = err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err);
       logger.warn("[dev.pipeline] envio inline falhou", { error: message });
       let revogado = false;

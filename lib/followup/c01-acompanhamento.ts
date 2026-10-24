@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  coletaFinanceiraViva,
+  type ColetaFinanceira,
+  type PrazoColetaFinanceira,
+} from "@/lib/leads/coleta-financeira";
 
 /** Extensão C01, opt-in no grafo JSON existente; ausência conserva o legado. */
 export const c01AcompanhamentoSchema = z.strictObject({
@@ -49,9 +54,13 @@ export interface FatosAcompanhamento {
   contactId: string;
   opportunityId: string;
   /** Origem autenticada + entrega reconciliada, nunca um custom_field da IA. */
-  anchor: { kind: "cronograma" | "oferta" | "video_curso" | "conversa"; at: string; delivered: boolean };
+  anchor: {
+    kind: "cronograma" | "oferta" | "video_curso" | "conversa";
+    at: string;
+    delivered: boolean;
+  };
   /** Somente a prova assinada da continuação pode separar resposta de âncora. */
-  continuation?: { replyBarrierAt:string; notBefore:string; ready:boolean };
+  continuation?: { replyBarrierAt: string; notBefore: string; ready: boolean };
   videoPolicyReady?: boolean;
   cronogramaCatalogReady?: boolean;
   lastInboundAt: string | null;
@@ -74,6 +83,8 @@ export interface FatosAcompanhamento {
   };
   template: { approved: boolean; accountReady: boolean };
   touches: Toque[];
+  financialCollection?: ColetaFinanceira;
+  financialWait?: PrazoColetaFinanceira;
 }
 const H = 3_600_000;
 const MIN = 60_000;
@@ -137,6 +148,28 @@ function adiar(at: number, reason: string): DecisaoAcompanhamento {
   return { kind: "defer", reason, until: new Date(at).toISOString() };
 }
 
+/** Congelado na primeira espera. Nunca muda a âncora ou o orçamento do toque. */
+export function limiteDaColetaC01(
+  config: ConfigAcompanhamento,
+  f: FatosAcompanhamento,
+  collection: ColetaFinanceira,
+  now: Date,
+): string {
+  const local = new Date(+now - 3 * H);
+  local.setUTCHours(21, 0, 0, 0);
+  let end = Math.min(Date.parse(collection.deadlineAt), +local + 3 * H);
+  if (config.kind === "cronograma") {
+    const h = horarioDoCronograma(config, f);
+    end = Math.min(end, h.tetoEm, h.encerraEm);
+  } else if (config.kind !== "oferta" || !f.template.approved || !f.template.accountReady)
+    end = Math.min(end, Date.parse(f.lastInboundAt!) + 24 * H);
+  if (config.kind === "oferta" && f.continuation) {
+    const next = [2, 24, 72, 168][f.touches.length + 1];
+    if (next !== undefined) end = Math.min(end, Date.parse(f.anchor.at) + next * H);
+  }
+  return new Date(end).toISOString();
+}
+
 /**
  * Mesmo contrato na seleção e imediatamente antes do envio. O leitor de fatos
  * financeiro relê as fontes no runtime. Falta de cobertura mantém bloqueado.
@@ -165,10 +198,17 @@ export function avaliarAcompanhamento(
   ] as const)
     if (condition) return { kind: "cancel", reason };
   if (!config.activated_at) return bloqueio("ativacao_pendente");
-  if (config.kind === "conversa" && !f.continuation?.ready) return bloqueio("continuacao_sem_prova");
-  if (f.continuation && (!f.continuation.ready || !valido(f.continuation.replyBarrierAt) || !valido(f.continuation.notBefore)))
+  if (config.kind === "conversa" && !f.continuation?.ready)
     return bloqueio("continuacao_sem_prova");
-  if(config.kind === "cronograma" && f.cronogramaCatalogReady === false) return bloqueio("catalogo_do_cronograma_indisponivel");
+  if (
+    f.continuation &&
+    (!f.continuation.ready ||
+      !valido(f.continuation.replyBarrierAt) ||
+      !valido(f.continuation.notBefore))
+  )
+    return bloqueio("continuacao_sem_prova");
+  if (config.kind === "cronograma" && f.cronogramaCatalogReady === false)
+    return bloqueio("catalogo_do_cronograma_indisponivel");
   if (config.kind === "video_curso" && !f.videoPolicyReady)
     return bloqueio("video_desligado_ou_politica_invalida");
   if (
@@ -187,8 +227,26 @@ export function avaliarAcompanhamento(
   )
     return bloqueio("relogio_incoerente");
   if (!valido(f.lastInboundAt)) return bloqueio("ultima_mensagem_desconhecida");
+  const p = f.purchase;
+  if (
+    p?.source === "aplicada" &&
+    p.complete &&
+    p.identity === "univoca" &&
+    p.organizationId === f.organizationId &&
+    p.contactId === f.contactId &&
+    p.opportunityId === f.opportunityId &&
+    p.result === "comprou" &&
+    +now - Date.parse(p.checkedAt) >= 0 &&
+    +now - Date.parse(p.checkedAt) <= 900_000
+  )
+    return { kind: "cancel", reason: "compra_confirmada" };
+  if (f.financialWait && +now >= Date.parse(f.financialWait.deadlineAt))
+    return bloqueio("prazo_da_coleta_financeira_esgotado");
   if (f.continuation && +now < Date.parse(f.continuation.notBefore))
-    return adiar(janelaPermitida(Date.parse(f.continuation.notBefore)), "aguarda_silencio_da_continuacao");
+    return adiar(
+      janelaPermitida(Date.parse(f.continuation.notBefore)),
+      "aguarda_silencio_da_continuacao",
+    );
   if (config.kind === "video_curso" && f.touches.length === 0) {
     const due = Date.parse(f.anchor.at) + 15 * MIN;
     if (+now < due) return adiar(janelaPermitida(due), "ainda_nao_venceu");
@@ -213,7 +271,24 @@ export function avaliarAcompanhamento(
   // devolve ao consumidor a obrigação de carregar tudo de novo ao acordar.
   const permitido = janelaPermitida(+now);
   if (permitido !== +now) return adiar(permitido, "fora_do_horario");
-  const p = f.purchase;
+  if (f.financialCollection) {
+    const live = coletaFinanceiraViva(f.financialCollection, now),
+      wait = f.financialWait;
+    if (
+      !live ||
+      !wait ||
+      !valido(wait.deadlineAt) ||
+      !valido(wait.startedAt) ||
+      Date.parse(wait.deadlineAt) > Date.parse(wait.startedAt) + 900_000
+    )
+      return bloqueio("coleta_financeira_sem_prazo_verificado");
+    const end = Math.min(
+      Date.parse(wait.deadlineAt),
+      Date.parse(limiteDaColetaC01(config, f, live, now)),
+    );
+    if (+now >= end) return bloqueio("prazo_da_coleta_financeira_esgotado");
+    return adiar(Math.min(+now + 60_000, end), "projecao_em_coleta");
+  }
   if (
     !p ||
     p.source !== "aplicada" ||
@@ -247,8 +322,10 @@ export function avaliarAcompanhamento(
   const max = config.kind === "oferta" ? 4 : 1;
   if (touches.length > max) return bloqueio("toques_incoerentes");
   if (touches.length === max) {
-    if (config.kind === "conversa") return { kind: "complete", reason: "continuacao_unica_concluida" };
-    if (config.kind === "video_curso") return { kind: "complete", reason: "toque_do_video_concluido" };
+    if (config.kind === "conversa")
+      return { kind: "complete", reason: "continuacao_unica_concluida" };
+    if (config.kind === "video_curso")
+      return { kind: "complete", reason: "toque_do_video_concluido" };
     if (config.kind === "cronograma")
       return { kind: "complete", reason: "retomada_unica_concluida" };
     const ultimo = Math.max(
@@ -266,15 +343,17 @@ export function avaliarAcompanhamento(
   }
   if (config.kind === "cronograma") return { kind: "send", touch: 1, transport: "text" };
   if (config.kind === "conversa") {
-    if (+now - Date.parse(f.lastInboundAt) >= 24 * H) return bloqueio("janela_da_continuacao_fechada");
+    if (+now - Date.parse(f.lastInboundAt) >= 24 * H)
+      return bloqueio("janela_da_continuacao_fechada");
     return { kind: "send", touch: 1, transport: "text" };
   }
   if (config.kind === "video_curso") {
     if (+now - Date.parse(f.lastInboundAt) >= 24 * H) return bloqueio("janela_do_video_fechada");
     return { kind: "send", touch: 1, transport: "text" };
   }
-  const following=[2,24,72,168][touches.length+1];
-  if(f.continuation && following!==undefined && +now>=Date.parse(f.anchor.at)+following*H) return bloqueio("orcamento_vencido_sem_intervalo");
+  const following = [2, 24, 72, 168][touches.length + 1];
+  if (f.continuation && following !== undefined && +now >= Date.parse(f.anchor.at) + following * H)
+    return bloqueio("orcamento_vencido_sem_intervalo");
   const due = Date.parse(f.anchor.at) + [2, 24, 72, 168][touches.length]! * H;
   if (+now < due) return adiar(janelaPermitida(due), "ainda_nao_venceu");
   const aberta = +now - Date.parse(f.lastInboundAt) < 24 * H;

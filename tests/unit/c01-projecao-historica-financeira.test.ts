@@ -83,6 +83,60 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe("projeção histórica autenticada por pessoa", () => {
+  it("coleta viva devolve espera autenticada, sem negativa ou prazo renovado", async () => {
+    const f = fixture();
+    Object.assign(f.data, {
+      status: "indisponivel",
+      reason: "projecao_em_coleta",
+      complete: false,
+      collection: {
+        generationId: "33333333-3333-4333-8333-333333333333",
+        startedAt: "2026-10-24T17:58:00Z",
+        heartbeatAt: "2026-10-24T18:00:00Z",
+        deadlineAt: "2026-10-24T18:13:00Z",
+        progress: 2,
+      },
+    });
+    const r = await f.read();
+    expect(r.status).toBe("indisponivel");
+    expect(r.complete).toBe(false);
+    expect(r).toHaveProperty("collection", f.data.collection);
+  });
+  it.each([
+    "heartbeat_velho",
+    "heartbeat_futuro",
+    "prazo_maior",
+    "sem_identidade",
+    "sem_progresso",
+    "status_errado",
+  ])("coleta %s não autoriza adiamento", async (mode) => {
+    const f = fixture();
+    const c = {
+      generationId: "33333333-3333-4333-8333-333333333333",
+      startedAt: "2026-10-24T17:58:00Z",
+      heartbeatAt: "2026-10-24T18:00:00Z",
+      deadlineAt: "2026-10-24T18:13:00Z",
+      progress: 2,
+    };
+    Object.assign(f.data, {
+      status: "indisponivel",
+      reason: "projecao_em_coleta",
+      complete: false,
+      collection: c,
+    });
+    if (mode === "heartbeat_velho") {
+      c.startedAt = "2026-10-24T17:55:00Z";
+      f.data.checkedAt = c.startedAt;
+      c.heartbeatAt = "2026-10-24T17:57:00Z";
+      c.deadlineAt = "2026-10-24T18:10:00Z";
+    }
+    if (mode === "heartbeat_futuro") c.heartbeatAt = "2026-10-24T18:00:01Z";
+    if (mode === "prazo_maior") c.deadlineAt = "2026-10-24T18:14:00Z";
+    if (mode === "sem_identidade") f.data.identityKeys = [];
+    if (mode === "sem_progresso") c.progress = 0;
+    if (mode === "status_errado") f.data.status = "revisao";
+    expect(await f.read()).not.toHaveProperty("collection");
+  });
   it("faz uma leitura limitada, sem PII ou token na URL; conserva instante da fonte", async () => {
     const f = fixture();
     const r = await f.read();
