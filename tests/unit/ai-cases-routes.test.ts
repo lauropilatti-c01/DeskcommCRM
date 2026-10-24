@@ -64,8 +64,10 @@ function sessaoComVisibilidade(opts: {
   casos?: string[];
   visiveis: string[];
   falhaEm?: "agent_cases" | "conversations";
+  falhaNoLoteDeConversas?: number;
 }) {
   const filtros: Array<[string, string, unknown]> = [];
+  let lotesDeConversas = 0;
   const linhasPorTabela = (tabela: string) =>
     tabela === "conversations"
       ? opts.visiveis.map((id) => ({ id }))
@@ -73,21 +75,35 @@ function sessaoComVisibilidade(opts: {
 
   function cadeia(tabela: string, linhas: unknown[]) {
     const c: Record<string, unknown> = {};
+    let inicio = 0;
+    let fim = linhas.length;
     for (const metodo of ["select", "order", "limit"]) c[metodo] = () => c;
-    for (const metodo of ["eq", "in"]) c[metodo] = (coluna: string, valor: unknown) => {
-      filtros.push([tabela, coluna, valor]);
+    c.range = (de: number, ate: number) => {
+      inicio = de;
+      fim = ate + 1;
       return c;
     };
-    c.then = (aceita: (v: unknown) => unknown) =>
-      Promise.resolve({
-        data: opts.falhaEm === tabela ? null : linhas,
-        error: opts.falhaEm === tabela ? { message: "Leitura da visibilidade indisponível" } : null,
+    for (const metodo of ["eq", "in"])
+      c[metodo] = (coluna: string, valor: unknown) => {
+        filtros.push([tabela, coluna, valor]);
+        return c;
+      };
+    c.then = (aceita: (v: unknown) => unknown) => {
+      const falhou =
+        opts.falhaEm === tabela ||
+        (tabela === "conversations" && ++lotesDeConversas === opts.falhaNoLoteDeConversas);
+      return Promise.resolve({
+        data: falhou ? null : linhas.slice(inicio, fim),
+        error: falhou ? { message: "Leitura da visibilidade indisponível" } : null,
       }).then(aceita);
+    };
     return c;
   }
 
   const cliente = { from: (tabela: string) => cadeia(tabela, linhasPorTabela(tabela)), filtros };
-  vi.mocked(createClient).mockResolvedValue(cliente as unknown as Awaited<ReturnType<typeof createClient>>);
+  vi.mocked(createClient).mockResolvedValue(
+    cliente as unknown as Awaited<ReturnType<typeof createClient>>,
+  );
   return cliente;
 }
 
@@ -157,6 +173,7 @@ describe("GET /api/v1/ai/cases", () => {
         return chain;
       },
       order: () => chain,
+      range: () => chain,
       then: (onF: (v: unknown) => unknown) =>
         Promise.resolve({ data: linhas(), error: null }).then(onF),
     };
@@ -174,6 +191,19 @@ describe("GET /api/v1/ai/cases", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("forbidden_role");
+  });
+
+  it("falha do lote 2 de visibilidade não cria o cliente admin nem devolve fila parcial", async () => {
+    session("agent");
+    const ids = Array.from(
+      { length: 210 },
+      (_, i) => `bbbbbbbb-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    );
+    sessaoComVisibilidade({ casos: ids, visiveis: ids, falhaNoLoteDeConversas: 2 });
+    const { GET } = await import("@/app/api/v1/ai/cases/route");
+    const res = await GET(new NextRequest("http://localhost/api/v1/ai/cases?status=open"));
+    expect(res.status).toBe(500);
+    expect(createAdminClient).not.toHaveBeenCalled();
   });
 
   it("status=open filtra por organization_id + status abertos", async () => {

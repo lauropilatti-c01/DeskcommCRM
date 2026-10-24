@@ -16,6 +16,19 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export const ESTADOS_ABERTOS = ["awaiting_human", "awaiting_lead"] as const;
 export const ESTADOS_FECHADOS = ["resolved", "escalated", "cancelled"] as const;
 
+// UUIDs em IN viram parte da URL do PostgREST. Lotes de 100 ficam abaixo
+// dos 8 KB; páginas de 200 não dependem do teto implícito de 1.000 linhas.
+const TAMANHO_LOTE_IDS = 100;
+const TAMANHO_PAGINA = 200;
+function lotesDeIds(ids: string[]): string[][] {
+  const unicos = [...new Set(ids)];
+  const lotes: string[][] = [];
+  for (let i = 0; i < unicos.length; i += TAMANHO_LOTE_IDS) {
+    lotes.push(unicos.slice(i, i + TAMANHO_LOTE_IDS));
+  }
+  return lotes;
+}
+
 /**
  * Quais conversas quem está lendo pode ver — parâmetro OBRIGATÓRIO, sem default.
  *
@@ -53,7 +66,7 @@ function recorte(visiveisPara: ConversasVisiveis): string[] | null {
   if (visiveisPara === "todas") return null;
   if (!Array.isArray(visiveisPara)) {
     throw new Error(
-      "chamados: `visiveisPara` é obrigatório — declare `\"todas\"` (cliente admin por " +
+      'chamados: `visiveisPara` é obrigatório — declare `"todas"` (cliente admin por ' +
         "contrato, como o MCP) ou o conjunto de conversas que a RLS devolveu para a sessão.",
     );
   }
@@ -81,30 +94,35 @@ export async function conversasVisiveisDosCasos(
   organizationId: string,
   opts: { caseId?: string } = {},
 ): Promise<string[]> {
-  const base = sessao
-    .from("agent_cases")
-    .select("conversation_id")
-    .eq("organization_id", organizationId);
-  const { data: dosCasos, error: erroDosCasos } = await (opts.caseId
-    ? base.eq("id", opts.caseId)
-    : base);
-  if (erroDosCasos) throw new Error(erroDosCasos.message);
+  const candidatas = new Set<string>();
+  for (let inicio = 0; ; inicio += TAMANHO_PAGINA) {
+    const base = sessao
+      .from("agent_cases")
+      .select("conversation_id")
+      .eq("organization_id", organizationId);
+    const consulta = opts.caseId ? base.eq("id", opts.caseId) : base;
+    const { data, error } = await consulta
+      .order("id", { ascending: true })
+      .range(inicio, inicio + TAMANHO_PAGINA - 1);
+    if (error) throw new Error(error.message);
+    const linhas = (data ?? []) as Array<{ conversation_id: string }>;
+    for (const linha of linhas) candidatas.add(linha.conversation_id);
+    if (opts.caseId || linhas.length < TAMANHO_PAGINA) break;
+  }
 
-  const candidatas = [
-    ...new Set(
-      ((dosCasos ?? []) as Array<{ conversation_id: string }>).map((l) => l.conversation_id),
-    ),
-  ];
-  if (candidatas.length === 0) return [];
-
-  const { data: visiveis, error: erroVisiveis } = await sessao
-    .from("conversations")
-    .select("id")
-    .eq("organization_id", organizationId)
-    .in("id", candidatas);
-  if (erroVisiveis) throw new Error(erroVisiveis.message);
-
-  return ((visiveis ?? []) as Array<{ id: string }>).map((c) => c.id);
+  const visiveis = new Set<string>();
+  for (const lote of lotesDeIds([...candidatas])) {
+    // A RLS de sessão continua sendo o único juiz; nenhum lote pode falhar
+    // e deixar o chamador prosseguir com uma autorização parcial.
+    const { data, error } = await sessao
+      .from("conversations")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .in("id", lote);
+    if (error) throw new Error(error.message);
+    for (const linha of (data ?? []) as Array<{ id: string }>) visiveis.add(linha.id);
+  }
+  return [...visiveis];
 }
 
 export interface ChamadoDaLista {
@@ -214,34 +232,63 @@ export async function listarChamados(
   const estados = opts.estado === "abertos" ? ESTADOS_ABERTOS : ESTADOS_FECHADOS;
   const conversas = recorte(opts.visiveisPara);
 
-  const filtrada = supabase
-    .from("agent_cases")
-    .select(COLUNAS_LISTA)
-    .eq("organization_id", organizationId)
-    .in("status", estados as unknown as string[]);
-  const base = (conversas === null ? filtrada : filtrada.in("conversation_id", conversas)).order(
-    "opened_at",
-    { ascending: false },
+  if (opts.limite !== undefined && (!Number.isInteger(opts.limite) || opts.limite < 0)) {
+    throw new Error("chamados: limite deve ser inteiro não negativo");
+  }
+  const lotes: Array<string[] | null> = conversas === null ? [null] : lotesDeIds(conversas);
+  const linhas: LinhaComContato[] = [];
+  let abertos = 0;
+  for (const lote of lotes) {
+    // Cada lote busca até o limite pedido; o limite da resposta só é aplicado
+    // depois de juntar e ordenar todos. Uma conversa pode ter >1.000 casos.
+    let lidas = 0;
+    while (opts.limite === undefined || lidas < opts.limite) {
+      const tamanho = Math.min(TAMANHO_PAGINA, (opts.limite ?? Infinity) - lidas);
+      const consulta = supabase
+        .from("agent_cases")
+        .select(COLUNAS_LISTA)
+        .eq("organization_id", organizationId)
+        .in("status", estados as unknown as string[]);
+      const { data, error } = await (
+        lote === null ? consulta : consulta.in("conversation_id", lote)
+      )
+        .order("opened_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(lidas, lidas + tamanho - 1);
+      if (error) throw new Error(error.message);
+      const pagina = (data ?? []) as unknown as LinhaComContato[];
+      linhas.push(...pagina);
+      lidas += pagina.length;
+      if (pagina.length < tamanho) break;
+    }
+
+    // O contador recebe o MESMO recorte e independe de estado/limite da lista.
+    const contagem = supabase
+      .from("agent_cases")
+      .select("id", { count: "exact", head: true })
+      .eq("organization_id", organizationId)
+      .in("status", ESTADOS_ABERTOS as unknown as string[]);
+    const { count, error } = await (lote === null
+      ? contagem
+      : contagem.in("conversation_id", lote));
+    if (error) throw new Error(error.message);
+    abertos += count ?? 0;
+  }
+  // Postgres preserva microssegundos; Date.parse sozinho arredonda para ms e
+  // trataria datas diferentes como empate ao unir lotes.
+  const microsRestantes = (data: string) =>
+    Number(
+      (data.match(/\.(\d+)(?:Z|[+-]\d{2}(?::?\d{2})?)$/)?.[1] ?? "").padEnd(6, "0").slice(3, 6),
+    );
+  linhas.sort(
+    (a, b) =>
+      Date.parse(b.opened_at) - Date.parse(a.opened_at) ||
+      microsRestantes(b.opened_at) - microsRestantes(a.opened_at) ||
+      b.id.localeCompare(a.id),
   );
-
-  const { data, error } = await (opts.limite === undefined ? base : base.limit(opts.limite));
-  if (error) throw new Error(error.message);
-
-  // O contador recebe o MESMO recorte: ele é o crachá da navegação, e dizer
-  // "2 em aberto" sobre uma lista de um manda a pessoa procurar um caso que ela
-  // nunca vai achar.
-  const contagem = supabase
-    .from("agent_cases")
-    .select("id", { count: "exact", head: true })
-    .eq("organization_id", organizationId)
-    .in("status", ESTADOS_ABERTOS as unknown as string[]);
-  const { count } = await (conversas === null
-    ? contagem
-    : contagem.in("conversation_id", conversas));
-
   return {
-    chamados: ((data ?? []) as unknown as LinhaComContato[]).map(achatarContato),
-    abertos: count ?? 0,
+    chamados: linhas.slice(0, opts.limite).map(achatarContato),
+    abertos,
   };
 }
 

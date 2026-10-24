@@ -101,6 +101,7 @@ function bancoFake(tabelas: Record<string, Linha[]>) {
       },
       order: () => cadeia,
       limit: () => cadeia,
+      range: () => cadeia,
       maybeSingle: async () => ({ data: linhas()[0] ?? null, error: null }),
       then: (aceita: (valor: unknown) => unknown) => Promise.resolve(resultado()).then(aceita),
     };
