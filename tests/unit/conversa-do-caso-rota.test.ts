@@ -109,7 +109,7 @@ function sessaoComVisibilidade(visiveis: string[], mensagens: unknown[] = []) {
         : mensagens;
   function cadeia(rows: unknown[]) {
     const c: Record<string, unknown> = {};
-    for (const m of ["select", "eq", "in", "order", "limit", "lt"]) c[m] = () => c;
+    for (const m of ["select", "eq", "in", "order", "limit", "lt", "range"]) c[m] = () => c;
     c.then = (aceita: (v: unknown) => unknown) =>
       Promise.resolve({ data: rows, error: null }).then(aceita);
     return c;
