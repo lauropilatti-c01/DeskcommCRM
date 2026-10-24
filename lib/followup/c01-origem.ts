@@ -16,6 +16,12 @@ const configSchema = z.strictObject({
   signingKey: z.string().min(32),
   offerConnectionId: z.uuid().optional(),
   allowedKinds: z.array(z.enum(["cronograma", "oferta", "video_curso"])).min(1),
+  /** Opt-in independente. Ausente, proposta ou sem ativação não expõe a ferramenta. */
+  continuation: z.strictObject({
+    enabled: z.boolean(),
+    policyStatus: z.enum(["proposed", "approved"]),
+    activatedAt: z.iso.datetime().nullable(),
+  }).optional(),
   /** OFF e copy proposta não capturam origem nem autorizam envio. */
   videoCourse: z.strictObject({
     enabled: z.boolean(),

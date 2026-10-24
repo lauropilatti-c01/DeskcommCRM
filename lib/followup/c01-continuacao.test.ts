@@ -94,6 +94,15 @@ function offer(f: FatosContinuacaoC01) {
 }
 
 describe("continuação contextual proposta, com autoridade do servidor", () => {
+  it("L1 antes da oferta aceita produto ausente; L2 exige a identidade exata", () => {
+    const f = fixture();
+    f.productKey = null;
+    expect(planejarContinuacaoC01(proposal, f, now).kind).toBe("candidate");
+    offer(f);
+    expect(
+      planejarContinuacaoC01({ ...proposal, caminho: "L2", texto: undefined }, f, now).kind,
+    ).toBe("blocked");
+  });
   it("L1 espera duas horas do último envio comprovado, mesmo com status sent e recibo", () => {
     expect(planejarContinuacaoC01(proposal, fixture(), now)).toMatchObject({
       kind: "candidate",

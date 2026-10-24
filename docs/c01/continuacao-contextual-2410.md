@@ -1,12 +1,14 @@
 # Continuação contextual L1/L2 — candidata local
 
-Estado: primeira fatia do contrato, sem publicação, matrícula ou envio. As políticas e os textos continuam candidatos. Sem DDL ou alteração do texto/skills da Marina.
+Estado: contrato e ferramenta opt-in integrados ao turno; candidatura assinada no JSON do job existente. Sem publicação, matrícula ou envio. As políticas e os textos continuam candidatos. Sem DDL ou alteração do texto/skills da Marina.
 
 ## Desenho
 
 Uma ferramenta opt-in C01 recebe, durante o turno já existente, uma proposta estruturada: pedido ainda aberto ou encerramento/pausa/recusa/compra informada/humano. A proposta traz o ID da mensagem de entrada, trecho literal do pedido e, para L1, o texto contextual. Não existe chamada nova de modelo para preparar a retomada. `next_action`, etiquetas e campos comerciais mutáveis não dão autorização.
 
-O servidor reconcilia organização, pessoa, conversa, oportunidade/produto, job, entrada e última saída. Só depois de o job estar concluído e de a saída final ter recibo comprovado poderá registrar a candidatura assinada e matricular. Um agradecimento isolado não prova pedido aberto. A interpretação do modelo continua sendo uma proposta, não prova semântica independente: o contrato confere vínculo e vetos conservadores; os cenários comerciais precisam validar a classificação no turno.
+O servidor reconcilia organização, pessoa, conversa, oportunidade/produto, job, entrada e última saída. O fim bem-sucedido do turno registra candidatura assinada, protegida pela tentativa/lease atual. Só depois de o job estar concluído e de a saída final ter recibo comprovado poderá matricular. Um agradecimento isolado não prova pedido aberto. A interpretação do modelo continua sendo uma proposta, não prova semântica independente: o contrato confere vínculo e vetos conservadores; os cenários comerciais precisam validar a classificação no turno.
+
+L1 representa explicitamente `financialScope=sem_oferta`: exige oportunidade única, mas admite `productKey=null`, pois o formulário não garante produto escolhido. A guarda financeira precisa de negativa completa por pessoa; compra conhecida ou identidade ambígua bloqueiam. L2 mantém produto exato. A porta financeira por produto não será usada com produto artificial para liberar L1.
 
 - **L1:** um toque, nunca antes de duas horas da entrega final; somente na janela de 24 h e entre 08h e 21h. Se a espera termina fora do horário, só adia para 08h se ainda couber na janela. Não compete com oferta.
 - **L2:** conserva mensagem/entrega da oferta original e seus recibos. O índice seguinte deriva dos toques já entregues; os prazos 2 h/D+1/D+3/D+7 continuam calculados pela oferta original. Uma nova resposta acrescenta apenas uma espera mínima de duas horas de silêncio; não zera a sequência nem permite vários toques imediatos. Quatro toques usados ou recibo incompleto bloqueiam.
@@ -23,4 +25,6 @@ O recibo pode existir com `status=sent`: o estado isolado não comprova entrega 
 4. Modelos por conexão + ID + hash exatos do catálogo lido pelo servidor. Ausência de modelo/catálogo/página bloqueia; etiquetas A1/O2 não comprovam conteúdo. D+3 variável não ganha substituto silencioso.
 5. Revisão independente única e integração pela coordenação. Portão da árvore final posterior; nenhuma etapa aqui autoriza ativação ou mensagem real.
 
-Comando focado desta fatia: `pnpm exec vitest run lib/followup/c01-continuacao.test.ts`.
+Prova das duas primeiras fatias: 19 cenários unitários, incluindo L1 sem produto, assinatura adulterada, outra organização, lease perdido e negócio ambíguo. Typecheck Node 22 aprovado; lint sem erros (dois avisos preexistentes em `inbound-turn.ts`). A prova de matrícula/worker ainda não foi executada.
+
+Comando focado: `pnpm exec vitest run lib/followup/c01-continuacao.test.ts lib/followup/c01-continuacao-turno.test.ts`.

@@ -25,7 +25,7 @@ export interface FatosContinuacaoC01 {
   contactId: string;
   conversationId: string;
   leadId: string;
-  productKey: string;
+  productKey: string | null;
   job: {
     id: string;
     organizationId: string;
@@ -118,7 +118,6 @@ export function planejarContinuacaoC01(
         s.conversationId !== f.conversationId,
     ) ||
     !f.leadId ||
-    !f.productKey ||
     f.final.jobId !== f.job.id ||
     f.inbound.id !== f.job.inboundMessageId ||
     p.mensagem_entrada_id !== f.inbound.id ||
@@ -200,6 +199,7 @@ export function planejarContinuacaoC01(
   const o = f.offer;
   if (
     !o?.trusted ||
+    !f.productKey ||
     p.texto !== undefined ||
     o.organizationId !== f.organizationId ||
     o.contactId !== f.contactId ||
