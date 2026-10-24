@@ -23,6 +23,8 @@ export interface RegistroFinanceiro {
   status: "paid" | "pending" | "review";
   proof?: ProvaFinanceira;
   reviewReason?: "comprovante_financeiro_incompleto";
+  /** Não gera prova de pagamento; só distingue gratuidade na guarda sem oferta. */
+  freeWithoutPayment?: true;
 }
 interface IdentidadeConsultada {
   phone: string | null;
@@ -182,6 +184,7 @@ export function criarFonteFinanceira(
       status: RegistroFinanceiro["status"];
     let phone: string | null, offerId: string | null;
     let evidenceIncomplete = false;
+    let freeWithoutPayment = false;
     let providerEvidence: unknown;
     if (cfg.provider === "guru") {
       p = rec(row.product);
@@ -210,6 +213,13 @@ export function criarFonteFinanceira(
         paidAt = iso(dates.confirmed_at, true);
         paidCents = totalCents;
       }
+      freeWithoutPayment =
+        totalCents === 0 &&
+        status !== "review" &&
+        !dates.canceled_at &&
+        !dates.refunded_at &&
+        !pay.refund_reason &&
+        !(status !== "paid" && dates.confirmed_at);
       if (
         dates.canceled_at ||
         dates.refunded_at ||
@@ -314,6 +324,7 @@ export function criarFonteFinanceira(
       email: email(c.email),
       orderedAt,
       status,
+      ...(freeWithoutPayment ? { freeWithoutPayment: true as const } : {}),
       ...(evidenceIncomplete ? { reviewReason: "comprovante_financeiro_incompleto" as const } : {}),
     };
     if (status === "paid") {

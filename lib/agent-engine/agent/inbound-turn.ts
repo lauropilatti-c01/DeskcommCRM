@@ -1,4 +1,6 @@
 import { configOrigemC01 } from "@/lib/followup/c01-origem";
+import { propostaContinuacaoC01Schema, type PropostaContinuacaoC01 } from "@/lib/followup/c01-continuacao";
+import { continuacaoDoTurnoHabilitada, gravarCandidaturaContinuacaoC01 } from "@/lib/followup/c01-continuacao-turno";
 import { completarConsultaOfertaC01, ofertasDaConsultaC01, origemDaOfertaEnviadaC01, type OfertaConsultadaC01 } from "@/lib/followup/c01-origem-oferta";
 import { lerPoliticaMatricula, prepararMatriculaUmaVez, reciboDaMatriculaSuprimida } from './c01-matricula-uma-vez';
 import { videosDaConsultaC01, origemDoVideoEnviadoC01, type VideoConsultadoC01 } from "@/lib/followup/c01-video-curso";
@@ -4897,6 +4899,8 @@ async function executarTurnoDoAgente(
    */
   const mcpToolIdsDoTurno: string[] = [];
 
+  let propostaDeContinuacaoC01: PropostaContinuacaoC01 | undefined;
+  const configDeContinuacaoC01 = configOrigemC01();
   const rawTools: ToolSet = {
     get_lead_context: tool({
       ...AGENT_TOOL_DEFS.get_lead_context,
@@ -6366,6 +6370,21 @@ async function executarTurnoDoAgente(
     rawTools.send_message = umaRespostaPorTurno(rawTools.send_message, (recusadas) =>
       runLog.warn('uma resposta por turno: send_message recusado', { recusadas }),
     );
+  }
+
+  // C01: apenas prepara no turno atual. Matrícula depende de conclusão e recibo.
+  if (!preview && liveJob().kind === 'inbound_turn' &&
+      continuacaoDoTurnoHabilitada(configDeContinuacaoC01, tenantId)) {
+    rawTools.prepare_contextual_followup = tool({
+      description: 'Registre o estado ao concluir a resposta atual. Só declare pendente se houver pedido explícito ainda aberto na mensagem de entrada, citando trecho literal e seu ID. Obrigado, pausa, recusa, compra informada, pedido de humano ou assunto já resolvido não são pendência. L1 prepara um texto contextual breve para um único toque futuro; L2 preserva somente os toques restantes da oferta original e não aceita texto novo. Não prometa envio nem horário: esta ferramenta não agenda, não inscreve e não manda mensagem.',
+      inputSchema: propostaContinuacaoC01Schema,
+      execute: async (proposal) => {
+        if (proposal.estado === 'pendente' && proposal.mensagem_entrada_id !== input.inboundMessageId)
+          return { ok: false, reason: 'mensagem_fora_do_turno' };
+        propostaDeContinuacaoC01 = proposal;
+        return { ok: true, status: 'proposta_registrada_sem_agendamento' };
+      },
+    });
   }
 
   // F3-02: a tool nativa só entra com janela configurada e callback habilitado
@@ -8149,6 +8168,24 @@ async function executarTurnoDoAgente(
       );
     }
 
+    if (!preview && liveJob().kind === 'inbound_turn' && propostaDeContinuacaoC01 &&
+        !passadoAoHumano && !turnoDescartado && !followupAgendadoNesteTurno) {
+      const claim = claimOfJob(liveJob());
+      if (claim && input.conversationId) {
+        try {
+          const candidatura = await gravarCandidaturaContinuacaoC01(pool, configDeContinuacaoC01, {
+            organizationId: tenantId, contactId: leadId, conversationId: input.conversationId,
+            jobId: liveJob().id, workerId: ctx.workerId, acquiredAt: claim.acquired_at,
+          }, propostaDeContinuacaoC01, clock());
+          runLog.info('candidatura de continuação C01 conferida', candidatura);
+        } catch (err) {
+          // Uma falha opcional não repete a resposta nem compra outro turno de IA.
+          runLog.warn('candidatura de continuação C01 não gravada', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
     runLog.info('turno do agente concluído', {
       kind: liveJob().kind,
       messages_sent: outcomes.length,

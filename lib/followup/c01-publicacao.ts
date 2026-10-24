@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FlowGraph } from "./graph-schema";
+import { rotaDeContinuacaoC01 } from "./c01-continuacao-grafo";
 import { configOrigemC01 } from "./c01-origem";
 import { politicaDoVideoValidaC01 } from "./c01-video-curso";
 import { configuracoesFinanceiras } from "@/lib/leads/configuracao-financeira";
@@ -22,7 +23,11 @@ export async function conferirPublicacaoC01(
   if (
     !cfg?.enabled ||
     cfg.organizationId !== params.orgId ||
-    !cfg.allowedKinds.includes(policy.kind)
+    (policy.kind === "conversa"
+      ? !cfg.continuation?.enabled ||
+        cfg.continuation.policyStatus !== "approved" ||
+        !cfg.continuation.activatedAt
+      : !cfg.allowedKinds.includes(policy.kind))
   )
     return "A integração de acompanhamentos está desligada ou não pertence a esta organização.";
   if (
@@ -30,13 +35,17 @@ export async function conferirPublicacaoC01(
     (!cfg.videoCourse?.catalog.length || !politicaDoVideoValidaC01(params.graph, cfg))
   )
     return "A pergunta após o vídeo precisa de catálogo, texto aprovado e grafo de toque único habilitado.";
+  if (policy.kind === "conversa" && !rotaDeContinuacaoC01(params.graph, "L1", 1))
+    return "A continuação exige o grafo de um toque, distinto da oferta.";
   const { data: pointer, error } = await admin
     .from("followup_flow_pointers")
-    .select("id,active_version_id")
+    .select("id,active_version_id,trigger_config")
     .eq("organization_id", params.orgId)
     .eq("id", params.pointerId)
     .maybeSingle();
   if (error || !pointer) return "Não foi possível conferir a versão deste fluxo.";
+  if (policy.kind === "conversa" && pointer.trigger_config?.cancel_on_reply !== true)
+    return "A continuação exige cancelamento por resposta; não desative cancel_on_reply.";
   let previousAt: string | null = null;
   if (pointer.active_version_id) {
     const { data: version, error: e } = await admin
@@ -70,9 +79,16 @@ export async function conferirPublicacaoC01(
       .map((p) => `${p.crmProductKey}::${p.crmOfferKey}`),
   );
   if (
-    mapped.some((xs) => !xs.length) ||
-    mapped[0]!.some((key) => !mapped[1]!.includes(key)) ||
-    mapped[1]!.some((key) => !mapped[0]!.includes(key))
+    policy.kind === "conversa" &&
+    (!providers.every((provider) => financial.some((c) => c.provider === provider)) ||
+      financial.some((c) => c.provider === "guru" && !c.historyCoverage))
+  )
+    return "Falta a cobertura financeira integral por pessoa, comprovada nas duas fontes.";
+  if (
+    policy.kind !== "conversa" &&
+    (mapped.some((xs) => !xs.length) ||
+      mapped[0]!.some((key) => !mapped[1]!.includes(key)) ||
+      mapped[1]!.some((key) => !mapped[0]!.includes(key)))
   )
     return "Faltam mapas equivalentes de produto/oferta deste fluxo nas fontes Guru e boleto habilitadas.";
   const { data: channels, error: ce } = await admin

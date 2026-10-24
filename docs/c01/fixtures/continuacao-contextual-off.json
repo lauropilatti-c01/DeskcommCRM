@@ -1,0 +1,66 @@
+{
+  "nodes": [
+    {
+      "id": "inicio",
+      "type": "trigger",
+      "config": {},
+      "label": "inicio",
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "continuidade",
+      "type": "action",
+      "config": {
+        "mode": "text",
+        "body": "Texto contextual obrigatório da prova assinada do turno; não enviar este marcador."
+      },
+      "label": "continuidade",
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "fim",
+      "type": "end",
+      "config": {
+        "outcome": "custom"
+      },
+      "label": "fim",
+      "position": {
+        "x": 0,
+        "y": 240
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e0",
+      "source": "inicio",
+      "target": "continuidade",
+      "priority": 0,
+      "condition": {
+        "type": "always"
+      }
+    },
+    {
+      "id": "e1",
+      "source": "continuidade",
+      "target": "fim",
+      "priority": 0,
+      "condition": {
+        "type": "always"
+      }
+    }
+  ],
+  "settings": {
+    "c01_acompanhamento": {
+      "version": 1,
+      "kind": "conversa",
+      "activated_at": null
+    }
+  }
+}

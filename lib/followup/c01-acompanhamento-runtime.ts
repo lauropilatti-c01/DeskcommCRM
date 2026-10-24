@@ -1,3 +1,5 @@
+import { exigeCatalogoCronogramaC01 } from "./c01-cronograma-catalogo";
+import { escopoDoConteudoC01, conferirConteudoResolvidoC01, resolverPassoC01 } from "./c01-acompanhamento-conteudo";
 import { conferirRetornoNoEnvioC01 } from "./c01-retorno";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ProactiveContext } from "@/lib/agenda/efeito";
@@ -40,6 +42,7 @@ async function fonteAplicada(
   if (!cfg?.enabled || cfg.organizationId !== scope.organizationId) return null;
   const held = envio.getStore();
   const { lerSituacaoFinanceira } = await import("@/lib/leads/fonte-financeira");
+  const {lerSituacaoFinanceiraSemOferta}=await import("@/lib/leads/fonte-financeira-sem-oferta");
   return lerFatosAcompanhamentoC01(
     held?.lock.db ?? getRequestPool(),
     cfg,
@@ -47,6 +50,7 @@ async function fonteAplicada(
     now,
     lerSituacaoFinanceira,
     held?.lock.signal,
+    lerSituacaoFinanceiraSemOferta,
   );
 }
 
@@ -212,6 +216,26 @@ export async function assertAcompanhamentoC01Supabase(
   // integração está pronta. Só código de uma fonte aplicada pode liberar.
   if (decision.kind !== "send")
     refuse("reason" in decision ? decision.reason : "envio_nao_autorizado");
+  const sourceConfig = configOrigemC01();
+  let continuation = false;
+  if (config.data.kind === "oferta" && sourceConfig?.continuation?.enabled && !sourceConfig.offerTemplates?.enabled) {
+    // O vínculo persistido exige conteúdo resolvido também no L2 dentro da
+    // janela. A flag do job não é prova e oferta legada não ganha esta condição.
+    const { data: link, error: linkError } = await db.from("followup_enrollment_events")
+      .select("id").eq("organization_id", organizationId)
+      .eq("enrollment_id", context.enrollmentId).eq("event_type", "c01_continuacao_entregue").maybeSingle();
+    if (linkError) refuse("vinculo_de_continuacao_indisponivel");
+    continuation = !!link;
+  }
+  if(config.data.kind === "conversa" || exigeCatalogoCronogramaC01(version.graph) || continuation ||
+      (config.data.kind === "oferta" && sourceConfig?.offerTemplates?.enabled)) {
+    const contentScope=escopoDoConteudoC01(context);
+    const held=envio.getStore();
+    if(!held) refuse("conteudo_sem_trava");
+    const current=await resolverPassoC01(held!.lock.db,contentScope,now);
+    conferirConteudoResolvidoC01(context,current);
+    await held!.lock.conferir();
+  }
 }
 
 /** Marca antes de sair da máquina. Queda depois do POST e antes do recibo não

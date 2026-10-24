@@ -16,6 +16,23 @@ const configSchema = z.strictObject({
   signingKey: z.string().min(32),
   offerConnectionId: z.uuid().optional(),
   allowedKinds: z.array(z.enum(["cronograma", "oferta", "video_curso"])).min(1),
+  /** Opt-in independente. Ausente, proposta ou sem ativação não expõe a ferramenta. */
+  continuation: z.strictObject({
+    enabled: z.boolean(),
+    policyStatus: z.enum(["proposed", "approved"]),
+    activatedAt: z.iso.datetime().nullable(),
+  }).optional(),
+  /** Cada modelo pertence à versão/nó/produto/conexão revisados. Ausência = bloqueio. */
+  offerTemplates: z.strictObject({
+    enabled:z.boolean(),policyStatus:z.enum(["proposed","approved"]),
+    bindings:z.array(z.strictObject({versionId:z.uuid(),nodeId:z.string().min(1),productKey:z.string().min(1),
+      connectionId:z.uuid(),templateId:z.uuid(),language:z.string().min(2).max(20),category:z.enum(["UTILITY","MARKETING"]),contentHash:z.string().regex(/^[a-f0-9]{64}$/)})).max(100),
+  }).optional(),
+  cronogramaCatalog: z.strictObject({
+    enabled:z.boolean(),policyStatus:z.enum(["proposed","approved"]),connectionId:z.uuid(),
+    bindings:z.array(z.strictObject({versionId:z.uuid(),withMaterialNodeId:z.string().min(1),unknownAreaNodeId:z.string().min(1),noMaterialNodeId:z.string().min(1),
+      withMaterialBodyHash:z.string().regex(/^[a-f0-9]{64}$/),unknownAreaBodyHash:z.string().regex(/^[a-f0-9]{64}$/)})).max(20),
+  }).optional(),
   /** OFF e copy proposta não capturam origem nem autorizam envio. */
   videoCourse: z.strictObject({
     enabled: z.boolean(),

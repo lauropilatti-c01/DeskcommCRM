@@ -1,6 +1,9 @@
+import { exigeCatalogoCronogramaC01, resolverRamoCronogramaC01, TAGS_CATALOGO_C01 } from "./c01-cronograma-catalogo";
 import { encerrarOfertaC01, type ResultadoEncerramentoC01 } from "./c01-encerrar-oferta";
 import { decidirAcompanhamentoC01 } from "./c01-acompanhamento-runtime";
 import { inscreverOrigensConfirmadasC01 } from "./c01-acompanhamento-origens";
+import { conferirVinculoContinuacaoC01 } from "./c01-continuacao-fontes";
+import { configOrigemC01 } from "./c01-origem";
 import type { ConfigAcompanhamento, DecisaoAcompanhamento } from "./c01-acompanhamento";
 import type { JobClaim } from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
@@ -113,6 +116,7 @@ export interface FollowupJobRequest {
     fallback_template_id?: string;
     /** action (mode 'text') — corpo pronto; o turno envia sem chamar o modelo. */
     fixed_body?: string;
+    c01_resolve?: true;
     /**
      * action (mode 'text') — #2734: mídia OPCIONAL (imagem ou PDF) por URL. Presente,
      * o `fixed_body` vira a LEGENDA. O envio reusa o caminho de mídia do Inbox e das
@@ -141,6 +145,7 @@ export interface FollowupJobRequest {
 export interface AdminClient {
   encerrarOfertaC01?(enrollment: EnrollmentRow, now: Date): Promise<ResultadoEncerramentoC01>;
   /** C01 opt-in: a ausência da fonte nunca libera o fluxo. */
+  resolverRamoCronogramaC01?(enrollment:EnrollmentRow,graph:FlowGraph):ReturnType<typeof resolverRamoCronogramaC01>;
   decidirAcompanhamentoC01?(config: ConfigAcompanhamento, enrollment: EnrollmentRow, now: Date): Promise<DecisaoAcompanhamento>;
   inscreverOrigensConfirmadasC01?(): Promise<void>;
   assertServiceBoundary?(enrollment: EnrollmentRow): Promise<void>;
@@ -483,6 +488,7 @@ async function applyResult(
   smartWaits: EsperaAdaptativa[] = [],
   events: EnrollmentEventRef[] = [],
   respostaParaGravar: string | null = null,
+  serverResolvedC01 = false,
   contexto?: Record<string, unknown> | null,
 ): Promise<void> {
   const { db, clock, enqueueJob } = deps;
@@ -682,7 +688,7 @@ async function applyResult(
             node_id: node.id,
             source_step_key: idemKey,
             purpose: result.purpose,
-            ...turnPayloadExtras(node, smartWaits, events, contexto),
+            ...(serverResolvedC01 ? { c01_resolve:true as const } : turnPayloadExtras(node, smartWaits, events, contexto)),
             ...(result.fixed_body ? { fixed_body: result.fixed_body } : {}),
           },
         });
@@ -886,17 +892,17 @@ async function processEnrollment(
     if (result.kind === "closed") summary.advanced++;
     return;
   }
-  if (policy && (node.type === "action" || node.type === "move_lead" || (node.type === "end" && (node.config.outcome === "exhausted" || policy.kind === "video_curso")))) {
+  if (policy && (node.type === "action" || node.type === "move_lead" || (node.type === "end" && (node.config.outcome === "exhausted" || ["video_curso","conversa"].includes(policy.kind))))) {
     const decision = policy.kind === "oferta" && node.type === "move_lead"
       ? { kind: "blocked" as const, reason: "integracao_aplicada_indisponivel" }
       : db.decidirAcompanhamentoC01
       ? await db.decidirAcompanhamentoC01(policy, enrollment, clock())
       : { kind: "blocked" as const, reason: "integracao_aplicada_indisponivel" };
-    const expected = node.type === "action" ? "send" : policy.kind === "video_curso" && node.type === "end" ? "complete" : "lost";
+    const expected = node.type === "action" ? "send" : ["video_curso","conversa"].includes(policy.kind) && node.type === "end" ? "complete" : "lost";
     if (decision.kind !== expected) {
       const reason = "reason" in decision ? decision.reason : "passo_incompativel_com_politica";
       const terminal = decision.kind === "cancel" || decision.kind === "complete";
-      const videoConcluido = policy.kind === "video_curso" && decision.kind === "complete";
+      const videoConcluido = ["video_curso","conversa"].includes(policy.kind) && decision.kind === "complete";
       const patch: EnrollmentPatch = decision.kind === "defer"
         ? { next_eval_at: decision.until, claimed_until: null, last_error: `c01:${reason}` }
         : { status: videoConcluido ? "completed" : terminal ? "cancelled" : "paused_manual", next_eval_at: null, claimed_until: null, last_error: videoConcluido ? null : `c01:${reason}`, ...(terminal ? { cancel_reason: reason, completed_at: clock().toISOString() } : {}) };
@@ -928,6 +934,19 @@ async function processEnrollment(
     enrollment.contact_id,
     funilDoFluxo,
   );
+  if(exigeCatalogoCronogramaC01(graph)) {
+    const catalog=await db.resolverRamoCronogramaC01?.(enrollment,graph);
+    if(!catalog || catalog.status === "indisponivel" || (node.type === "action" && catalog.targetNodeId!==node.id)) {
+      const reason=catalog?.status==="indisponivel"?catalog.reason:"catalogo_alterado_ou_indisponivel";
+      await db.updateEnrollment(enrollment.id,enrollment.organization_id,{status:"paused_manual",next_eval_at:null,claimed_until:null,last_error:`c01:${reason}`});
+      return;
+    }
+    // Etiquetas do card são ignoradas. A projeção vale só nesta avaliação e é
+    // relida no worker/sink; nada é gravado como autorização durável no cadastro.
+    leadRow.tags=[...leadRow.tags.filter(t=>!TAGS_CATALOGO_C01.includes(t as typeof TAGS_CATALOGO_C01[number])),
+      ...(catalog.status === "confirmado" ? [TAGS_CATALOGO_C01[0]] : catalog.status === "area_desconhecida" ? [TAGS_CATALOGO_C01[1]] : [])];
+    leadRow.custom_fields={...leadRow.custom_fields,...(catalog.status === "confirmado"?{enfase_nome:catalog.enfaseNome}:{})};
+  }
   // O FUSO só é lido quando o grafo PERGUNTA por data: comparar dia de
   // calendário em UTC adiantaria o disparo em três horas num fuso a oeste, e
   // disparar cedo é o dano que a regra de data existe para evitar.
@@ -1018,6 +1037,15 @@ async function processEnrollment(
   const textoInbound = inboundBodyOverride?.trim() ?? "";
   if (textoInbound && (node.type === "match_reply" || node.type === "wait")) {
     wokeEarly = true;
+  }
+  // L2 mantém os prazos da oferta raiz. A espera relativa do desenho não reinicia
+  // D1/D3/D7: o próximo action relê a mesma política com âncora/recibos originais.
+  if (policy?.kind === "oferta" && node.type === "wait") {
+    const cfg = configOrigemC01();
+    const raw = events.filter(e=>e.event_type === "c01_continuacao_entregue");
+    const proof = cfg && raw.length === 1 ? conferirVinculoContinuacaoC01(cfg,raw[0]!.payload) : null;
+    if (proof?.enrollmentId === enrollment.id && proof.candidate.organizationId === enrollment.organization_id &&
+        proof.candidate.contactId === enrollment.contact_id && proof.original) waitElapsed = true;
   }
 
   if (node.type === "repeat") {
@@ -1119,6 +1147,8 @@ async function processEnrollment(
     smartWaits,
     events,
     node.type === "match_reply" && wokeEarly ? (lastInboundBody ?? "").trim() || null : null,
+    exigeCatalogoCronogramaC01(graph) || policy?.kind === "conversa" || (policy?.kind === "oferta" &&
+      (events.some(e=>e.event_type === "c01_continuacao_entregue") || configOrigemC01()?.offerTemplates?.enabled === true)),
     contexto,
   );
 }
@@ -1173,6 +1203,10 @@ export function createSupabaseAdminClient(admin: SupabaseClient): AdminClient {
     inscreverOrigensConfirmadasC01: () => inscreverOrigensConfirmadasC01(),
     encerrarOfertaC01(enrollment, now) {
       return encerrarOfertaC01(enrollment, now);
+    },
+    async resolverRamoCronogramaC01(enrollment,graph) {
+      const {getRequestPool}=await import("@/lib/agent-engine/db/request-pool");
+      return resolverRamoCronogramaC01(getRequestPool(),{organizationId:enrollment.organization_id,contactId:enrollment.contact_id,enrollmentId:enrollment.id},graph,enrollment.version_id);
     },
     decidirAcompanhamentoC01(config, enrollment, now) {
       return decidirAcompanhamentoC01(config, { organizationId: enrollment.organization_id, contactId: enrollment.contact_id, enrollmentId: enrollment.id }, now);
