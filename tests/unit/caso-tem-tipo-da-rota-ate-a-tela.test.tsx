@@ -101,7 +101,7 @@ function clienteFake(): SupabaseClient {
           opts?.head
             ? { data: null, error: null, count: 1 }
             : { data: [projetar(colunas, LINHA_DO_BANCO as never)], error: null, count: 1 };
-        for (const m of ["eq", "in", "order", "limit"]) cadeia[m] = () => cadeia;
+        for (const m of ["eq", "in", "order", "limit", "range"]) cadeia[m] = () => cadeia;
         cadeia.then = (r: (v: unknown) => unknown) => r(resposta());
         return cadeia;
       },

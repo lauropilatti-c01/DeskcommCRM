@@ -6,11 +6,12 @@ import { useSearchParams } from "next/navigation";
 import { formatDistanceToNowStrict } from "date-fns";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useCases, type CaseListItem } from "@/hooks/ai/useCases";
 import { STATUS_BADGE_VARIANT, STATUS_LABEL, tipoDeCasoLabel } from "@/lib/ai/case-copy";
-import { Robot } from "@/lib/ui/icons";
+import { CaretLeft, Robot } from "@/lib/ui/icons";
 import { cn } from "@/lib/utils";
 import { useT } from "@/hooks/i18n/useT";
 import { CaseDetail } from "./CaseDetail";
@@ -31,8 +32,13 @@ export function CaseList() {
   const { data, isLoading } = useCases(tab);
 
   return (
-    <div className="flex min-h-0 flex-1 gap-6">
-      <div className="flex w-full max-w-xs shrink-0 flex-col gap-4">
+    <div className="flex min-h-0 min-w-0 flex-1 gap-6">
+      <div
+        className={cn(
+          "flex w-full shrink-0 flex-col gap-4 md:flex md:max-w-xs",
+          selectedId !== null && "hidden",
+        )}
+      >
         <Tabs value={tab} onValueChange={(v) => setTab(v as "open" | "resolved")}>
           <TabsList>
             <TabsTrigger value="open">{t("Abertos")}{data ? ` (${data.open_count})` : ""}</TabsTrigger>
@@ -71,7 +77,20 @@ export function CaseList() {
         )}
       </div>
 
-      <div className="min-w-0 flex-1">
+      <div className={cn("min-w-0 flex-1", selectedId === null && "hidden md:block")}>
+        {/* Como no Inbox, a volta no celular depende da seleção, não da
+            resposta da API: continua disponível enquanto o detalhe carrega. */}
+        {selectedId !== null ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mb-4 h-11 gap-1 px-2 md:hidden"
+            onClick={() => setSelectedId(null)}
+          >
+            <CaretLeft size={16} aria-hidden />
+            {t("Voltar")}
+          </Button>
+        ) : null}
         <CaseDetail caseId={selectedId} />
       </div>
     </div>
