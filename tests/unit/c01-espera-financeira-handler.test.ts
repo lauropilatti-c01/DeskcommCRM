@@ -20,7 +20,8 @@ vi.mock("@/lib/audit", () => ({ audit: vi.fn(async () => {}) }));
 const org = "11111111-1111-4111-8111-111111111111",
   conv = "22222222-2222-4222-8222-222222222222",
   contact = "33333333-3333-4333-8333-333333333333",
-  session = "44444444-4444-4444-8444-444444444444";
+  session = "44444444-4444-4444-8444-444444444444",
+  jobId = "55555555-5555-4555-8555-555555555555";
 const ctx: HandlerCtx = {
   organization_id: org,
   actor: { type: "ai_agent", id: "agent-engine", role: "manager" },
@@ -28,7 +29,7 @@ const ctx: HandlerCtx = {
   proactiveContext: {
     organizationId: org,
     contactId: contact,
-    jobId: "55555555-5555-4555-8555-555555555555",
+    jobId,
     jobClaim: { worker_id: "ficticio", acquired_at: "2026-10-24T15:00:00Z" },
   },
 };
@@ -100,7 +101,7 @@ it("handler e ledger reais retomam o mesmo ID uma vez após a fonte recuperar", 
     message:async()=>{const m=f.mensagens.find(x=>x.id===key);return m?{id:key,status:String(m.status)}:null;},
     update:async(_org,_key,value)=>{status=value;},
   };
-  const intent={tenantId:org,leadId:contact,jobId:ctx.proactiveContext!.jobId,seq:1,body:"Retorno fictício"};
+  const intent={tenantId:org,leadId:contact,jobId,seq:1,body:"Retorno fictício"};
   const send=()=>sendWithLedger(store,intent,async(id)=>sendMessageHandler(f.supabase,{...ctx,internalMessageId:id},
     {conversation_id:conv,type:"text",body:intent.body,metadata:{idempotency_key:id}}));
   const wait=new EsperaFinanceiraC01Error("2026-10-24T18:01:00Z");

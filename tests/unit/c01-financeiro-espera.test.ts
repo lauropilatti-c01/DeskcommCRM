@@ -46,7 +46,7 @@ const cfg = {
 };
 describe("espera financeira limitada", () => {
   it("coleta na última tentativa não dispara a resposta de falha do agente", () => {
-    const job = { attempts: 5, max_attempts: 5, created_at: now.toISOString() };
+    const job = { attempts: 5, max_attempts: 5, created_at: new Date(now) };
     expect(falhaEsgotaAsTentativas(job, new Error("falha comum"), +now)).toBe(true);
     expect(
       falhaEsgotaAsTentativas(job, new EsperaFinanceiraC01Error(collection.deadlineAt), +now),
