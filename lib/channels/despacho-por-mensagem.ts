@@ -91,9 +91,10 @@ export async function registrarDespachoPorMensagem(
   if (readError || !Array.isArray(anteriores))
     throw new Error("despacho: leitura da origem indisponível");
   if (anteriores.length) {
-    if (anteriores.length !== 1 || !eventoConfere(anteriores[0], entrada))
+    const anterior = anteriores[0];
+    if (anteriores.length !== 1 || !anterior || !eventoConfere(anterior, entrada))
       throw new Error("despacho: origem anterior ambígua");
-    return anteriores[0].id as string;
+    return anterior.id as string;
   }
 
   const id = idDoPedido(entrada);
