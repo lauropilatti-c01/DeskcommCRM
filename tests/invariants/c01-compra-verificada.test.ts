@@ -482,6 +482,164 @@ describe("C01 compra verificada — PostgreSQL real, fonte sintética e integra�
     await untouched(f);
   });
 
+  describe("identidade concorrente", () => {
+    async function cruzamento(campo: "email" | "phone_number") {
+      const f = await fixture();
+      // O identificador da prova ainda não existe no alvo: o índice único não
+      // impede outra pessoa de reivindicá-lo depois da consulta de identidade.
+      await pool.query(`update contacts set ${campo}=null where id=$1`, [f.contact]);
+      const phone = campo === "email" ? "+5511999990002" : f.proof.phone;
+      const email = campo === "email" ? f.proof.email : "outra@example.test";
+      return { ...f, phone, email };
+    }
+
+    it.each(["email", "phone_number"] as const)(
+      "cruzamento de %s durante o GET ocorre sem trava e exige revisão",
+      async (campo) => {
+        const f = await cruzamento(campo);
+        f.integration.readAuthoritativePayment = async () => {
+          await pool.query(
+            "insert into contacts(organization_id,display_name,phone_number,email) values($1,'Outra pessoa fictícia',$2,$3)",
+            [f.org, f.phone, f.email],
+          );
+          return f.proof;
+        };
+        await expect(registrarCompraVerificada(f.deps, f.request)).rejects.toMatchObject({
+          code: "financial_identity_ambiguous",
+        });
+        await untouched(f);
+      },
+    );
+
+    it.each([
+      ["email", "insert"],
+      ["email", "update"],
+      ["phone_number", "insert"],
+      ["phone_number", "update"],
+    ] as const)("%s por %s aguarda o commit financeiro", async (campo, escrita) => {
+      const f = await cruzamento(campo);
+      const other = randomUUID();
+      if (escrita === "update") {
+        await pool.query(
+          "insert into contacts(id,organization_id,display_name,phone_number,email) values($1,$2,'Outra pessoa fictícia','+5511999990003','antes@example.test')",
+          [other, f.org],
+        );
+      }
+      const writer = await pool.connect();
+      let entrou!: () => void, liberar!: () => void;
+      const noRecibo = new Promise<void>((resolve) => {
+        entrou = resolve;
+      });
+      const continuar = new Promise<void>((resolve) => {
+        liberar = resolve;
+      });
+      let alteracao: Promise<unknown> | undefined;
+      let terminou = false;
+      const compra = registrarCompraVerificada(
+        {
+          ...f.deps,
+          afterWrite: async (stage) => {
+            if (stage === "recibo") {
+              entrou();
+              await continuar;
+            }
+          },
+        },
+        f.request,
+      );
+      try {
+        await noRecibo;
+        const pid = (await writer.query("select pg_backend_pid() as pid")).rows[0].pid;
+        await writer.query("set statement_timeout='8s'");
+        alteracao = (
+          escrita === "insert"
+            ? writer.query(
+                "insert into contacts(id,organization_id,display_name,phone_number,email) values($1,$2,'Outra pessoa fictícia',$3,$4)",
+                [other, f.org, f.phone, f.email],
+              )
+            : writer.query("update contacts set phone_number=$2,email=$3 where id=$1", [
+                other,
+                f.phone,
+                f.email,
+              ])
+        ).then(() => {
+          terminou = true;
+        });
+        // Não esperamos a escrita dentro do hook: isso criaria um deadlock do
+        // próprio teste. O terceiro socket observa a espera real do PostgreSQL.
+        await expect
+          .poll(
+            async () =>
+              (
+                await pool.query(
+                  "select exists(select 1 from pg_locks where pid=$1 and relation='public.contacts'::regclass and mode='RowExclusiveLock' and not granted) as waiting",
+                  [pid],
+                )
+              ).rows[0].waiting,
+            { timeout: 1_500, interval: 20 },
+          )
+          .toBe(true);
+        expect(terminou).toBe(false);
+        // Leitura normal permanece livre e ainda vê a negociação sem efeito.
+        await untouched(f);
+        liberar();
+        expect(await compra).toMatchObject({ status: "applied" });
+        await alteracao;
+        expect(terminou).toBe(true);
+        expect(
+          (await pool.query("select phone_number,email from contacts where id=$1", [other]))
+            .rows[0],
+        ).toMatchObject({ phone_number: f.phone, email: f.email });
+        expect(
+          (await pool.query("select status,custom_fields from crm_leads where id=$1", [f.lead]))
+            .rows[0],
+        ).toMatchObject({ status: "won", custom_fields: { pagamento_confirmado: true } });
+        // Após o commit, uma identidade nova exige revisão até no replay.
+        await expect(registrarCompraVerificada(f.deps, f.request)).rejects.toMatchObject({
+          code: "financial_identity_ambiguous",
+        });
+        expect(
+          (
+            await pool.query("select count(*)::int as n from orders where organization_id=$1", [
+              f.org,
+            ])
+          ).rows[0].n,
+        ).toBe(1);
+      } finally {
+        liberar();
+        await Promise.allSettled([compra, ...(alteracao ? [alteracao] : [])]);
+        await writer.query("reset statement_timeout");
+        writer.release();
+      }
+    });
+
+    it("escritor prévio de outro contato causa timeout sem efeitos e permite tentar de novo", async () => {
+      const f = await fixture();
+      const writer = await pool.connect();
+      try {
+        await writer.query("begin");
+        await writer.query(
+          "insert into contacts(organization_id,display_name,phone_number,email) values($1,'Escrita concorrente','+5511999990002','outra@example.test')",
+          [f.org],
+        );
+        await expect(registrarCompraVerificada(f.deps, f.request)).rejects.toMatchObject({
+          code: "55P03",
+        });
+        expect(f.integration.readAuthoritativePayment).toHaveBeenCalledTimes(1);
+        await untouched(f);
+      } finally {
+        await writer.query("rollback");
+        writer.release();
+      }
+      const applied = await registrarCompraVerificada(f.deps, f.request);
+      expect(applied.status).toBe("applied");
+      expect(await registrarCompraVerificada(f.deps, f.request)).toMatchObject({
+        status: "replay",
+        orderId: applied.orderId,
+      });
+    }, 15_000);
+  });
+
   it("duas oportunidades abertas exigem revisão antes de cancelar a sequência do contato", async () => {
     const f = await fixture();
     await pool.query(

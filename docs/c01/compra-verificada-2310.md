@@ -38,6 +38,37 @@ do nome ou da rotação da credencial. Uma segunda integração não consegue co
 a mesma compra para outro negócio. Recibos do formato candidato anterior também
 são detectados; divergência segue para revisão.
 
+### Identidade estável até o commit — candidata de 24/10
+
+Depois do GET financeiro e de iniciar a transação com os timeouts existentes,
+o escritor adquire `SHARE ROW EXCLUSIVE` em `public.contacts`, antes da trava
+da transação financeira e dos locks de linhas. Assim, outro cadastro não pode
+reivindicar por INSERT ou UPDATE o telefone/e-mail da prova entre a consulta
+de identidade e o commit. O índice único sozinho não resolve o caso em que
+esse identificador ainda está ausente no contato original. Uma identidade
+cruzada que já existe ao adquirir a trava continua recusada para revisão.
+
+A trava é da tabela inteira, inclusive outras organizações; leituras comuns
+continuam livres. Não há GET externo com essa trava retida. Contenção expira
+com `lock_timeout` de cinco segundos, e o rollback preserva negócio, recibo e
+acompanhamentos. Uma nova tentativa relê a fonte. A ordem reduz inversões entre
+confirmadores, mas não é prova universal de ausência de deadlock com qualquer
+outro escritor; erro de lock não confirma compra. Alteração posterior ao commit
+não é impedida permanentemente: a próxima execução, inclusive replay, reconfere
+a identidade atual. Não houve mudança de schema nem ativação da integração.
+
+Sete regressões foram acrescentadas ao arquivo financeiro existente: cruzamento
+por telefone/e-mail durante o GET; INSERT/UPDATE retidos até o commit nos dois
+sentidos; escritor anterior, timeout sem efeitos, nova tentativa e replay. Sem
+a correção, cinco casos falharam e os dois controles passaram. Com a correção,
+os 67 casos do arquivo passaram no baseline integral descartável. A espera foi
+observada por `pg_locks` usando conexões independentes, sem esperar a escrita
+concorrente dentro da barreira que retém a compra.
+O revisor independente repetiu os 67 casos no mesmo baseline, todos aprovados,
+e conferiu os hashes do runtime e dos testes antes/depois. A revisão libera a
+integração do código desligado; não aprova a configuração financeira real nem
+substitui o portão completo da árvore integrada.
+
 ## Adaptadores de leitura
 
 Adendo candidato de 23/10: [confirmação de quitação integral no Asaas](boleto-asaas-2310.md).

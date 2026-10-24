@@ -198,6 +198,11 @@ export async function registrarCompraVerificada(
       try {
         await db.query("set local lock_timeout='5s'");
         await db.query("set local statement_timeout='10s'");
+        // O identificador ausente no alvo pode ser reivindicado por outra
+        // pessoa sem colidir no índice único. Estabiliza também essas linhas
+        // futuras até o commit, antes dos locks de compra/linhas. O GET da
+        // fonte já terminou; nenhuma rede fica sob esta trava de tabela.
+        await db.query("lock table public.contacts in share row exclusive mode");
         // Outra pessoa/oportunidade não pode consumir a mesma transação.
         const externalId = `financial:${createHash("sha256")
           .update(JSON.stringify([cfg.provider, cfg.sourceAccountId, proof.transactionId]))
