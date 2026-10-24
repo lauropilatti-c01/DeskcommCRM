@@ -40,6 +40,12 @@ são detectados; divergência segue para revisão.
 
 ## Adaptadores de leitura
 
+Adendo candidato de 23/10: [confirmação de quitação integral no Asaas](boleto-asaas-2310.md).
+O produtor pode gravar líquido em `amount_paid`; o leitor opcional novo confere
+o bruto atual por cobrança, preserva datas sem horário e não muda a definição
+comercial da entrada. Sem a configuração opcional, conserva o leitor descrito
+abaixo e sua limitação. Não houve ativação nesta implementação.
+
 `lib/leads/fontes-financeiras.ts` realiza exclusivamente **GET autenticado**, com
 redirecionamento recusado, sem cache, cancelamento, limite de resposta e uma nova
 tentativa em falha transitória. Um Retry-After que não cabe no prazo conserva a

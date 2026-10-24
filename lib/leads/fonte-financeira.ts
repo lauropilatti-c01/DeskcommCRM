@@ -86,7 +86,10 @@ export async function lerSituacaoFinanceira(input: {
       );
       const map = maps.length === 1 ? maps[0] : undefined;
       if (!map) return answer("revisao", "produto_ou_oferta_sem_mapa_exato");
-      const records = await criarFonteFinanceira(cfg).scan(from, input.now, signal);
+      const records = await criarFonteFinanceira(cfg).scan(from, input.now, signal, {
+        phone,
+        email,
+      });
       for (const r of records) {
         const pm = !!phone && phone === r.phone,
           em = !!email && email === r.email;
