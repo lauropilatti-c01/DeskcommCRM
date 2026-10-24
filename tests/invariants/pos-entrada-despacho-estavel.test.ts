@@ -20,8 +20,25 @@ function identifier(s: string) {
   if (!/^[a-z_]+$/.test(s)) throw new Error("Identificador fora do teste");
   return '"' + s + '"';
 }
-function admin(options: { perderResposta?: boolean } = {}): SupabaseClient {
+function admin(options: { perderResposta?: boolean; serviceRole?: Set<string> } = {}): SupabaseClient {
   let perder = Boolean(options.perderResposta);
+  async function query(sql: string, values: unknown[]) {
+    if (!options.serviceRole) return pool.query(sql, values);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local role service_role");
+      options.serviceRole.add((await client.query("select current_user as role")).rows[0].role);
+      const result = await client.query(sql, values);
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   return {
     from(table: string) {
       if (!["messages", "event_log"].includes(table)) throw new Error("Tabela fora do contrato");
@@ -55,7 +72,7 @@ function admin(options: { perderResposta?: boolean } = {}): SupabaseClient {
             let result: pg.QueryResult;
             if (row) {
               const keys = Object.keys(row);
-              result = await pool.query(
+              result = await query(
                 `insert into public.${identifier(table)}(${keys.map(identifier).join(",")}) values(${keys.map((_, i) => "$" + (i + 1)).join(",")}) returning ${fields}`,
                 Object.values(row),
               );
@@ -70,7 +87,7 @@ function admin(options: { perderResposta?: boolean } = {}): SupabaseClient {
               const args = filtros.map(([, v]) => v);
               const where = filtros.map(([k], i) => `${identifier(k)}=$${i + 1}`).join(" and ");
               const limit = limite === undefined ? "" : ` limit $${args.push(limite)}`;
-              result = await pool.query(
+              result = await query(
                 `select ${fields} from public.${identifier(table)} where ${where}${limit}`,
                 args,
               );
@@ -148,6 +165,17 @@ async function queue(e: OrigemDoDespacho, id: string) {
 }
 
 describe("origem estável de despacho no banco canônico", () => {
+  it("service_role real lê os vínculos e grava/reutiliza a origem", async () => {
+    const e = await fixture();
+    const roles = new Set<string>();
+    const client = admin({ serviceRole: roles });
+    const id = await registrarDespachoPorMensagem(client, e);
+    expect(await registrarDespachoPorMensagem(client, e)).toBe(id);
+    expect([...roles]).toEqual(["service_role"]);
+    expect(await events(e)).toHaveLength(1);
+    const first = await queue(e, id);
+    expect((await queue(e, id)).job.id).toBe(first.job.id);
+  });
   it("outbox da entrada já existe no commit da mensagem", async () => {
     const e = await fixture();
     const r = await pool.query(

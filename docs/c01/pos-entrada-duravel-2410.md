@@ -34,3 +34,5 @@ Provas do autor: 12 RED de asserção no código anterior (inclusive 2 e 8 pedid
 Isso é uma base para recuperação do despacho, não um recuperador ligado. Não existe varredura, cron ou redispatch de duplicatas nesta fatia. Não reexecuta outros efeitos. Eventos históricos apagados pela retenção e múltiplas gerações simultâneas de escritores não foram provados como recuperáveis; nenhuma rotina pode usar este helper para reapresentar histórico sem delimitação e prova adicionais.
 
 Continua faltando o recibo da fronteira anterior. Em especial, não há autorização para usar o retorno bem-sucedido da função best-effort como prova de que opt-out, card, campanha e acompanhamento terminaram. A manutenção deve barrar uma entrada sem prova suficiente, sem restaurar banco antigo.
+
+Complemento focal: sete invariantes SQL aprovadas, incluindo a leitura, o INSERT e a releitura da origem sob o papel real `service_role` do baseline. O adaptador do teste mantém o transporte SQL direto; não é prova de PostgREST nem de instalação. Typecheck corrigiu o acesso possivelmente indefinido ao único evento legado e passou; a guarda explícita conserva a recusa de origem ambígua.
