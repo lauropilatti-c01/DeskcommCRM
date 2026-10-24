@@ -15,6 +15,15 @@ const schema = z
     baseUrl: z.url(),
     apiToken: z.string().min(1),
     asaasSettlement: asaasSettlementSchema.optional(),
+    // A ficha prova o início integral da conta; não é a data desta oportunidade.
+    // Ausente não afeta confirmação por transação, mas impede negativa sem oferta.
+    historyCoverage: z
+      .object({
+        startedAt: z.iso.datetime(),
+        evidenceHash: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .optional(),
     products: z
       .array(
         z
