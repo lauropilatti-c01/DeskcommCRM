@@ -12,6 +12,7 @@ import {
 } from "./c01-origem";
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { flowGraphSchema } from "./graph-schema";
+import { parseServiceBoundary } from "@/lib/atendimento/fronteira";
 import { politicaDoVideoValidaC01, videoDaOrigemValido } from "./c01-video-curso";
 
 export class OrigemRecusada extends Error {
@@ -205,14 +206,18 @@ export async function registrarOrigemEntregueC01(
         ).rows;
         if (agents.length !== 1) recusar("active_agent_not_unique");
         const id = randomUUID();
-        const boundary = {
-          organization_id: org,
-          contact_id: row.contact_id,
-          conversation_id: row.conversation_id,
-          service_revision: row.service_revision,
-          demanda_id: row.current_demanda_id,
-          demanda_revision: row.demanda_revision,
-        };
+        // pg entrega bigint como string; o JSON canônico conserva revisões
+        // numéricas. Capturar aqui, com a conversa travada, nunca no retry.
+        const current = (await db.query(
+          "select public.fn_service_boundary($1,$2) as boundary", [org, row.conversation_id],
+        )).rows[0]?.boundary;
+        const boundary = parseServiceBoundary(current);
+        if (!boundary || boundary.organization_id !== org ||
+            boundary.contact_id !== row.contact_id ||
+            boundary.conversation_id !== row.conversation_id ||
+            boundary.demanda_id !== row.current_demanda_id ||
+            !["open", "pending", "ai_handling"].includes(current.status) ||
+            current.demanda_fechada_em) recusar("service_boundary_invalid");
         // Nasce vencido: o default now() do banco usa o mesmo relógio do claim.
         // O relógio do processo serve à elegibilidade, nunca a este agendamento.
         await db.query(

@@ -108,9 +108,9 @@ beforeAll(async () => {
   await admin.query(`create schema ${schema}`);
   await pool.query(`
  create table contacts(id uuid primary key,organization_id uuid,is_blocked boolean default false,ai_opt_out boolean default false,force_human boolean default false,is_anonymized boolean default false,is_merged_into uuid);
- create table conversations(id uuid primary key,organization_id uuid,contact_id uuid,status text default 'open',assignee_kind text default 'ai',bot_silenced_until timestamptz,last_inbound_at timestamptz,service_revision integer default 1,current_demanda_id uuid,channel_session_id uuid);
+ create table conversations(id uuid primary key,organization_id uuid,contact_id uuid,status text default 'open',assignee_kind text default 'ai',bot_silenced_until timestamptz,last_inbound_at timestamptz,service_revision bigint default 1,current_demanda_id uuid,channel_session_id uuid);
  create table crm_leads(id uuid primary key,organization_id uuid,contact_id uuid,status text default 'open',custom_fields jsonb,created_at timestamptz default now());
- create table demandas(id uuid,organization_id uuid,revision integer,fechada_em timestamptz);
+ create table demandas(id uuid,organization_id uuid,revision bigint,fechada_em timestamptz);
  create table messages(id uuid primary key,organization_id uuid,contact_id uuid,conversation_id uuid,direction text,type text,body text,metadata jsonb default '{}',media_url text,media_storage_path text,status text,external_id text,sent_at timestamptz,delivered_at timestamptz,read_at timestamptz,error_code text,revoked_at timestamptz);
  create table followup_flow_pointers(id uuid primary key,organization_id uuid,active_version_id uuid,status text);
  create table followup_flow_versions(id uuid primary key,organization_id uuid,graph jsonb);
@@ -121,6 +121,14 @@ beforeAll(async () => {
  create table send_ledger(id uuid primary key default gen_random_uuid(),organization_id uuid,contact_id uuid,job_id uuid,crm_message_id uuid,status text,seq integer);
  create table ai_agents(id uuid,organization_id uuid,published_version_id uuid,paused_at timestamptz,archived_at timestamptz,operation_mode text);
  create table ai_agent_versions(id uuid,organization_id uuid,followup jsonb);
+ -- Este arquivo usa tabelas reduzidas em schema próprio; a regressão bigint
+ -- testa separadamente a função canônica do baseline, sem este adapter.
+ create or replace function public.fn_service_boundary(p_org uuid,p_conversation uuid) returns jsonb language sql set search_path=${schema} as $$
+ select jsonb_build_object('organization_id',c.organization_id,'contact_id',c.contact_id,'conversation_id',c.id,
+ 'service_revision',c.service_revision,'demanda_id',d.id,'demanda_revision',d.revision,
+ 'status',c.status,'demanda_fechada_em',d.fechada_em)
+ from conversations c left join demandas d on d.organization_id=c.organization_id and d.id=c.current_demanda_id
+ where c.organization_id=p_org and c.id=p_conversation $$;
  create table organizations(id uuid,timezone text);
  create table channel_sessions(id uuid,organization_id uuid,provider text,meta_waba_id text);
  create table meta_templates(id uuid,organization_id uuid,channel_session_id uuid,waba_id text,name text,language text,components jsonb,parameter_format text,status text);
