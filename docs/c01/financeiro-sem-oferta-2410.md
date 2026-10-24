@@ -14,7 +14,9 @@ contrato existente `SituacaoFinanceira`. Só `nao_comprou_confirmado`, com
 `complete:true`, evidência e recência aceitas pelo chamador, pode permitir L1.
 `confirmado` significa que encontrou compra, não que gravou Ganho.
 
-- Oportunidade única e aberta, contato ativo, sem produto escolhido. Todas as
+- Oportunidade única e aberta, contato ativo. O produto pode já ter sido escolhido
+  no formulário; `productKey:null` elimina o filtro da consulta, não exige um card
+  vazio. O consumidor comprova ausência de oferta pela origem comercial. Todas as
   consultas SQL filtram a organização; não se escolhe o card mais recente.
 - Telefone internacional **ou** e-mail, conforme o contrato de identidade existente;
   exclusividade no CRM e concordância nos registros financeiros encontrados. A
@@ -83,10 +85,11 @@ produto/baixo valor, gratuidade, pendência, histórico incompleto, conflitos e
 mudanças de identidade durante rede, boleto sem prova, cursor inválido, erro e
 cancelamento. O RED comportamental teve 20 falhas; a reconferência acrescentada
 teve quatro falhas antes da correção. Regressões do leitor e contrato aceito são
-rodadas junto do novo arquivo. Na candidata final, 45 casos novos e 25 do leitor passaram (70/70); a rodada
+rodadas junto do novo arquivo. Na candidata final, 46 casos novos e 25 do leitor passaram (71/71); a rodada
 anterior dos quatro arquivos passou 152/152. Tipagem Node 22/heap 8 GB, lint
-focado e conferência de fragmento passaram. A revisão independente do consumidor
-F04 ainda precisa ser concluída antes da integração; fica na ficha da entrega.
+focado e conferência de fragmento passaram. A revisão do consumidor F04 encontrou e corrigiu a distinção entre produto
+escolhido e oferta enviada: o produto inicial é preservado na releitura, mas não
+impede a consulta. A conclusão da mesma revisão fica na ficha da entrega.
 
 Sem API financeira real, IA, envio, instalação, configuração ou leitura de
 conversa nesta implementação. As provas unitárias usam transporte e banco

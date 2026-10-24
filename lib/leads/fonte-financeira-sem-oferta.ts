@@ -49,14 +49,9 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
         [input.organizationId, input.leadId, input.contactId],
       )
     ).rows[0];
-    if (
-      !row ||
-      row.status !== "open" ||
-      row.is_anonymized ||
-      row.is_merged_into ||
-      row.custom_fields?.produto_chave
-    )
+    if (!row || row.status !== "open" || row.is_anonymized || row.is_merged_into)
       return answer("revisao", "identidade_ou_oportunidade_alterada");
+    const initialProduct = row.custom_fields?.produto_chave ?? null;
     const phone = typeof row.phone_number === "string" ? row.phone_number : null;
     const email = typeof row.email === "string" ? row.email.trim().toLowerCase() : null;
     if (
@@ -176,7 +171,7 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
       current.status !== "open" ||
       current.is_anonymized ||
       current.is_merged_into ||
-      current.custom_fields?.produto_chave ||
+      (current.custom_fields?.produto_chave ?? null) !== initialProduct ||
       current.phone_number !== phone ||
       (typeof current.email === "string" ? current.email.trim().toLowerCase() : null) !== email ||
       new Date(current.created_at).getTime() !== created.getTime() ||

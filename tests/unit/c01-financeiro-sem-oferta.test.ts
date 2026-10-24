@@ -272,7 +272,7 @@ describe("negativa financeira antes da escolha do produto", () => {
     });
     expect(await f.read()).toMatchObject({ status: "revisao", complete: false });
   });
-  it.each(["duplicate_contact", "multiple_leads", "closed", "anonymized", "merged", "product"])(
+  it.each(["duplicate_contact", "multiple_leads", "closed", "anonymized", "merged"])(
     "não usa identidade/oportunidade %s",
     async (mode) => {
       const f = fixture();
@@ -281,7 +281,6 @@ describe("negativa financeira antes da escolha do produto", () => {
       if (mode === "closed") f.row.status = "won";
       if (mode === "anonymized") f.row.is_anonymized = true;
       if (mode === "merged") Object.assign(f.row, { is_merged_into: "outro" });
-      if (mode === "product") f.row.custom_fields = { produto_chave: "ja-escolheu" };
       expect(await f.read()).toMatchObject({ status: "revisao", complete: false });
       expect(f.fetcher).not.toHaveBeenCalled();
     },
@@ -414,5 +413,25 @@ describe("negativa financeira antes da escolha do produto", () => {
       },
     );
     expect(await f.read()).toMatchObject({ status: "revisao", complete: false });
+  });
+  it("produto escolhido no formulário não impede a negativa por pessoa antes da oferta", async () => {
+    const f = fixture();
+    f.row.custom_fields = { produto_chave: "curso-escolhido" };
+    expect(await f.read()).toMatchObject({ status: "nao_comprou_confirmado", complete: true });
+  });
+  it("mudança do produto durante a leitura invalida a identidade da oportunidade", async () => {
+    const f = fixture();
+    f.row.custom_fields = { produto_chave: "curso-inicial" };
+    const normal = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (...args) => {
+      f.row.custom_fields = { produto_chave: "curso-alterado" };
+      return normal(...args);
+    });
+    expect(await f.read()).toMatchObject({
+      status: "revisao",
+      complete: false,
+      reason: "identidade_ou_oportunidade_alterada_durante_consulta",
+    });
+    expect(f.fetcher).toHaveBeenCalled();
   });
 });
