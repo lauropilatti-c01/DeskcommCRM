@@ -435,3 +435,107 @@ describe("negativa financeira antes da escolha do produto", () => {
     expect(f.fetcher).toHaveBeenCalled();
   });
 });
+
+describe("L1 usa projeção integral sem varredura por mensagem", () => {
+  it("faz uma só leitura autenticada e conserva o instante da fonte", async () => {
+    const f = fixture();
+    const { createHmac } = await import("node:crypto");
+    const cfg = {
+      enabled: true,
+      baseUrl: "https://history.example.test",
+      apiToken: "token-ficticio-com-32-caracteres-123",
+      hmacKeyHex: "a".repeat(64),
+      scopeHash: "b".repeat(64),
+    };
+    const scope = {
+      schema: 1,
+      organization_id: ORG,
+      guru_account_id: f.guru.sourceAccountId,
+      boleto_org_id: f.boleto.sourceAccountId,
+      history_start: "2026-10-01",
+      history_evidence_sha256: f.guru.historyCoverage.evidenceHash,
+      normalization: "e164-v1",
+      max_age_seconds: 900,
+      reconciliation: "full_before_negative",
+    };
+    cfg.scopeHash = createHash("sha256")
+      .update(JSON.stringify(scope, Object.keys(scope).sort()))
+      .digest("hex");
+    Object.assign(f.guru, { historyProjection: cfg });
+    f.config();
+    f.fetcher.mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://history.example.test/v1/financial/history/person");
+      const body = String(init?.body),
+        req = JSON.parse(body);
+      return new Response(
+        JSON.stringify({
+          data: {
+            schema: 1,
+            organizationId: ORG,
+            scopeHash: cfg.scopeHash,
+            requestId: req.requestId,
+            requestHash: createHash("sha256").update(body).digest("hex"),
+            status: "nao_comprou_confirmado",
+            complete: true,
+            checkedAt: "2026-10-24T17:58:00Z",
+            reason: "sem_compra_na_identidade_e_periodo_conferidos",
+            evidenceHash: "d".repeat(64),
+            identityKeys: [
+              {
+                phoneHash: createHmac("sha256", Buffer.from(cfg.hmacKeyHex, "hex"))
+                  .update(`tel:${PHONE}`)
+                  .digest("hex"),
+                emailHash: createHmac("sha256", Buffer.from(cfg.hmacKeyHex, "hex"))
+                  .update(`email:${EMAIL}`)
+                  .digest("hex"),
+              },
+            ],
+          },
+        }),
+      );
+    });
+    const normal = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (sql, params) =>
+      sql.includes("limit 20001")
+        ? { rows: [{ id: CONTACT, phone_number: PHONE, email_normalized: EMAIL }] }
+        : normal(sql, params),
+    );
+    expect(await f.read()).toMatchObject({
+      status: "nao_comprou_confirmado",
+      complete: true,
+      checkedAt: "2026-10-24T17:58:00Z",
+    });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  });
+  it("projeção desligada não cai na varredura longa", async () => {
+    const f = fixture();
+    Object.assign(f.guru, {
+      historyProjection: {
+        enabled: false,
+        baseUrl: "https://history.example.test",
+        apiToken: "token-ficticio-com-32-caracteres-123",
+        hmacKeyHex: "a".repeat(64),
+        scopeHash: "b".repeat(64),
+      },
+    });
+    f.config();
+    expect((await f.read()).status).toBe("indisponivel");
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+});
+
+it("projeção de outra conta ou período não é reaproveitada", async () => {
+  const f = fixture();
+  Object.assign(f.guru, {
+    historyProjection: {
+      enabled: true,
+      baseUrl: "https://history.example.test",
+      apiToken: "token-ficticio-com-32-caracteres-123",
+      hmacKeyHex: "a".repeat(64),
+      scopeHash: "e".repeat(64),
+    },
+  });
+  f.config();
+  expect(await f.read()).toMatchObject({ status: "indisponivel", complete: false });
+  expect(f.fetcher).not.toHaveBeenCalled();
+});

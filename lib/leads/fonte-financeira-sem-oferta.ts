@@ -5,6 +5,7 @@ import type { SituacaoFinanceira } from "./fonte-financeira";
 import { configuracoesFinanceiras } from "./configuracao-financeira";
 import { criarFonteFinanceira, type RegistroFinanceiro } from "./fontes-financeiras";
 import type { ConfiguracaoFinanceira } from "./configuracao-financeira";
+import { lerProjecaoHistorica } from "./projecao-historica-financeira";
 
 export async function lerSituacaoFinanceiraSemOferta(input: {
   db: Queryable;
@@ -87,7 +88,50 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
     const references: string[] = [];
     let paid = false;
     const snapshots: { cfg: ConfiguracaoFinanceira; records: RegistroFinanceiro[] }[] = [];
-    for (const cfg of configs) {
+    const projectionConfigs = configs.filter((cfg) => cfg.historyProjection);
+    let projection: SituacaoFinanceira | undefined;
+    if (projectionConfigs.length) {
+      // O escopo revisado cobre exatamente as duas contas configuradas. Não
+      // omite uma terceira integração nem recai numa varredura após falha.
+      if (projectionConfigs.length !== 1 || configs.length !== 2)
+        return answer("indisponivel", "escopo_da_projecao_financeira_divergente");
+      const guru = configs.find((cfg) => cfg.provider === "guru")!;
+      const boleto = configs.find((cfg) => cfg.provider === "boleto")!;
+      const scope = {
+        schema: 1,
+        organization_id: input.organizationId,
+        guru_account_id: guru.sourceAccountId,
+        boleto_org_id: boleto.sourceAccountId,
+        history_start: guru.historyCoverage!.startedAt.slice(0, 10),
+        history_evidence_sha256: guru.historyCoverage!.evidenceHash,
+        normalization: "e164-v1",
+        max_age_seconds: 900,
+        reconciliation: "full_before_negative",
+      };
+      const scopeHash = createHash("sha256")
+        .update(JSON.stringify(scope, Object.keys(scope).sort()))
+        .digest("hex");
+      if (projectionConfigs[0]!.historyProjection!.scopeHash !== scopeHash)
+        return answer("indisponivel", "escopo_da_projecao_financeira_divergente");
+      projection = await lerProjecaoHistorica({
+        config: projectionConfigs[0]!.historyProjection!,
+        db: input.db,
+        organizationId: input.organizationId,
+        contactId: input.contactId,
+        phone,
+        email,
+        now: input.now,
+        signal,
+      });
+      if (
+        !projection.complete ||
+        !["confirmado", "nao_comprou_confirmado"].includes(projection.status)
+      )
+        return projection;
+      paid = projection.status === "confirmado";
+      references.push(projection.evidenceHash!);
+    }
+    for (const cfg of projection ? [] : configs) {
       const from = cfg.provider === "guru" ? new Date(cfg.historyCoverage!.startedAt) : new Date(0);
       const records = await criarFonteFinanceira(cfg).scan(from, input.now, signal, {
         phone,
@@ -193,7 +237,7 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
         }),
       )
       .digest("hex");
-    return answer(
+    const result = answer(
       paid ? "confirmado" : "nao_comprou_confirmado",
       paid
         ? "compra_confirmada_na_identidade_sem_filtro_de_produto"
@@ -201,6 +245,8 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
       true,
       evidenceHash,
     );
+    // Consultar novamente o mesmo espelho não renova o frescor da fonte.
+    return projection ? { ...result, checkedAt: projection.checkedAt } : result;
   } catch {
     return answer("indisponivel", "consulta_financeira_incompleta_ou_falhou");
   }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { criarFonteFinanceira } from "./fontes-financeiras";
 import type { IntegracaoFinanceira } from "./compra-verificada";
 import { asaasSettlementSchema } from "./liquidacao-boleto-asaas";
+import { projecaoHistoricaSchema } from "./projecao-historica-financeira";
 const schema = z
   .object({
     enabled: z.boolean().default(false),
@@ -15,6 +16,7 @@ const schema = z
     baseUrl: z.url(),
     apiToken: z.string().min(1),
     asaasSettlement: asaasSettlementSchema.optional(),
+    historyProjection: projecaoHistoricaSchema.optional(),
     // A ficha prova o início integral da conta; não é a data desta oportunidade.
     // Ausente não afeta confirmação por transação, mas impede negativa sem oferta.
     historyCoverage: z
@@ -39,7 +41,8 @@ const schema = z
       .min(1),
   })
   .strict()
-  .refine((c) => !c.asaasSettlement || c.provider === "boleto");
+  .refine((c) => !c.asaasSettlement || c.provider === "boleto")
+  .refine((c) => !c.historyProjection || c.provider === "guru");
 export type ConfiguracaoFinanceira = z.infer<typeof schema>;
 export function configuracoesFinanceiras(): ConfiguracaoFinanceira[] {
   const raw = process.env.C01_FINANCIAL_INTEGRATIONS_JSON;
