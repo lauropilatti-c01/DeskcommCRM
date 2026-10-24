@@ -249,3 +249,36 @@ describe("continuação contextual proposta, com autoridade do servidor", () => 
     expect(planejarContinuacaoC01(l2, f, now).kind).toBe("blocked");
   });
 });
+
+it("L2 não acumula prazos vencidos em uma rajada retroativa", () => {
+  const f = fixture();
+  offer(f);
+  f.offer!.deliveredAt = "2026-10-10T12:00:00Z";
+  expect(planejarContinuacaoC01({ ...proposal, caminho: "L2", texto: undefined }, f, now)).toEqual({
+    kind: "blocked",
+    reason: "orcamento_vencido_sem_intervalo",
+  });
+});
+it("recibo futuro não comprova orçamento já entregue", () => {
+  const f = fixture();
+  offer(f);
+  f.offer!.touches = [
+    {
+      index: 1,
+      messageIds: [id(10)],
+      receipts: [
+        {
+          id: id(10),
+          status: "delivered",
+          delivered_at: "2026-10-25T12:00:00Z",
+          read_at: null,
+          error_code: null,
+        },
+      ],
+    },
+  ];
+  expect(planejarContinuacaoC01({ ...proposal, caminho: "L2", texto: undefined }, f, now)).toEqual({
+    kind: "blocked",
+    reason: "orcamento_ou_recibos_invalidos",
+  });
+});

@@ -76,7 +76,7 @@ function fixture() {
     }
     throw new Error("Consulta inesperada no teste: " + sql);
   });
-  return { state, query, db: { query } as Queryable, saved: () => saved };
+  return { state, query, db: { query } as unknown as Queryable, saved: () => saved };
 }
 describe("candidatura do turno no armazenamento existente", () => {
   it("L1 guarda sem_oferta com produto nulo; L2 não cria identidade de produto", async () => {

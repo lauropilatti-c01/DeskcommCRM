@@ -1,8 +1,11 @@
+import {exigeCatalogoCronogramaC01,resolverRamoCronogramaC01} from "./c01-cronograma-catalogo";
 import { modelosQueOFluxoEnvia } from "./modelos-aprovados";
 import type { Queryable } from "@/lib/agent-engine/queue/queue";
 import type { FatosAcompanhamento, Toque } from "./c01-acompanhamento";
 import { conferirOrigemC01, hashDoConteudoDaOrigem, type ConfigOrigemC01 } from "./c01-origem";
 import { politicaDoVideoValidaC01, videoDaOrigemValido } from "./c01-video-curso";
+import { lerFatosContinuacaoC01, type LeitorFinanceiroSemOfertaC01 } from "./c01-continuacao-runtime";
+import { resolverModeloOfertaC01 } from "./c01-acompanhamento-conteudo";
 
 export interface EscopoFinanceiroC01 {
   db: Queryable;
@@ -30,17 +33,20 @@ export async function lerFatosAcompanhamentoC01(
   now: Date,
   financeiro: LeitorFinanceiroC01,
   signal = AbortSignal.timeout(15_000),
+  semOferta?: LeitorFinanceiroSemOfertaC01,
 ): Promise<FatosAcompanhamento | null> {
   const { organizationId: org, contactId: contact, enrollmentId: enrollment } = scope;
   const r = (
     await db.query(
-      `/* c01:fatos:origem */ select e.status, e.current_node_id, e.conversation_id, ev.payload, v.graph,
+      `/* c01:fatos:origem */ select e.status, e.version_id,e.current_node_id, e.conversation_id, ev.payload, v.graph,ct.payload as continuation,
        c.is_blocked, c.ai_opt_out, c.force_human, c.is_anonymized, c.is_merged_into,
        cv.status as conversation_status, cv.assignee_kind, cv.bot_silenced_until, cv.last_inbound_at,cv.channel_session_id
      from followup_enrollments e
      join followup_flow_versions v on v.organization_id=e.organization_id and v.id=e.version_id
-     join followup_enrollment_events ev on ev.organization_id=e.organization_id and ev.enrollment_id=e.id
+     left join followup_enrollment_events ev on ev.organization_id=e.organization_id and ev.enrollment_id=e.id
        and ev.event_type='c01_origem_entregue'
+     left join followup_enrollment_events ct on ct.organization_id=e.organization_id and ct.enrollment_id=e.id
+       and ct.event_type='c01_continuacao_entregue'
      join contacts c on c.organization_id=e.organization_id and c.id=e.contact_id
      join conversations cv on cv.organization_id=e.organization_id and cv.id=e.conversation_id and cv.contact_id=e.contact_id
      where e.organization_id=$1 and e.contact_id=$2 and e.id=$3
@@ -50,6 +56,7 @@ export async function lerFatosAcompanhamentoC01(
   ).rows;
   if (r.length !== 1) return null;
   const row = r[0]!;
+  if (row.continuation) return lerFatosContinuacaoC01(db,cfg,scope,row.continuation,now,{financeiro,semOferta},signal);
   const origin = conferirOrigemC01(cfg, row.payload);
   if (
     !origin ||
@@ -178,6 +185,12 @@ export async function lerFatosAcompanhamentoC01(
       template = { approved, accountReady: approved && m.session_status === "WORKING" };
     }
   }
+  if (origin.kind === "oferta" && cfg.offerTemplates?.enabled) {
+    const exact=await resolverModeloOfertaC01(db,cfg,{organizationId:org,versionId:row.version_id,nodeId:row.current_node_id,
+      productKey:origin.productKey,connectionId:row.channel_session_id});
+    template={approved:!!exact,accountReady:!!exact};
+  }
+  const catalog=exigeCatalogoCronogramaC01(row.graph)?await resolverRamoCronogramaC01(db,scope,row.graph,row.version_id):null;
   const paid = await financeiro({
     db,
     organizationId: org,
@@ -191,6 +204,7 @@ export async function lerFatosAcompanhamentoC01(
     organizationId: org,
     contactId: contact,
     opportunityId: origin.leadId,
+    ...(catalog?{cronogramaCatalogReady:catalog.status!=="indisponivel" && catalog.status!=="sem_material" && catalog.targetNodeId===row.current_node_id}:{}),
     ...(origin.kind === "video_curso" ? {
       videoPolicyReady: politicaDoVideoValidaC01(row.graph, cfg) && videoDaOrigemValido(cfg, origin, anchor),
     } : {}),

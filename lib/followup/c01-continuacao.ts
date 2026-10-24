@@ -215,17 +215,28 @@ export function planejarContinuacaoC01(
   if (
     touches.length >= 4 ||
     touches.some((t, i) => t.index !== i + 1 || estadoDoToque(t) !== "delivered") ||
-    new Set(ids).size !== ids.length
+    new Set(ids).size !== ids.length ||
+    touches.some((t) =>
+      t.receipts.some((r) =>
+        [r.delivered_at, r.read_at].some(
+          (at) => at !== null && (!Number.isFinite(Date.parse(at)) || Date.parse(at) > +now),
+        ),
+      ),
+    )
   )
     return block("orcamento_ou_recibos_invalidos");
   const nextTouch = touches.length + 1;
   const originalDue = Date.parse(o.deliveredAt) + [2, 24, 72, 168][nextTouch - 1]! * 3_600_000;
+  const due = horarioPermitido(Math.max(originalDue, silenceDue, +now));
+  const following = [2, 24, 72, 168][nextTouch];
+  if (following !== undefined && due >= Date.parse(o.deliveredAt) + following * 3_600_000)
+    return block("orcamento_vencido_sem_intervalo");
   return {
     ...base,
     anchorMessageId: o.originMessageId,
     anchorAt: new Date(o.deliveredAt).toISOString(),
     nextTouch,
-    dueAt: new Date(horarioPermitido(Math.max(originalDue, silenceDue, +now))).toISOString(),
+    dueAt: new Date(due).toISOString(),
     body: null,
     originalEnrollmentId: o.enrollmentId,
   };

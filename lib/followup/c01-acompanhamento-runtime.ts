@@ -1,3 +1,5 @@
+import { exigeCatalogoCronogramaC01 } from "./c01-cronograma-catalogo";
+import { escopoDoConteudoC01, conferirConteudoResolvidoC01, resolverPassoC01 } from "./c01-acompanhamento-conteudo";
 import { conferirRetornoNoEnvioC01 } from "./c01-retorno";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ProactiveContext } from "@/lib/agenda/efeito";
@@ -40,6 +42,7 @@ async function fonteAplicada(
   if (!cfg?.enabled || cfg.organizationId !== scope.organizationId) return null;
   const held = envio.getStore();
   const { lerSituacaoFinanceira } = await import("@/lib/leads/fonte-financeira");
+  const {lerSituacaoFinanceiraSemOferta}=await import("@/lib/leads/fonte-financeira-sem-oferta");
   return lerFatosAcompanhamentoC01(
     held?.lock.db ?? getRequestPool(),
     cfg,
@@ -47,6 +50,7 @@ async function fonteAplicada(
     now,
     lerSituacaoFinanceira,
     held?.lock.signal,
+    lerSituacaoFinanceiraSemOferta,
   );
 }
 
@@ -212,6 +216,15 @@ export async function assertAcompanhamentoC01Supabase(
   // integração está pronta. Só código de uma fonte aplicada pode liberar.
   if (decision.kind !== "send")
     refuse("reason" in decision ? decision.reason : "envio_nao_autorizado");
+  if(config.data.kind === "conversa" || exigeCatalogoCronogramaC01(version.graph) ||
+      (config.data.kind === "oferta" && configOrigemC01()?.offerTemplates?.enabled)) {
+    const contentScope=escopoDoConteudoC01(context);
+    const held=envio.getStore();
+    if(!held) refuse("conteudo_sem_trava");
+    const current=await resolverPassoC01(held!.lock.db,contentScope,now);
+    conferirConteudoResolvidoC01(context,current);
+    await held!.lock.conferir();
+  }
 }
 
 /** Marca antes de sair da máquina. Queda depois do POST e antes do recibo não

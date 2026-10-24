@@ -303,7 +303,11 @@ export async function inscreverOrigensConfirmadasC01(
             where organization_id=$1 and id=$2`,[cfg.organizationId,row.id,{reason:err.code,at:now.toISOString()}]);
       }
     }
-    if (rows.length < 200) return;
+    if (rows.length < 200) break;
     cursor = rows.at(-1)!.id;
   }
+  const {inscreverContinuacoesC01}=await import("./c01-continuacao-runtime");
+  const {lerSituacaoFinanceira}=await import("@/lib/leads/fonte-financeira");
+  const {lerSituacaoFinanceiraSemOferta}=await import("@/lib/leads/fonte-financeira-sem-oferta");
+  await inscreverContinuacoesC01(db,now,{financeiro:lerSituacaoFinanceira,semOferta:lerSituacaoFinanceiraSemOferta});
 }

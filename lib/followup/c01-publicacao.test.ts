@@ -13,7 +13,7 @@ interface ConsultaFalsa {
   maybeSingle(): Promise<{ data: unknown; error: null }>;
   then(yes: (r: unknown) => unknown): Promise<unknown>;
 }
-function rig(previousAt?: string) {
+function rig(previousAt?: string, cancelOnReply = true) {
   const rpc = vi.fn(async () => ({ data: connection, error: null }));
   const admin = {
     rpc,
@@ -30,7 +30,11 @@ function rig(previousAt?: string) {
         maybeSingle: async () => ({
           data:
             table === "followup_flow_pointers"
-              ? { id: pointer, active_version_id: previousAt ? connection : null }
+              ? {
+                  id: pointer,
+                  active_version_id: previousAt ? connection : null,
+                  trigger_config: { cancel_on_reply: cancelOnReply },
+                }
               : table === "followup_flow_versions"
                 ? {
                     graph: {
@@ -182,5 +186,57 @@ describe("publicação C01 verifica o servidor", () => {
     vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(cfg));
     expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: true });
     expect(r.rpc).toHaveBeenCalledOnce();
+  });
+});
+
+describe("publicação da continuação exige contrato específico", () => {
+  function configureContinuation() {
+    configure();
+    const cfg = JSON.parse(process.env.C01_ACOMPANHAMENTO_INTEGRATION!);
+    cfg.continuation = {
+      enabled: true,
+      policyStatus: "approved",
+      activatedAt: "2026-10-24T11:00:00Z",
+    };
+    vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(cfg));
+    const finance = JSON.parse(process.env.C01_FINANCIAL_INTEGRATIONS_JSON!);
+    finance[0].historyCoverage = {
+      startedAt: "2020-01-01T00:00:00Z",
+      evidenceHash: "d".repeat(64),
+    };
+    vi.stubEnv("C01_FINANCIAL_INTEGRATIONS_JSON", JSON.stringify(finance));
+    return cfg;
+  }
+  function candidate(cancelOnReply = true) {
+    const r = rig(undefined, cancelOnReply);
+    r.params.graph = JSON.parse(
+      readFileSync("docs/c01/fixtures/continuacao-contextual-off.json", "utf8"),
+    );
+    return r;
+  }
+  it("grafo candidato permanece OFF; somente servidor preparado pode publicar", async () => {
+    const r = candidate();
+    expect(r.params.graph.settings!.c01_acompanhamento!.activated_at).toBeNull();
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: false });
+    configureContinuation();
+    expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: true });
+    expect(r.params.graph.settings!.c01_acompanhamento!.activated_at).toBeNull();
+  });
+  it("proposta comercial, falta de cobertura ou cancel_on_reply falso não chegam ao RPC", async () => {
+    for (const reason of ["proposed", "history", "reply"]) {
+      const cfg = configureContinuation(),
+        r = candidate(reason !== "reply");
+      if (reason === "proposed") {
+        cfg.continuation.policyStatus = "proposed";
+        vi.stubEnv("C01_ACOMPANHAMENTO_INTEGRATION", JSON.stringify(cfg));
+      }
+      if (reason === "history") {
+        const fs = JSON.parse(process.env.C01_FINANCIAL_INTEGRATIONS_JSON!);
+        delete fs[0].historyCoverage;
+        vi.stubEnv("C01_FINANCIAL_INTEGRATIONS_JSON", JSON.stringify(fs));
+      }
+      expect(await publishFollowupFlowVersion(r.admin, r.params)).toMatchObject({ ok: false });
+      expect(r.rpc).not.toHaveBeenCalled();
+    }
   });
 });

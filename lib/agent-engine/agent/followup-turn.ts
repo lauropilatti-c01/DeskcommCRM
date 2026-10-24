@@ -1,4 +1,5 @@
 import { resolveModeloAprovado } from "@/lib/channels/meta/resolve-modelo-followup";
+import { resolverPassoC01, comConteudoResolvidoC01 } from "@/lib/followup/c01-acompanhamento-conteudo";
 import { conferirProvaRetornoC01, conferirRetornoNoEnvioC01, resolverModeloDoRetornoC01 } from "@/lib/followup/c01-retorno";
 import { conferirCallbackAntesDoTurno } from "./callback-disparo";
 import {claimOfJob,type JobClaim} from "../queue/claim";
@@ -98,6 +99,7 @@ export const followupTurnPayloadSchema = z
     prompt_hint: z.string().optional(),
     /** action mode `text` — enviado pela cadeia de guardrails, sem LLM. */
     fixed_body: z.string().min(1).max(4000).optional(),
+    c01_resolve: z.literal(true).optional(),
     /**
      * #2734 — mídia OPCIONAL (imagem ou PDF) por URL do passo `action`/`text`; o
      * `fixed_body` vira a LEGENDA. Opcional: payloads antigos seguem válidos.
@@ -597,6 +599,7 @@ export function createFollowupTurnHandler(deps: FollowupTurnDeps) {
           purpose: payload.purpose,
           promptHint: payload.prompt_hint,
           fixedBody: payload.fixed_body,
+          c01Resolve: payload.c01_resolve === true,
           fixedMediaUrl: payload.fixed_media_url,
           templateId: payload.template_id,
           fallbackTemplateId: payload.fallback_template_id,
@@ -707,6 +710,7 @@ async function runFlowDrivenTurn(
     purpose: 'send_message' | 'classify' | 'plan_timing' | undefined;
     promptHint: string | undefined;
     fixedBody: string | undefined;
+    c01Resolve?: boolean;
     /** #2734 — mídia opcional (imagem ou PDF) do passo `action`/`text`. */
     fixedMediaUrl: string | undefined;
     templateId: string | undefined;
@@ -731,7 +735,10 @@ async function runFlowDrivenTurn(
   const runLog = withFields(deps.log, { job_id: job.id, tenant_id: target.tenantId, lead_id: target.leadId, enrollment_id: enrollmentId });
 
   if (input.purpose === 'send_message') {
-    let passo = await resolveFlowSendBody(pool, target.tenantId, target.channelSessionId, target.leadId, input);
+    let passo: PassoSemIa | null = input.c01Resolve ? await resolverPassoC01(pool,{organizationId:target.tenantId,contactId:target.leadId,
+      enrollmentId,nodeId,connectionId:target.channelSessionId},clock()) :
+      await resolveFlowSendBody(pool, target.tenantId, target.channelSessionId, target.leadId, input);
+    if (input.c01Resolve && passo === null) throw new Error('c01_conteudo_sem_prova');
     // O PLANO B DA MENSAGEM POR IA. Com a janela de 24 h fechada, o canal recusa
     // qualquer texto livre — o da IA inclusive —, e o passo terminava sem mandar
     // nada. A tela prometia "se a IA não conseguir escrever, mandar este modelo"
@@ -772,11 +779,14 @@ async function runFlowDrivenTurn(
         return;
       }
       // Texto do operador: sem camada semântica (ver o cabeçalho de sendFixedOutbound).
-      const desfecho = await sendFixedOutbound(
-        deps, job, pool, ctx, clock, target, passo.body, false,
-        passo.tipo === 'modelo_aprovado' ? passo.modelo : undefined,
-        passo.tipo === 'texto' ? passo.midia : undefined,
+      const content = passo;
+      const enviar = () => sendFixedOutbound(
+        deps, job, pool, ctx, clock, target, content.body, false,
+        content.tipo === 'modelo_aprovado' ? content.modelo : undefined,
+        content.tipo === 'texto' ? content.midia : undefined,
       );
+      const desfecho = input.c01Resolve ? await comConteudoResolvidoC01({organizationId:target.tenantId,contactId:target.leadId,
+        enrollmentId,nodeId,connectionId:target.channelSessionId,jobId:job.id},passo,enviar) : await enviar();
       // TODO OS TRÊS DESFECHOS VOLTAM PARA O ENROLLMENT. O adiado era o que não
       // voltava, e o silêncio dele custava o enrollment inteiro: o motor ficava
       // rechecando um turno que ninguém ia fechar e, esgotado o orçamento do
