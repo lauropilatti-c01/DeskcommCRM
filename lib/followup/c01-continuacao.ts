@@ -17,6 +17,12 @@ export const propostaContinuacaoC01Schema = z.discriminatedUnion("estado", [
 ]);
 export type PropostaContinuacaoC01 = z.infer<typeof propostaContinuacaoC01Schema>;
 
+/** A IA descreve a pendência; o UUID é acrescentado exclusivamente pelo turno. */
+export const pedidoContinuacaoC01Schema = z.discriminatedUnion("estado", [
+  propostaContinuacaoC01Schema.options[0],
+  propostaContinuacaoC01Schema.options[1].omit({ mensagem_entrada_id: true }),
+]);
+
 export interface FatosContinuacaoC01 {
   enabled: boolean;
   approved: boolean;

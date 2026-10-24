@@ -1,5 +1,5 @@
 import { configOrigemC01 } from "@/lib/followup/c01-origem";
-import { propostaContinuacaoC01Schema, type PropostaContinuacaoC01 } from "@/lib/followup/c01-continuacao";
+import { pedidoContinuacaoC01Schema, propostaContinuacaoC01Schema, type PropostaContinuacaoC01 } from "@/lib/followup/c01-continuacao";
 import { continuacaoDoTurnoHabilitada, gravarCandidaturaContinuacaoC01 } from "@/lib/followup/c01-continuacao-turno";
 import { completarConsultaOfertaC01, ofertasDaConsultaC01, origemDaOfertaEnviadaC01, type OfertaConsultadaC01 } from "@/lib/followup/c01-origem-oferta";
 import { lerPoliticaMatricula, prepararMatriculaUmaVez, reciboDaMatriculaSuprimida } from './c01-matricula-uma-vez';
@@ -6376,12 +6376,15 @@ async function executarTurnoDoAgente(
   if (!preview && liveJob().kind === 'inbound_turn' &&
       continuacaoDoTurnoHabilitada(configDeContinuacaoC01, tenantId)) {
     rawTools.prepare_contextual_followup = tool({
-      description: 'Registre o estado ao concluir a resposta atual. Só declare pendente se houver pedido explícito ainda aberto na mensagem de entrada, citando trecho literal e seu ID. Obrigado, pausa, recusa, compra informada, pedido de humano ou assunto já resolvido não são pendência. L1 prepara um texto contextual breve para um único toque futuro; L2 preserva somente os toques restantes da oferta original e não aceita texto novo. Não prometa envio nem horário: esta ferramenta não agenda, não inscreve e não manda mensagem.',
-      inputSchema: propostaContinuacaoC01Schema,
+      description: 'Registre o estado ao concluir a resposta atual. Só declare pendente se houver pedido explícito ainda aberto na mensagem de entrada, citando trecho literal. Obrigado, pausa, recusa, compra informada, pedido de humano ou assunto já resolvido não são pendência. L1 prepara um texto contextual breve para um único toque futuro; L2 preserva somente os toques restantes da oferta original e não aceita texto novo. Não prometa envio nem horário: esta ferramenta não agenda, não inscreve e não manda mensagem.',
+      inputSchema: pedidoContinuacaoC01Schema,
       execute: async (proposal) => {
-        if (proposal.estado === 'pendente' && proposal.mensagem_entrada_id !== input.inboundMessageId)
+        const interna = propostaContinuacaoC01Schema.safeParse(proposal.estado === 'pendente'
+          ? { ...proposal, mensagem_entrada_id: input.inboundMessageId }
+          : proposal);
+        if (!interna.success)
           return { ok: false, reason: 'mensagem_fora_do_turno' };
-        propostaDeContinuacaoC01 = proposal;
+        propostaDeContinuacaoC01 = interna.data;
         return { ok: true, status: 'proposta_registrada_sem_agendamento' };
       },
     });
