@@ -64,6 +64,7 @@ function fazerSupabase(resolve: Resolver) {
       in: () => chain,
       order: () => chain,
       limit: () => chain,
+      range: () => chain,
       update: () => chain,
       insert: () => Promise.resolve({ data: null, error: null }),
       maybeSingle: () => Promise.resolve(resolve({ tabela, terminal: "maybeSingle" })),
@@ -280,6 +281,7 @@ function supabaseQueRegistraIn(resolve: Resolver) {
       },
       order: () => chain,
       limit: () => chain,
+      range: () => chain,
       maybeSingle: () => Promise.resolve(resolve({ tabela, terminal: "maybeSingle" })),
       then: (res: (v: unknown) => unknown) =>
         Promise.resolve(resolve({ tabela, terminal: "then" })).then(res),

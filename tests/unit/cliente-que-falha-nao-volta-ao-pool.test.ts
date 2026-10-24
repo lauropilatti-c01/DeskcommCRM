@@ -340,6 +340,8 @@ function rotaComCliente(cliente: ClienteFalso): void {
         select: () => cadeia,
         eq: () => cadeia,
         in: () => cadeia,
+        order: () => cadeia,
+        range: () => cadeia,
         then: (aceita: (valor: unknown) => unknown) => Promise.resolve({
           data: tabela === 'agent_cases' ? [{ conversation_id: CONV_ID }] : [{ id: CONV_ID }],
           error: null,
