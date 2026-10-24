@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import type * as UseCasesModule from "@/hooks/ai/useCases";
@@ -11,7 +11,9 @@ vi.mock("@/hooks/ai/useCases", async () => {
 
 // CaseDetail é testado à parte; aqui só a lista importa.
 vi.mock("@/app/app/ai/cases/_components/CaseDetail", () => ({
-  CaseDetail: () => null,
+  CaseDetail: ({ caseId }: { caseId: string | null }) => (
+    <p data-testid="case-detail-selecionado">{caseId}</p>
+  ),
 }));
 
 import { CaseList } from "@/app/app/ai/cases/_components/CaseList";
@@ -72,5 +74,32 @@ describe("CaseList", () => {
 
     expect(screen.getByText("Nenhum caso aberto")).toBeInTheDocument();
     expect(screen.getByText(/quando a ia precisar de você/i)).toBeInTheDocument();
+  });
+
+  it("permite abrir um caso, voltar à lista e abrir outro sem perder a aba", () => {
+    useCasesMock.mockReturnValue({
+      isLoading: false,
+      data: {
+        open_count: 2,
+        cases: ["case-1", "case-2"].map((id) => ({
+          id,
+          title: `Pedido fictício ${id}`,
+          kind: "outro",
+          status: "awaiting_human",
+          opened_at: new Date().toISOString(),
+          conversation_id: `conv-${id}`,
+          contact_name: "Pessoa fictícia",
+        })),
+      },
+    });
+
+    render(wrap(<CaseList />));
+    fireEvent.click(screen.getByRole("button", { name: /Pedido fictício case-1/ }));
+    expect(screen.getByTestId("case-detail-selecionado")).toHaveTextContent("case-1");
+    fireEvent.click(screen.getByRole("button", { name: "Voltar" }));
+    expect(screen.getByTestId("case-detail-selecionado")).toBeEmptyDOMElement();
+    expect(screen.getByRole("tab", { name: "Abertos (2)" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("button", { name: /Pedido fictício case-2/ }));
+    expect(screen.getByTestId("case-detail-selecionado")).toHaveTextContent("case-2");
   });
 });

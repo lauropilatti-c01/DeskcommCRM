@@ -3,8 +3,9 @@
 Correção candidata posterior à `v1.86.0-c01.3`. Não modifica a tag publicada, o banco, a política de acesso ou os serviços em execução.
 
 Destino: núcleo. A correção atende a fila já existente, sem exigir uma opção
-por organização. A tela e as rotas continuam as mesmas; falhas de leitura
-continuam retornando erro, em vez de uma lista parcial apresentada como completa.
+por organização. A paginação preserva as rotas e os contratos existentes;
+falhas de leitura continuam retornando erro, em vez de uma lista parcial
+apresentada como completa. O ajuste de navegação no celular está descrito ao fim.
 
 A abertura da fila falhou no laboratório com `URI too long`. A leitura de visibilidade enumerava conversas num único filtro `IN`; a consulta privilegiada repetia a lista para dados e contador. Além disso, consultas sem paginação dependiam do teto implícito de 1.000 linhas do PostgREST.
 
@@ -60,3 +61,49 @@ teste unitário separado. Os erros negativos são injetados. Não é benchmark
 nem prova de snapshot único entre páginas. Nenhum teste usa produção, envia
 mensagem ou consome IA. O portão completo, a troca do laboratório e a prova da
 tela na candidata final ficam com a integração.
+
+## Detalhe do caso no celular
+
+Na prova da tela da candidata `944257f58`, a lista abriu com 238 casos, mas a
+seleção manteve duas colunas em 375 px. A caixa de resposta ficou fora da tela:
+posição horizontal de 376 px e largura de 34 px. O mesmo defeito foi reproduzido
+na cópia isolada antes da correção.
+
+`CaseList.tsx` segue o padrão responsivo do Inbox: abaixo do ponto `md`, exibe
+a lista ou o detalhe conforme a seleção. O botão Voltar aparece assim que um
+caso está selecionado, inclusive enquanto a API carrega. Voltar limpa somente
+a seleção; conserva a aba aberta. No computador, as duas colunas permanecem.
+Permissões, chamadas da API e envio de respostas não mudam.
+
+Prova focada da correção:
+
+- Os 12 testes de `case-list`, `case-detail` e
+  `caso-tem-tipo-da-rota-ate-a-tela` passaram. O novo teste de navegação falhou
+  antes da correção, pela ausência de Voltar. A fixture de projeção recebeu
+  apenas o método `range`, exigido pela paginação; as asserções não mudaram.
+- Navegador em 375 × 812: detalhe sem rolagem horizontal, resposta em
+  `x=57`, com 261 px de largura; Voltar reexibe os 238 casos, e é possível
+  abrir outro caso.
+- Navegador em 1.440 × 1.000: lista e detalhe visíveis juntos, botão Voltar
+  oculto, resposta com 726 px de largura e documento sem excesso horizontal.
+- `pnpm typecheck` passou com Node 22 e teto de 8 GB; ESLint nos três arquivos
+  de código alterados teve zero erros e um aviso preexistente de import não
+  usado. Os 19 testes dos fragmentos de release passaram.
+
+A revisão independente aprovou a integração, sem impeditivos. Além de repetir
+a navegação nas duas larguras, reteve um GET para comprovar Voltar durante o
+carregamento e conferiu que a aba Concluídos permanece selecionada. Os seis
+testes dos dois arquivos alterados passaram novamente. Relatório privado:
+`~/workspace/dados/deskcomm-c01/casos-mobile-2310/REVISAO-INDEPENDENTE.md`.
+SHA-256 do `CaseList.tsx` revisado:
+`4e7dff9c8e9008d2f837c6c4afd1d7805fed7703eb6f5967906b67d4a8d22afd`.
+
+Capturas e medidas ficam fora do git, em
+`~/workspace/dados/deskcomm-c01/casos-mobile-2310/`. A prova usa a sessão real
+do laboratório numa aplicação Next isolada; não envia resposta nem altera
+casos. A primeira navegação atualizou automaticamente a presença da conta de
+teste; depois disso, métodos de escrita da API foram bloqueados no navegador.
+Não comprova entrega de mensagem, desempenho da fila nem a versão publicada.
+A sessão usada na prova visual é administrativa; a prova RLS com papel de
+atendente é a HTTP documentada acima. A integração continua responsável pelo
+portão completo e pela liberação.
