@@ -389,6 +389,7 @@ export async function ingestMetaInbound(
     texto: e.text ?? null,
     nomeDoContato: e.profileName ?? null,
     origem: "meta_webhook",
+    despachoPorMensagem: true,
   });
 
   return {

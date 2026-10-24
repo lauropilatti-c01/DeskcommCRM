@@ -39,6 +39,7 @@
  * dentro, com log, e o seguinte roda mesmo assim.
  */
 import { audit } from "@/lib/audit";
+import { registrarDespachoPorMensagem } from "./despacho-por-mensagem";
 import { idsDosCanaisDesativados } from "@/lib/channels/desativado";
 import { encerraDemanda } from "@/lib/leads/encerramento";
 import { garantirLeadDaConversa } from "@/lib/leads/nascimento-do-lead";
@@ -125,6 +126,8 @@ export interface EntradaDeMensagem {
    * nascia com `source = 'whatsapp'`.
    */
   canal?: string;
+  /** Escritor da entrada opta pelo pedido com identidade estável; não autoriza replay dos outros efeitos. */
+  despachoPorMensagem?: true;
 }
 
 /**
@@ -493,6 +496,19 @@ async function pedirDespachoDoAgente(admin: Admin, entrada: EntradaDeMensagem): 
       organization_id: entrada.organizationId,
       detail: err instanceof Error ? err.message.slice(0, 120) : "unknown",
     });
+  }
+
+  if (entrada.despachoPorMensagem) {
+    try {
+      await registrarDespachoPorMensagem(admin, { ...entrada, messageId: entrada.messageId });
+    } catch (err) {
+      logger.warn("pos-entrada: despacho por mensagem não confirmado", {
+        organization_id: entrada.organizationId,
+        message_id: entrada.messageId,
+        detail: err instanceof Error ? err.message : "desconhecido",
+      });
+    }
+    return;
   }
 
   const { error } = await admin.rpc("emit_event" as never, {
