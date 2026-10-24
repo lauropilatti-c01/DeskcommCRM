@@ -153,6 +153,12 @@ const EMISSOES_DINAMICAS: Record<string, { onde: string[]; porque: string }> = {
  * lista não teria o que fazer. O teste cobra que continuem nascendo assim.
  */
 const NASCE_DONE_NA_ORIGEM: Record<string, { onde: string[]; porque: string }> = {
+  "conversation.autonomous_turn_revoked": {
+    onde: ["lib/followup/c01-retorno-cancelar-job.ts"],
+    porque:
+      "a revogação do retorno é um fato durável, consultado por fn_autonomous_turn_revoked; " +
+      "o INSERT já grava status='done' antes da limpeza, sem trabalho pendente para o drain.",
+  },
   "agent.operator_turn": {
     onde: ["lib/agent-engine/agent/operator-turn.ts"],
     porque:
