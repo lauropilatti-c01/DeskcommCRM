@@ -1,3 +1,4 @@
+import { EsperaFinanceiraC01Error, BloqueioFinanceiroC01Error } from "@/lib/followup/c01-financeiro-espera";
 import { RetornoC01CanceladoError } from "@/lib/followup/c01-retorno-cancelado";
 import { registrarTentativaEnvioC01, assertAcompanhamentoC01Supabase, comEnvioAcompanhamentoC01, conexaoDoAcompanhamentoC01 } from "@/lib/followup/c01-acompanhamento-runtime";
 import { assinarOrigemC01, configOrigemC01, hashDoConteudoDaOrigem } from "@/lib/followup/c01-origem";
@@ -1305,7 +1306,7 @@ async function sendMessageComAutoridade(supabase: SB, ctx: HandlerCtx, input: Se
       if (updated) message = updated as unknown as Message;
       }
     } catch (err) {
-      if (err instanceof StaleServiceBoundaryError || err instanceof AgendaDeferredError || err instanceof RetornoC01CanceladoError || err instanceof ApprovedReplyReceiptPersistenceError) throw err;
+      if (err instanceof StaleServiceBoundaryError || err instanceof AgendaDeferredError || err instanceof RetornoC01CanceladoError || err instanceof ApprovedReplyReceiptPersistenceError || err instanceof EsperaFinanceiraC01Error || err instanceof BloqueioFinanceiroC01Error) throw err;
       const msg = err instanceof Error ? err.message : adapter.codes.unknownError;
       // `storage_sign_failed` fica literal: é falha do NOSSO Storage, não do
       // canal — a URL assinada é montada antes de qualquer coisa tocar o adapter.

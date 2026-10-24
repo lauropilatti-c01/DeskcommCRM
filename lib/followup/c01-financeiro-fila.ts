@@ -67,6 +67,23 @@ export async function disporJobFinanceiroC01(
           idempotency_key: `${nodeId}:${e.steps_taken}:financeiro:${job.id}`,
         },
       );
+      // Linha preparada não é recibo: a espera conserva queued; bloqueio final
+      // encerra só o que ainda não foi aceito, na transação da inscrição/job.
+      await db.query(
+        `update messages m set status='failed',error_code='c01_financeiro_bloqueado',error_message=$4
+         from send_ledger s where s.organization_id=$1 and s.job_id=$2 and s.contact_id=$3
+          and s.status <> 'accepted' and m.organization_id=s.organization_id and m.contact_id=s.contact_id
+          and (m.id=s.id or m.id=s.crm_message_id) and m.direction='outbound' and m.status='queued'
+          and m.external_id is null`,
+        [job.organization_id,job.id,job.contact_id,error.message],
+      );
+      await db.query(
+        `update send_ledger s set status='failed',last_error=$4,updated_at=now()
+         where s.organization_id=$1 and s.job_id=$2 and s.contact_id=$3 and s.status in ('requested','queued')
+          and not exists(select 1 from messages m where m.organization_id=s.organization_id
+           and (m.id=s.id or m.id=s.crm_message_id) and (m.status in ('sent','delivered','read') or m.external_id is not null))`,
+        [job.organization_id,job.id,job.contact_id,error.message],
+      );
       await cancelJob(db, job.id, claim.worker_id, error.message, claim.acquired_at);
       await db.query("commit");
       return;

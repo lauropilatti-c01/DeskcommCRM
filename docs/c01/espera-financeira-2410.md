@@ -47,11 +47,19 @@ não recebem o tratamento temporário.
 ## Fila e porta final
 
 `EsperaFinanceiraC01Error` atravessa a camada de transporte sem virar erro comum.
+O handler nativo de mensagens também preserva esse erro no último corte.
+Se a linha já foi preparada, conserva `queued` e o recibo `requested`; o replay
+retoma a mesma chave. O watchdog exclui mensagens vinculadas por ledger, job,
+inscrição e versão ao grafo C01, nos dois cortes. Não usa uma flag solta como
+prova. Oferta legada sem esse grafo conserva o comportamento anterior.
+
 O worker e o envio inline usam `disporJobFinanceiroC01`: a mesma transação retém
 trava por pessoa, inscrição e lease exato. A ponte atualiza o prazo e a fila
 volta a pending, devolvendo a tentativa técnica. O nó não avança.
 
-`BloqueioFinanceiroC01Error` pausa a inscrição e encerra o job na mesma transação.
+`BloqueioFinanceiroC01Error` pausa a inscrição e encerra o job na mesma transação,
+limpando a mensagem preparada e o recibo ainda pendente. Recibo `accepted`,
+mensagem enviada ou ID externo nunca são rebaixados.
 Lease antigo, movimento de serviço ou falha de gravação não permitem disposição
 parcial; o consumidor conserva a aquisição para recuperação. Uma fonte viva
 continua sendo relida no corte de envio: esperar não autoriza o canal.
@@ -96,3 +104,13 @@ medição de 729,953 segundos é uma rodada real, não SLA. Se outra geração d
 900 segundos ou o checkpoint deixar de avançar, continua indisponível. Os 27
 contatos do retrato privado incluíam equipe; cobertura não é autorização de
 disparo. Instalação e ativação são etapas posteriores.
+
+### Correção encontrada na revisão independente
+
+O revisor reproduziu o catch do handler nativo convertendo o veto final em
+mensagem failed genérica. O ajuste preserva o erro, fecha o resgate lateral do
+watchdog e prova replay no mesmo ID pelo handler e ledger reais. Três novos
+casos SQL dirigidos e 11 casos dos três arquivos unitários afetados passaram;
+as fontes e o canal são fictícios. O primeiro vermelho SQL comprovou o resgate
+indevido; dois outros casos tiveram o nome de sessão fictícia corrigido para
+respeitar o índice único real. Nenhuma asserção foi retirada.

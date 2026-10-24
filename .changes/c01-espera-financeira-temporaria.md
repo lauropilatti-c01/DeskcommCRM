@@ -14,3 +14,8 @@ Falha ou prazo vencido mantêm revisão, sem retomada automática de pausa manua
 Matrícula L1 também preserva o primeiro prazo e nunca reinicia a âncora. Sem DDL,
 ativação, alteração comercial ou envio real. Contrato e limites em
 `docs/c01/espera-financeira-2410.md`.
+
+O último corte do handler preserva o erro tipado. Mensagem preparada durante
+espera só pode retomar pelo mesmo worker/recibo; o watchdog não resgata inscrições
+C01 por fora dessa conferência. Bloqueio final limpa pendências sem rebaixar
+recibos aceitos. O resgate legado permanece igual.

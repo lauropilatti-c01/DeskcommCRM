@@ -45,6 +45,7 @@ import {
   BloqueioFinanceiroC01Error,
 } from "@/lib/followup/c01-financeiro-espera";
 import { disporJobFinanceiroC01 } from "@/lib/followup/c01-financeiro-fila";
+import { redriveQueued } from "@/lib/agent-engine/edge/crm/session-reconciler";
 import { vi } from "vitest";
 if (!process.env.TEST_DB_CONTAINER) throw new Error("Use o banco descartável de test:db.");
 const pool = new pg.Pool({
@@ -788,6 +789,54 @@ describe("worker real da continuação com transporte fictício", () => {
     expect(fakes.semOferta).toHaveBeenCalled();
     const e = await f.db.loadEnrollmentById(f.org, f.enrollmentId);
     expect(e?.current_node_id).toBe("end");
+  });
+  const watchdog = {
+    wahaBaseUrl: "http://127.0.0.1:1", wahaApiKey: "ficticio", intervalMs: 1,
+    redriveMinAgeMs: 0, redriveBatchSize: 200, redriveSpacingMs: 0,
+  };
+  const watchdogLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  async function mensagemPreparada(f: Awaited<ReturnType<typeof preparar>>, seq = 1, accepted = false) {
+    const id = randomUUID();
+    await pool.query(
+      "insert into send_ledger(id,organization_id,contact_id,job_id,seq,body_hash,status) values($1,$2,$3,$4,$5,'ficticio',$6)",
+      [id,f.org,f.contact,f.job.id,seq,accepted ? 'accepted' : 'requested'],
+    );
+    await pool.query(
+      "insert into messages(id,organization_id,contact_id,conversation_id,channel_session_id,direction,type,status,body,sent_via,metadata,created_at) values($1,$2,$3,$4,$5,'outbound','text','queued','Texto fictício','ai',$6,now()-interval '1 hour')",
+      [id,f.org,f.contact,f.conversation,f.session,{idempotency_key:id}],
+    );
+    await pool.query("update channel_sessions set status='WORKING',waha_session_name='ficticio-'||id::text where id=$1",[f.session]);
+    return id;
+  }
+  it("mensagem preparada: watchdog não resgata C01 antes da disposição financeira", async () => {
+    const f = await preparar("L1"), id = await mensagemPreparada(f);
+    const fetch = vi.fn(async () => new Response(JSON.stringify({id:'nao-deveria-sair'})));
+    vi.stubGlobal('fetch',fetch);
+    expect(await redriveQueued(pool,watchdog,watchdogLog)).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect((await pool.query('select status from messages where id=$1',[id])).rows[0].status).toBe('queued');
+  });
+  it("mensagem preparada: bloqueio limpa pendente e preserva recibo accepted", async () => {
+    const f = await preparar("L1"), id = await mensagemPreparada(f), accepted = await mensagemPreparada(f,2,true);
+    await disporJobFinanceiroC01(pool,f.job,new BloqueioFinanceiroC01Error('compras_sem_conferencia_univoca'),f.at);
+    const rows = (await pool.query('select id,status,error_code from messages where id=any($1::uuid[])',[[id,accepted]])).rows;
+    expect(rows.find(r=>r.id===id)).toMatchObject({status:'failed',error_code:'c01_financeiro_bloqueado'});
+    expect(rows.find(r=>r.id===accepted)?.status).toBe('queued');
+    const ledger = (await pool.query('select id,status from send_ledger where id=any($1::uuid[])',[[id,accepted]])).rows;
+    expect(ledger.find(r=>r.id===id)?.status).toBe('failed');
+    expect(ledger.find(r=>r.id===accepted)?.status).toBe('accepted');
+    const fetch = vi.fn();vi.stubGlobal('fetch',fetch);
+    expect(await redriveQueued(pool,watchdog,watchdogLog)).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("mensagem preparada: watchdog conserva o resgate legado sem grafo C01", async () => {
+    const f = await preparar("L1"), id = await mensagemPreparada(f);
+    await pool.query("update followup_flow_versions set graph=graph #- '{settings,c01_acompanhamento}' where id=$1",[f.offerVersion]);
+    const fetch = vi.fn(async () => new Response(JSON.stringify({id:'recibo-ficticio'})));
+    vi.stubGlobal('fetch',fetch);
+    expect(await redriveQueued(pool,watchdog,watchdogLog)).toBe(1);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect((await pool.query('select status from messages where id=$1',[id])).rows[0].status).toBe('sent');
   });
   it("sink segura coleta temporária sem canal e conserva o primeiro prazo", async () => {
     const f = await preparar("L1");

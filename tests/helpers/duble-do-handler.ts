@@ -48,6 +48,8 @@ export interface OpcoesDoDubleDoHandler {
    * — um vermelho que denunciaria o stub, não o código.
    */
   indiceUnicoMensagem?: boolean;
+  /** PK real opcional para provar replay com internalMessageId, sem criar outro dublê. */
+  indiceUnicoMensagemId?: boolean;
   /** Linha de `organizations` lida pelo aviso ao lead, pela guarda de agenda e pelo assert de org operante. Padrão: `{ settings: {}, status: "active" }`. */
   organizacao?: LinhaDoDuble;
   /** Linhas de `calendar_appointments` lidas pela guarda de agenda. Padrão: `[]`. */
@@ -396,6 +398,8 @@ export function criarDubleDoHandler(
 
         return {
           insert: (row: LinhaDoDuble) => {
+            if (opcoes.indiceUnicoMensagemId && row.id && mensagens.some(m => m.id === row.id))
+              return { select: () => ({ single: async () => ({ data: null, error: { code: "23505" } }) }) };
             contadorDeMensagens += 1;
             const nova: LinhaDoDuble = {
               id: `msg-${contadorDeMensagens}`,
