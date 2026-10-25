@@ -113,6 +113,60 @@ describe("MoveLeadForm — motivo da perda", () => {
     expect(screen.queryByText("Escolha o motivo da perda.")).toBeNull();
   });
 
+  it("preserva o canônico já salvo sem oferecer os demais canônicos no funil personalizado", async () => {
+    comEtapas();
+    const user = usuario();
+    const gravados = renderizar({ stage_id: PERDA, lost_reason: "no_response" });
+
+    expect(screen.getByRole("combobox", { name: "Motivo da perda" })).toHaveTextContent("Sem resposta do cliente");
+    expect(screen.queryByText("Escolha o motivo da perda.")).toBeNull();
+    expect(gravados).toEqual([]);
+
+    await user.click(screen.getByRole("combobox", { name: "Motivo da perda" }));
+    expect(screen.getAllByRole("option").map((opcao) => opcao.textContent)).toEqual([
+      "Sem orçamento", "Outro motivo", "Sem resposta do cliente",
+    ]);
+  });
+
+  it("mantém o canônico já salvo ao trocar entre etapas de perda", async () => {
+    comEtapas();
+    const user = usuario();
+    const gravados = renderizar({ stage_id: PERDA, lost_reason: "no_response" });
+
+    await user.click(screen.getByRole("combobox", { name: "Etapa de destino" }));
+    await user.click(await screen.findByRole("option", { name: "Perdido · Suporte" }));
+
+    expect(gravados.at(-1)).toEqual({ stage_id: PERDA_OUTRO_FUNIL, lost_reason: "no_response" });
+  });
+
+  it("não oferece o motivo reservado à transferência mesmo se ele estiver salvo", async () => {
+    comEtapas();
+    const user = usuario();
+    renderizar({ stage_id: PERDA, lost_reason: "moved_to_another_pipeline" });
+
+    expect(screen.getByRole("combobox", { name: "Motivo da perda" })).toHaveTextContent("Escolha o motivo");
+    await user.click(screen.getByRole("combobox", { name: "Motivo da perda" }));
+    expect(screen.getAllByRole("option").map((opcao) => opcao.textContent)).toEqual([
+      "Sem orçamento", "Outro motivo",
+    ]);
+  });
+
+  it("deixa de oferecer o canônico anterior depois de escolher um motivo do funil", async () => {
+    comEtapas();
+    const user = usuario();
+    const gravar = vi.fn();
+    const view = render(<MoveLeadForm config={{ stage_id: PERDA, lost_reason: "no_response" }} onChange={gravar} />);
+    await user.click(screen.getByRole("combobox", { name: "Motivo da perda" }));
+    await user.click(await screen.findByRole("option", { name: "Sem orçamento" }));
+    expect(gravar).toHaveBeenLastCalledWith({ stage_id: PERDA, lost_reason: "Sem orçamento" });
+
+    view.rerender(<MoveLeadForm config={{ stage_id: PERDA, lost_reason: "Sem orçamento" }} onChange={gravar} />);
+    await user.click(screen.getByRole("combobox", { name: "Motivo da perda" }));
+    expect(screen.getAllByRole("option").map((opcao) => opcao.textContent)).toEqual([
+      "Sem orçamento", "Outro motivo",
+    ]);
+  });
+
   it("trocar para etapa comum limpa o lost_reason", async () => {
     comEtapas();
     const user = usuario();

@@ -19,6 +19,17 @@ import { rotuloDoMotivoDePerda } from "@/lib/schemas/leads";
 import { useEtapasDoFluxo } from "../EtapasDoFluxo";
 import type { ConfigOf } from "./shared";
 
+function opcoesComMotivoSalvo(motivosDoDestino: readonly string[], motivoSalvo: string) {
+  const opcoes = opcoesDeMotivoDePerda(motivosDoDestino);
+  // A lista personalizada governa novas escolhas; preserva só o canônico já salvo.
+  // A fonte padrão já exclui o motivo reservado à transferência de funil.
+  const canonicoSalvo = opcoesDeMotivoDePerda([]).find((opcao) => opcao.valor === motivoSalvo);
+  if (canonicoSalvo && !opcoes.some((opcao) => opcao.valor === motivoSalvo)) {
+    opcoes.push(canonicoSalvo);
+  }
+  return opcoes;
+}
+
 /**
  * O nó `move_lead` (#2065) — escolher para qual etapa o card vai.
  *
@@ -32,9 +43,9 @@ import type { ConfigOf } from "./shared";
  * o publish recusa (`motivo_da_perda_ausente`), porque o motor seria recusado
  * com 422 e o fluxo seguiria como se o card tivesse andado. As opções são as
  * MESMAS da janela "Marcar como perdido" do quadro (canônicos + motivos do
- * funil) — nada de segunda lista. Trocar de etapa descarta o motivo que não
- * está nas opções do funil de destino, para não guardar um motivo que o
- * publish recusaria (`motivo_da_perda_invalido`).
+ * funil) — nada de segunda lista. Um canônico comercial já salvo continua válido;
+ * trocar de etapa descarta o motivo personalizado ausente no funil de destino,
+ * para não guardar um motivo que o publish recusaria (`motivo_da_perda_invalido`).
  */
 export function MoveLeadForm({
   config,
@@ -51,7 +62,7 @@ export function MoveLeadForm({
   const etapaEscolhida = etapas.find((e) => e.stageId === valor);
   const ehPerda = etapaEscolhida?.isPerda === true;
   const motivoAtual = (config.lost_reason ?? "").trim();
-  const opcoes = opcoesDeMotivoDePerda(motivosDoFunil(etapaEscolhida?.settingsDoFunil ?? null));
+  const opcoes = opcoesComMotivoSalvo(motivosDoFunil(etapaEscolhida?.settingsDoFunil ?? null), motivoAtual);
   const motivoNaLista = motivoAtual !== "" && opcoes.some((o) => o.valor === motivoAtual);
 
   return (
@@ -62,10 +73,10 @@ export function MoveLeadForm({
         onValueChange={(stageId) => {
           const destino = etapas.find((e) => e.stageId === stageId);
           const motivoMantido = (config.lost_reason ?? "").trim();
-          // Só mantém o motivo se ele existe nas opções do funil DE DESTINO:
-          // motivo de outro funil passaria no seletor vazio e cairia no
-          // `motivo_da_perda_invalido` do publish, longe de quem pode corrigir.
-          const opcoesDoDestino = opcoesDeMotivoDePerda(motivosDoFunil(destino?.settingsDoFunil ?? null));
+          // O canônico salvo vale em qualquer funil; personalizado exige o destino.
+          const opcoesDoDestino = opcoesComMotivoSalvo(
+            motivosDoFunil(destino?.settingsDoFunil ?? null), motivoMantido,
+          );
           const parsed =
             destino?.isPerda === true && motivoMantido && opcoesDoDestino.some((o) => o.valor === motivoMantido)
               ? moveLeadConfigSchema.safeParse({ stage_id: stageId, lost_reason: motivoMantido })
