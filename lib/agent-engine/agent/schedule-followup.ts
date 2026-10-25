@@ -65,7 +65,7 @@ export const SCHEDULE_FOLLOWUP_C01_DESCRIPTION =
   'Nunca substitua sem pedido. Só confirme ao lead depois de ok=true; então encerre o turno.';
 
 export type ScheduleFollowupResult =
-  | { ok: true; cronJobId: string; promisedAt: Date; message: string }
+  | { ok: true; cronJobId: string; promisedAt: Date; message: string; crm_lead_id?: string }
   | {
       ok: false;
       /** Referência interna da recusa; o adaptador C01 nunca a entrega ao modelo. */
@@ -267,6 +267,8 @@ export async function applyScheduleFollowup(
   return {
     ok: true,
     cronJobId: resultado.retorno.id,
+    // Card validado pela política C01; leadId do turno é o contato.
+    ...(comercial ? { crm_lead_id: comercial.lead_id } : {}),
     promisedAt: new Date(resultado.retorno.quando),
     message:
       `retorno ${resultado.substituiu ? "reagendado" : "agendado"} para ${input.promised_at}. Agora confirme ao lead, numa resposta curta, ` +

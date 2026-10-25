@@ -6449,6 +6449,7 @@ async function executarTurnoDoAgente(
           return {
             ok: true,
             status: 'agendado',
+            ...(c01Callback && res.crm_lead_id ? { crm_lead_id: res.crm_lead_id } : {}),
             agendado_para: res.promisedAt.toISOString(),
             message: res.message,
           };

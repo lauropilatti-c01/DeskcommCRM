@@ -256,7 +256,7 @@ async function crons() { return (await pool.query('select id,payload,enabled fro
 function chamar(args: Record<string, unknown>, antes?: () => Promise<void>): Entrada { return { args, antes }; }
 
 describe('retorno C01 com identidade do servidor no turno real', () => {
-  it('expõe contrato sem IDs e persiste um cron com prova real e confirmação entregue', async () => {
+  it('devolve card autoritativo: contrato sem IDs e cron com confirmação entregue', async () => {
     expect(await rodaTurno(montaHandler(modelo([
       chamar(PEDIDO), { nome: 'send_message', args: { body: 'Combinado, amanhã às 10h eu chamo por aqui.' } },
     ])))).toBeNull();
@@ -264,6 +264,7 @@ describe('retorno C01 com identidade do servidor no turno real', () => {
     expect(props).not.toHaveProperty('consent_message_id');
     expect(props).not.toHaveProperty('offered_message_id');
     expect(props).not.toHaveProperty('replace_pending_id');
+    expect(props).not.toHaveProperty('crm_lead_id');
     expect(props).toHaveProperty('substituir_pendente');
     expect(schemasVistos[0]?.additionalProperties).toBe(false);
     const rows = await crons();
@@ -271,18 +272,21 @@ describe('retorno C01 com identidade do servidor no turno real', () => {
     expect(rows[0]?.payload.c01_callback).toMatchObject({ message_id: MSG, offered_message_id: OFFER, lead_id: LEAD, organization_id: ORG, contact_id: CONTACT, promised_at: new Date(PEDIDO.promised_at).toISOString() });
     expect(enviados).toHaveLength(1);
     expect(JSON.stringify(resultadosVistos)).toContain('agendado');
+    expect(JSON.stringify(resultadosVistos)).toContain(`"crm_lead_id":"${LEAD}"`);
+    expect(JSON.stringify(resultadosVistos)).not.toContain(`"crm_lead_id":"${CONTACT}"`);
     expect(JSON.stringify(resultadosVistos)).not.toContain(MSG);
   });
-  it.each(['consent_message_id', 'offered_message_id', 'replace_pending_id'])('recusa %s injetado antes do executor', async (key) => {
+  it.each(['consent_message_id', 'offered_message_id', 'replace_pending_id', 'crm_lead_id'])('recusa %s injetado antes do executor', async (key) => {
     expect(await rodaTurno(montaHandler(modelo([chamar({ ...PEDIDO, [key]: '00000000-0000-0000-0000-000000000000' })])))).toBeNull();
     expect(await crons()).toHaveLength(0);
     expect(enviados).toHaveLength(0);
     expect(JSON.stringify(resultadosVistos)).toContain('error');
   });
-  it('recusa horário diferente do consentido sem prometer nem agendar', async () => {
+  it('não devolve card autoritativo na recusa de horário sem consentimento', async () => {
     expect(await rodaTurno(montaHandler(modelo([chamar({ ...PEDIDO, promised_at: '2026-10-25T14:00:00Z' })])))).toBeNull();
     expect(await crons()).toHaveLength(0);
     expect(JSON.stringify(resultadosVistos)).toContain('callback_not_confirmed');
+    expect(JSON.stringify(resultadosVistos)).not.toContain('crm_lead_id');
   });
   it('recusa pedido inválido sem candidatura', async () => {
     expect(await rodaTurno(montaHandler(modelo([chamar({ ...PEDIDO, reason: '' })])))).toBeNull();
@@ -295,7 +299,7 @@ describe('retorno C01 com identidade do servidor no turno real', () => {
     expect(await crons()).toHaveLength(0);
     expect(JSON.stringify(resultadosVistos)).toContain('callback_not_confirmed');
   });
-  it('troca explicitamente o pendente observado, uma linha só e sem UUID no resultado', async () => {
+  it('devolve card autoritativo na remarcação, uma linha só e sem UUID do cron no resultado', async () => {
     expect(await rodaTurno(montaHandler(modelo([chamar(PEDIDO)])))).toBeNull();
     const anterior = (await crons())[0]!.id;
     resultadosVistos = [];
@@ -305,6 +309,7 @@ describe('retorno C01 com identidade do servidor no turno real', () => {
     expect(rows[0]?.id).toBe(anterior);
     expect(JSON.stringify(resultadosVistos)).toContain('already_pending');
     expect(JSON.stringify(resultadosVistos)).toContain('reagendado');
+    expect(JSON.stringify(resultadosVistos)).toContain(`"crm_lead_id":"${LEAD}"`);
     expect(JSON.stringify(resultadosVistos)).not.toContain(anterior);
   });
   it('recusa pendente cancelado entre observação e substituição, sem criar outro', async () => {

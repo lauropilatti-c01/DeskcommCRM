@@ -60,6 +60,7 @@ describe('applyScheduleFollowup — guard anti-empilhamento (1 pendente por lead
     expect(res.ok).toBe(true);
     if (!res.ok) throw new Error('esperava sucesso');
     expect(res.cronJobId).toBe('cron-novo');
+    expect(res).not.toHaveProperty('crm_lead_id');
     expect(p.inserts).toBe(1);
   });
 
