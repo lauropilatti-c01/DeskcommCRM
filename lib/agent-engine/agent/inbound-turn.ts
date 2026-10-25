@@ -115,7 +115,7 @@ import {
   PASTA_DE_TESTE_DE_MIDIA,
   type FotoParaEnvio,
 } from './fotos-do-produto';
-import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, MAX_LEGENDA_VIDEO, prepararVideoNativo, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
+import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, MAX_LEGENDA_VIDEO, lerPoliticaDeVideo, prepararVideoNativo, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
 import {
   applyLeadStateUpdate,
@@ -655,6 +655,19 @@ export const AGENT_TOOL_DEFS = {
       .passthrough(),
   },
 } as const;
+
+const ORIENTACAO_TEXTO_SEM_MIDIA =
+  'Se a intenção é enviar texto, faça uma nova chamada com somente body; omita video_chave e produto_codigo, sem marcadores vazios, none ou null.';
+
+/** A capacidade oferecida ao modelo acompanha a política real, sem descartar
+ * mídia indevida silenciosamente e transformar sua legenda em mensagem de texto. */
+export function schemaDeEnvioDoTurno(videoNativoHabilitado: boolean) {
+  if (videoNativoHabilitado) return AGENT_TOOL_DEFS.send_message.inputSchema;
+  const semVideo = AGENT_TOOL_DEFS.send_message.inputSchema.omit({ video_chave: true });
+  return z.strictObject(semVideo.shape, {
+    error: 'Argumento não disponível neste turno. ' + ORIENTACAO_TEXTO_SEM_MIDIA,
+  });
+}
 
 /**
  * Quantos vetos de `internal_vocabulary_leak` o turno tolera antes de o fail-safe agir
@@ -4901,6 +4914,8 @@ async function executarTurnoDoAgente(
 
   let propostaDeContinuacaoC01: PropostaContinuacaoC01 | undefined;
   const configDeContinuacaoC01 = configOrigemC01();
+  // O schema não é autorização: prepararVideoNativo relê a política no envio.
+  const videoNativoDisponivelNoTurno = !preview && (await lerPoliticaDeVideo(pool, tenantId)).enabled;
   const rawTools: ToolSet = {
     get_lead_context: tool({
       ...AGENT_TOOL_DEFS.get_lead_context,
@@ -5151,9 +5166,13 @@ async function executarTurnoDoAgente(
         const body = formatarParaWhatsApp(corpoDoModelo);
         // V1: uma única mensagem de vídeo e legenda. Nenhuma degradação para
         // texto, nenhum lote de fotos/vídeo e nenhuma cópia no preview.
+        if (video_chave !== undefined && !videoNativoDisponivelNoTurno) {
+          return { ok: false, error: { code: 'video_desligado', message:
+            'Vídeo nativo não está disponível neste turno; nada foi enviado. ' + ORIENTACAO_TEXTO_SEM_MIDIA } };
+        }
         if (video_chave !== undefined && (produto_codigo !== undefined || body.length > MAX_LEGENDA_VIDEO || preview)) {
           return { ok: false, error: { code: 'video_configuracao_invalida', message:
-            'Vídeo nativo exige legenda de até 1024 caracteres, sem produto_codigo. A prévia não executa vídeo; não considere o anexo enviado.' } };
+            'Vídeo nativo exige legenda de até 1024 caracteres, sem produto_codigo. A prévia não executa vídeo; não considere o anexo enviado. ' + ORIENTACAO_TEXTO_SEM_MIDIA } };
         }
         // (C01, -c01.14) As tabelas cobradas cujo resultado NÃO estava no que o modelo leu
         // ao escrever ESTA mensagem. (`opcoes.messages` abre o passo, sem o passo desta
@@ -5371,7 +5390,7 @@ async function executarTurnoDoAgente(
             });
             if (!preparado.ok) {
               dupTrava.liberar(body);
-              return { ok: false, error: { code: preparado.code, message: preparado.message } };
+              return { ok: false, error: { code: preparado.code, message: preparado.message + ' ' + ORIENTACAO_TEXTO_SEM_MIDIA } };
             }
             videoNativo = preparado.media;
           }
@@ -6364,6 +6383,9 @@ async function executarTurnoDoAgente(
       },
     }),
   };
+  if (rawTools.send_message) {
+    rawTools.send_message.inputSchema = schemaDeEnvioDoTurno(videoNativoDisponivelNoTurno);
+  }
   // (C01, -c01.15) Com o divisor de bolhas, uma resposta por turno: depois de um
   // `send_message` que saiu, o seguinte é recusado (`c01-uma-resposta-por-turno.ts`).
   if ((agentConfig?.splitMessages ?? false) && rawTools.send_message !== undefined) {
@@ -7295,6 +7317,16 @@ async function executarTurnoDoAgente(
       },
       { registry: deps.registry, log: runLog },
     );
+
+    // Argumento inválido é recusado pelo SDK antes de execute limpar a pendência.
+    // A última etapa com envio manda: uma tentativa válida posterior pode deixar
+    // uma nova pendência; uma inválida (inclusive paralela) não revive a anterior.
+    const ultimaEtapaDeEnvio = turn.result.steps.findLast((etapa) =>
+      etapa.toolCalls.some((chamada) => chamada.toolName === 'send_message'));
+    if (ultimaEtapaDeEnvio?.toolCalls.some((chamada) =>
+      chamada.toolName === 'send_message' && 'invalid' in chamada && chamada.invalid)) {
+      envioVetadoPorEstilo = null;
+    }
 
     // SAÍDA TRUNCADA (finish_reason = 'length'): o modelo bateu no
     // teto de tokens de saída e o que produziu veio cortado. A detecção mora aqui,

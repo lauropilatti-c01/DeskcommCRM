@@ -14,7 +14,7 @@ type Entrada = { body: string; produto_codigo?: string; video_chave?: string };
  * modelo e o transporte são seams locais. Prova a vida da pendência e o retorno
  * pelos gates, não uma conversa E2E, banco, cópia de mídia ou envio ao canal.
  */
-function turnoDosBlocosReais(opts: { bloqueado?: boolean } = {}) {
+function turnoDosBlocosReais(opts: { bloqueado?: boolean; videoHabilitado?: boolean } = {}) {
   const fonte = readFileSync('lib/agent-engine/agent/inbound-turn.ts', 'utf8');
   const ini = fonte.indexOf('execute: async ({ body: corpoDoModelo, produto_codigo, video_chave }, opcoes) => {');
   expect(ini).toBeGreaterThan(0);
@@ -25,6 +25,9 @@ function turnoDosBlocosReais(opts: { bloqueado?: boolean } = {}) {
   const fim = fonte.slice(fonte.indexOf('    if (', inicioFim), fonte.lastIndexOf('// ═══', fonte.indexOf('SEM PASSAGEM, O VETO DE CONTEÚDO SEM NOVA TENTATIVA')));
   expect(estilo).toContain('envioVetadoPorEstilo =');
   expect(fim).toContain('rawTools.send_message');
+  const inicioOrientacao = fonte.indexOf('const ORIENTACAO_TEXTO_SEM_MIDIA =');
+  const orientacao = fonte.slice(inicioOrientacao, fonte.indexOf('\n\n', inicioOrientacao));
+  expect(inicioOrientacao).toBeGreaterThan(0);
   const gates = BEFORE_SEND_GATES.filter((g) => ['stop', 'linguagem_formal'].includes(g.name));
   const avaliar = (body: string, armada: boolean) => {
     const res = evaluateBeforeSend({ body, optedOut: opts.bloqueado === true, travasDeEnvio: armada ? { linguagemFormal: true } : {} } as GateContext, gates);
@@ -32,7 +35,8 @@ function turnoDosBlocosReais(opts: { bloqueado?: boolean } = {}) {
       ? { status: 'sent' }
       : { status: 'vetoed', code: res.veto.code, message: res.veto.message };
   };
-  const criar = new Function('formatarParaWhatsApp', 'MAX_LEGENDA_VIDEO', 'MAX_VETOS_DE_ESTILO', 'TRAVAS_DE_ESTILO', 'estiloViraConteudo', 'avaliar', `
+  const criar = new Function('formatarParaWhatsApp', 'MAX_LEGENDA_VIDEO', 'MAX_VETOS_DE_ESTILO', 'TRAVAS_DE_ESTILO', 'estiloViraConteudo', 'avaliar', 'videoNativoDisponivelNoTurno', `
+    ${orientacao}
     let envioVetadoPorEstilo = null;
     let tentativasDeEnvio = 0;
     const vetosDeEstilo = new Map();
@@ -58,7 +62,7 @@ function turnoDosBlocosReais(opts: { bloqueado?: boolean } = {}) {
     };
     return { executar, encerrar, enviados, retomados };
   `);
-  return criar(formatarParaWhatsApp, MAX_LEGENDA_VIDEO, MAX_VETOS_DE_ESTILO, TRAVAS_DE_ESTILO, estiloViraConteudo, avaliar) as {
+  return criar(formatarParaWhatsApp, MAX_LEGENDA_VIDEO, MAX_VETOS_DE_ESTILO, TRAVAS_DE_ESTILO, estiloViraConteudo, avaliar, opts.videoHabilitado ?? true) as {
     executar: (entrada: Entrada) => Promise<unknown>;
     encerrar: () => Promise<void>;
     enviados: Entrada[];
@@ -67,6 +71,16 @@ function turnoDosBlocosReais(opts: { bloqueado?: boolean } = {}) {
 }
 
 describe('pendência de estilo na integração com vídeo', () => {
+  it('vídeo OFF injetado no executor não envia a legenda nem recupera o texto antigo', async () => {
+    const t = turnoDosBlocosReais({ videoHabilitado: false });
+    await t.executar({ body: 'Gostaria de continuar.' });
+    expect(await t.executar({ body: 'Legenda.', video_chave: 'fixture' }))
+      .toMatchObject({ ok: false, error: { code: 'video_desligado', message: expect.stringContaining('somente body') } });
+    await t.encerrar();
+    expect(t.retomados).toEqual([]);
+    expect(t.enviados).toEqual([]);
+  });
+
   it('texto vetado → vídeo inválido → fim não solta o texto antigo nem a legenda', async () => {
     const t = turnoDosBlocosReais();
     expect(await t.executar({ body: 'Gostaria de continuar.' })).toMatchObject({ ok: false, error: { code: 'linguagem_formal' } });
