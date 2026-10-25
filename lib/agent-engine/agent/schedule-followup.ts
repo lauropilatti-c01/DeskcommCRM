@@ -52,15 +52,59 @@ export const scheduleFollowupInputSchema = z.strictObject({
 });
 export type ScheduleFollowupInput = z.infer<typeof scheduleFollowupInputSchema>;
 
+/** Contrato público C01: identidade e prova continuam resolvidas pelo servidor. */
+export const scheduleFollowupC01ToolSchema = scheduleFollowupInputSchema.omit({
+  consent_message_id: true, offered_message_id: true, replace_pending_id: true,
+}).extend({ substituir_pendente: z.boolean().optional() });
+
+export const SCHEDULE_FOLLOWUP_C01_DESCRIPTION =
+  'Agenda retorno SOMENTE quando o lead confirmou o dia e a hora exatos. ' +
+  'Informe reason, promised_at e promise; context_snapshot e consent_excerpt são opcionais. ' +
+  'Não informe identificadores de mensagens ou retornos: o servidor vincula a confirmação do turno e a oferta anterior. ' +
+  'Se receber already_pending e o cliente pediu outro horário, repita com substituir_pendente=true. ' +
+  'Nunca substitua sem pedido. Só confirme ao lead depois de ok=true; então encerre o turno.';
+
 export type ScheduleFollowupResult =
   | { ok: true; cronJobId: string; promisedAt: Date; message: string }
   | {
       ok: false;
+      /** Referência interna da recusa; o adaptador C01 nunca a entrega ao modelo. */
+      pendingCronJobId?: string;
       error: {
         code: 'invalid_payload' | 'promised_at_in_past' | 'promised_at_out_of_window' | 'already_pending' | 'pending_changed' | 'outside_send_window' | 'callback_not_confirmed';
         message: string;
       };
     };
+
+/** Uma instância por turno: não transforma UUID forjado em consentimento nem troca implícita. */
+export function criarAgendadorC01DoTurno(aplicar: (input: unknown) => Promise<ScheduleFollowupResult>) {
+  let pendenteObservado: string | undefined;
+  return async (raw: unknown): Promise<ScheduleFollowupResult> => {
+    const parsed = scheduleFollowupC01ToolSchema.safeParse(raw);
+    if (findForbiddenKey(raw) !== null || !parsed.success) {
+      return { ok: false, error: { code: 'invalid_payload', message:
+        `Não informe IDs ou campos extras em schedule_followup. ${SCHEDULE_FOLLOWUP_C01_DESCRIPTION}` } };
+    }
+    const { substituir_pendente, ...input } = parsed.data;
+    if (substituir_pendente && !pendenteObservado) {
+      return { ok: false, error: { code: 'invalid_payload', message:
+        'Nenhum retorno pendente foi observado nesta conversa do turno. Primeiro chame sem substituir_pendente; não invente um identificador nem confirme alteração.' } };
+    }
+    const result = await aplicar({ ...input, ...(substituir_pendente ? { replace_pending_id: pendenteObservado } : {}) });
+    if (result.ok) {
+      pendenteObservado = undefined;
+      return result;
+    }
+    const { pendingCronJobId, ...publico } = result;
+    if (result.error.code === 'already_pending') {
+      pendenteObservado = pendingCronJobId;
+      return { ...publico, error: { code: 'already_pending', message:
+        'Já existe um retorno pendente. Não crie outro. Se o cliente pediu o novo horário, repita com substituir_pendente=true e o horário confirmado; só confirme a alteração depois de ok=true.' } };
+    }
+    if (result.error.code === 'pending_changed') pendenteObservado = undefined;
+    return publico;
+  };
+}
 
 const PAYLOAD_TEACHING =
   'Campos aceitos: reason (por que agendar), promised_at (data ISO 8601 do retorno, no futuro), ' +
@@ -182,6 +226,7 @@ export async function applyScheduleFollowup(
         const quando = resultado.existente?.prometidoPara ?? null;
         return {
           ok: false,
+          ...(cfg.c01Callback ? { pendingCronJobId: resultado.existente?.id } : {}),
           error: {
             code: 'already_pending',
             message:

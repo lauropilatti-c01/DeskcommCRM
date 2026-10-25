@@ -152,7 +152,7 @@ import { projetarCamposDoCard } from '../edge/crm/card-do-contato';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { buildOrigemBlock } from './abertura/origem-do-contato';
 import { agendaNoFechamento } from './abertura/agenda-no-fechamento';
-import { applyScheduleFollowup, type FollowupWindowKnobs } from './schedule-followup';
+import { applyScheduleFollowup, criarAgendadorC01DoTurno, scheduleFollowupC01ToolSchema, SCHEDULE_FOLLOWUP_C01_DESCRIPTION, type FollowupWindowKnobs } from './schedule-followup';
 import { podeExporScheduleFollowup } from '@/lib/followup/callback-policy';
 import {
   avisarLeadDaEscalacao,
@@ -6418,25 +6418,30 @@ async function executarTurnoDoAgente(
   // READ_ONLY_TOOLS.
   const followupKnobs = deps.knobs.followup;
   if (podeExporScheduleFollowup(agentConfig?.followup, followupKnobs)) {
+    const configDoRetorno = agentConfig?.followup;
+    const c01Callback = !!configDoRetorno && typeof configDoRetorno === 'object' &&
+      'c01_callback' in configDoRetorno && configDoRetorno.c01_callback === true;
+    const aplicarRetorno = async (raw: unknown) => {
+      const horarioDoRetorno = lerJanelaDeFollowup(configDoRetorno, fusoDaOrg);
+      if (typeof configDoRetorno === 'object' && configDoRetorno !== null &&
+          'send_window' in configDoRetorno && configDoRetorno.send_window != null && !horarioDoRetorno) {
+        throw new Error('retorno_send_window_invalid');
+      }
+      return applyScheduleFollowup(
+        pool,
+        { clock, knobs: followupKnobs, horario: horarioDoRetorno, c01Callback },
+        { tenantId, leadId, agentId: agentConfig?.agentId ?? null, sourceJobId: liveJob().id },
+        raw,
+      );
+    };
+    // O pendente observado fica só neste turno/tenant/contato; o banco conserva o CAS.
+    const agendarRetorno = c01Callback ? criarAgendadorC01DoTurno(aplicarRetorno) : aplicarRetorno;
     rawTools.schedule_followup = tool({
       ...AGENT_TOOL_DEFS.schedule_followup,
+      ...(c01Callback ? { inputSchema: scheduleFollowupC01ToolSchema, description: SCHEDULE_FOLLOWUP_C01_DESCRIPTION } : {}),
       execute: async (raw) => {
         try {
-          // agentId vai junto para a atividade da timeline nascer com AUTORIA: sem
-          // ele a linha entra como "Sistema" e o humano não sabe qual agente
-          // prometeu voltar — numa org com três agentes isso não responde nada.
-          const horarioDoRetorno = lerJanelaDeFollowup(agentConfig?.followup, fusoDaOrg);
-          const configDoRetorno = agentConfig?.followup;
-          if (typeof configDoRetorno === 'object' && configDoRetorno !== null &&
-              'send_window' in configDoRetorno && configDoRetorno.send_window != null && !horarioDoRetorno) {
-            throw new Error('retorno_send_window_invalid');
-          }
-          const res = await applyScheduleFollowup(
-            pool,
-            { clock, knobs: followupKnobs, horario: horarioDoRetorno, c01Callback: !!configDoRetorno && typeof configDoRetorno === 'object' && 'c01_callback' in configDoRetorno && configDoRetorno.c01_callback === true },
-            { tenantId, leadId, agentId: agentConfig?.agentId ?? null, sourceJobId: liveJob().id },
-            raw,
-          );
+          const res = await agendarRetorno(raw);
           if (!res.ok) {
             return res; // erro de ensino (payload / data no passado / fora da janela)
           }
