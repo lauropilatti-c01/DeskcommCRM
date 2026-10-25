@@ -241,6 +241,8 @@ beforeEach(async () => {
   schemasVistos = [];
   await politica(undefined);
   await pool.query("delete from cron_jobs where organization_id=$1", [ORG]);
+  await pool.query("delete from messages where organization_id=$1 and id not in ($2,$3)", [ORG, MSG, OFFER]);
+  await pool.query("update messages set body='Posso te chamar amanhã às 10h?',sent_at=$2 where id=$1", [OFFER, new Date(+AGORA - 60000)]);
   await pool.query("update messages set body='sim',sent_at=$2 where id=$1", [MSG, AGORA]);
   await pool.query("update conversations set last_inbound_at=$2 where id=$1", [CONV, AGORA]);
   await pool.query("delete from send_ledger where organization_id = $1", [ORG]);
@@ -316,5 +318,40 @@ describe('retorno C01 com identidade do servidor no turno real', () => {
     expect(await crons()).toHaveLength(1);
     expect((await crons())[0]?.enabled).toBe(false);
     expect(JSON.stringify(resultadosVistos)).toContain('pending_changed');
+  });
+});
+
+
+describe('precisão SQL do consentimento do retorno C01', () => {
+  async function entre(instante: string, body = 'Uma mensagem intermediária.') {
+    await pool.query(`insert into messages(id,organization_id,conversation_id,channel_session_id,contact_id,
+      type,direction,status,body,sent_at,external_id) values('b7b7b7b7-0000-4000-8000-000000000017',$1,$2,$3,$4,
+      'text','outbound','delivered',$5,$6,'intermediaria-ficticia')`, [ORG, CONV, SESSION, CONTACT, body, instante]);
+  }
+  async function espera(n: number) {
+    expect(await rodaTurno(montaHandler(modelo([chamar(PEDIDO)])))).toBeNull();
+    expect(await crons(), JSON.stringify(resultadosVistos)).toHaveLength(n);
+    if (!n) expect(JSON.stringify(resultadosVistos)).toContain('callback_not_confirmed');
+  }
+  it('oferta com microssegundos não se reencontra como interveniente', async () => {
+    await pool.query("update messages set sent_at='2026-10-24T14:59:00.000123Z' where id=$1", [OFFER]);
+    await espera(1);
+  });
+  it('oferta e aceite distintos dentro do mesmo milissegundo mantêm a ordem real', async () => {
+    await pool.query("update messages set sent_at='2026-10-24T15:00:00.000100Z' where id=$1", [OFFER]);
+    await pool.query("update messages set sent_at='2026-10-24T15:00:00.000800Z' where id=$1", [MSG]);
+    await espera(1);
+  });
+  it('mensagem real na fração do milissegundo anterior ao aceite continua recusada', async () => {
+    await pool.query("update messages set sent_at='2026-10-24T15:00:00.000800Z' where id=$1", [MSG]);
+    await entre('2026-10-24T15:00:00.000500Z');
+    await espera(0);
+  });
+  it.each([
+    ['oferta', '2026-10-24T14:59:00.000000Z'],
+    ['aceite', '2026-10-24T15:00:00.000000Z'],
+  ])('terceira mensagem empatada com %s deixa o vínculo ambíguo', async (_name, instante) => {
+    await entre(instante, 'Posso te chamar amanhã às 10h?');
+    await espera(0);
   });
 });

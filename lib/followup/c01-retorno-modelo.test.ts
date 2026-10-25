@@ -91,7 +91,7 @@ function banco() {
       return { rows: values?.[1] === agent ? [currentAgent] : [] };
     if (sql.includes("c01:callback:job")) return { rows: [{ payload }] };
     if (sql.includes("c01:callback:state")) return { rows: [{ ...state, ...consent }] };
-    if (sql.includes("select id,conversation_id,body,sent_at from messages"))
+    if (sql.includes("select id,conversation_id,body,sent_at::text as sent_at from messages"))
       return { rows: [consent] };
     if (sql.includes("select id,custom_fields from crm_leads"))
       return { rows: [{ id: lead, custom_fields: state.custom_fields }] };

@@ -143,7 +143,9 @@ export async function prepararRetornoComercialC01(
   if (!consent.consent_message_id) throw new RecusaRetornoC01("c01_callback_consent_missing");
   const message = (
     await db.query(
-      `select id,conversation_id,body,sent_at from messages
+      // pg converte timestamptz em Date (milissegundos). As próximas consultas
+      // precisam dos microssegundos reais, inclusive no limite do consentimento.
+      `select id,conversation_id,body,sent_at::text as sent_at from messages
     where organization_id=$1 and contact_id=$2 and id=$3 and direction='inbound' and revoked_at is null`,
       [input.organizationId, input.contactId, consent.consent_message_id],
     )
@@ -169,7 +171,7 @@ export async function prepararRetornoComercialC01(
   if (consent.offered_message_id) {
     const row = (
       await db.query(
-        `select id,body,sent_at from messages where organization_id=$1 and contact_id=$2
+        `select id,body,sent_at::text as sent_at from messages where organization_id=$1 and contact_id=$2
       and conversation_id=$3 and id=$4 and direction='outbound' and external_id is not null
       and status in ('sent','delivered','read') and revoked_at is null and sent_at<$5`,
         [
@@ -185,13 +187,16 @@ export async function prepararRetornoComercialC01(
     const between = (
       await db.query(
         `select id from messages where organization_id=$1 and contact_id=$2
-      and conversation_id=$3 and sent_at>$4 and sent_at<$5 and type<>'reaction' limit 1`,
+      and conversation_id=$3 and sent_at>=$4 and sent_at<=$5
+      and id not in ($6,$7) and type<>'reaction' limit 1`,
         [
           input.organizationId,
           input.contactId,
           message.conversation_id,
           row.sent_at,
           message.sent_at,
+          row.id,
+          message.id,
         ],
       )
     ).rows;
