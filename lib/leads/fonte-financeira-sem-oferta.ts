@@ -1,4 +1,4 @@
-/** Leitura para L1. O chamador retém a trava de efeito e decide o envio; aqui nada é escrito. */
+/** Veto comercial por identidade, antes e depois da oferta. O chamador retém a trava de efeito e decide o envio; aqui nada é escrito. */
 import { createHash } from "node:crypto";
 import type { Queryable } from "@/lib/agent-engine/queue/queue";
 import type { SituacaoFinanceira } from "./fonte-financeira";
@@ -14,6 +14,8 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
   leadId: string;
   productKey: null;
   finalidade: "sem_oferta";
+  /** Quando já houve oferta, a troca de produto durante a consulta invalida a prova. */
+  expectedProductKey?: string;
   now: Date;
   signal: AbortSignal;
 }): Promise<SituacaoFinanceira> {
@@ -53,6 +55,9 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
     if (!row || row.status !== "open" || row.is_anonymized || row.is_merged_into)
       return answer("revisao", "identidade_ou_oportunidade_alterada");
     const initialProduct = row.custom_fields?.produto_chave ?? null;
+    const initialOffer = row.custom_fields?.plano_oferecido ?? null;
+    if (input.expectedProductKey !== undefined && initialProduct !== input.expectedProductKey)
+      return answer("revisao", "identidade_ou_oportunidade_alterada");
     const phone = typeof row.phone_number === "string" ? row.phone_number : null;
     const email = typeof row.email === "string" ? row.email.trim().toLowerCase() : null;
     if (
@@ -156,6 +161,7 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
             (typeof reread.email === "string" ? reread.email.trim().toLowerCase() : null) !==
               email ||
             (reread.custom_fields?.produto_chave ?? null) !== initialProduct ||
+            (reread.custom_fields?.plano_oferecido ?? null) !== initialOffer ||
             identities.length !== 1 ||
             identities[0]?.id !== input.contactId ||
             leads.length !== 1 ||
@@ -253,6 +259,7 @@ export async function lerSituacaoFinanceiraSemOferta(input: {
       current.is_anonymized ||
       current.is_merged_into ||
       (current.custom_fields?.produto_chave ?? null) !== initialProduct ||
+      (current.custom_fields?.plano_oferecido ?? null) !== initialOffer ||
       current.phone_number !== phone ||
       (typeof current.email === "string" ? current.email.trim().toLowerCase() : null) !== email ||
       new Date(current.created_at).getTime() !== created.getTime() ||

@@ -1,5 +1,15 @@
 # Vínculo Pix — preparo reversível de 25/10/2026
 
+## Atualização autorizada em 26/10, 12h08
+
+A candidata agora lê `effectiveDate` da transação Pix remota, com GET pelo identificador da cobrança. Confere id, cobrança vinculada, status DONE, tipo CREDIT, valor bruto e ausência de estorno; mantém toda a cadeia pedido/QR/autorização/instruções e unicidade anterior. Offset explícito é preservado. Sem offset, interpreta Brasília (UTC-3), por decisão de risco do Lauro, sem afirmar que o Asaas documentou esse fuso. Data civil deve concordar com `paymentDate`; o instante continua depois do pedido e antes da consulta. Sem transação com instante, permanece a guarda diária conservadora. Datas e instantes não são misturados numa quitação.
+
+A guarda comercial de todos os acompanhamentos reutiliza a consulta integral por identidade, inclusive projeção assinada e suas guardas de frescor/completude. Compra de outro produto bloqueia. Entrada recebida com parcelas pendentes fica em revisão e **não autoriza venda nem Ganho**; quitação integral continua sendo exigida para o recibo que marca Ganho nesta versão. Não existe mutação financeira ou DDL neste patch.
+
+Testes focados cobrem o mesmo dia, offset explícito, timestamp inválido/anterior/futuro, transação divergente e ausência de prova; comprador de outro produto anterior à oportunidade; entrada RECEIVED relida com parcela PENDING e oportunidade aberta. A revisão e o gate completos pertencem ao coordenador antes da publicação. Histórico abaixo descreve a candidata anterior a essa autorização.
+
+## Histórico do preparo anterior
+
 Estado: candidata isolada em `fix/pix-vinculo-2610`, baseada em `2aca82dc` (c01.6). Não publicada, não liberada para operar. Não há migration, aprovação operacional, janela, confirmação de compra, cobrança ou envio.
 
 ## Contrato estreito

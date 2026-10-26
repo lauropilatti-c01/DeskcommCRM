@@ -3,8 +3,10 @@
 Destino: extensão C01, OFF enquanto a configuração e o consumidor L1 não estiverem
 liberados. Arestas: fontes autenticadas Guru/boleto →
 `lerSituacaoFinanceiraSemOferta` → guarda de continuação
-`lib/followup/c01-continuacao-runtime.ts`, entregue pela frente F04. Não muda a
-consulta exata de L2 nem a confirmação de Ganho. Não tem DDL ou escrita financeira.
+`lib/followup/c01-continuacao-runtime.ts`, entregue pela frente F04. Desde a decisão de 26/10, a mesma consulta alimenta também a guarda após oferta
+(`lerSituacaoFinanceira`), cobrindo A1/A2, oferta, continuação, retorno e encerramento.
+Produto esperado ainda é conferido antes e depois da leitura; ele não filtra as compras.
+Não muda a confirmação de Ganho. Não tem DDL ou escrita financeira.
 
 ## Contrato
 

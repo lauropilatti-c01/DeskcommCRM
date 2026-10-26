@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CompraRecusada } from "./compra-verificada";
-import { intervaloDoPagamento } from "./periodo-financeiro";
+import { intervaloDoPagamento, instantePixAsaas } from "./periodo-financeiro";
 import { lerContratoBoletoAceito } from "./contrato-boleto-aceito";
 import { clicksignReadSchema, conferirDocumentoClicksign } from "./documento-boleto-clicksign";
 
@@ -39,6 +39,7 @@ export async function lerLiquidacaoAsaas(
   paidAt: string | null;
   evidence: unknown;
   totalCents?: number;
+  paidAtPrecision?: "instant" | "day";
 }> {
   const config = asaasSettlementSchema.safeParse(cfg);
   if (!config.success || !config.data.enabled)
@@ -164,8 +165,39 @@ export async function lerLiquidacaoAsaas(
     )
       return review();
     if (typeof remote.paymentDate !== "string") return review();
-    const range = intervaloDoPagamento(remote.paymentDate, "day");
+    let paidAt = remote.paymentDate;
+    let range = intervaloDoPagamento(paidAt, "day");
     const ordered = typeof order.created_at === "string" ? Date.parse(order.created_at) : NaN;
+    // A data diária permanece conservadora. Só o Pix vinculado à transação
+    // remota pode oferecer o instante que resolve uma compra no mesmo dia.
+    if (remote.billingType === "PIX" && remote.pixTransaction != null) {
+      const txId = remote.pixTransaction;
+      if (typeof txId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(txId)) return review();
+      const tx = await get(`pix/transactions/${txId}`);
+      evidence.push(tx);
+      const instant = instantePixAsaas(tx.effectiveDate);
+      if (
+        tx.id !== txId ||
+        tx.payment !== id ||
+        tx.status !== "DONE" ||
+        tx.type !== "CREDIT" ||
+        cents(tx.value) !== gross ||
+        cents(tx.refundedValue) !== 0 ||
+        tx.refusalReason != null ||
+        tx.originalTransaction != null ||
+        !instant ||
+        // A data civil deve concordar com a data informada na cobrança.
+        new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/Sao_Paulo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(new Date(instant)) !== remote.paymentDate
+      )
+        return review();
+      paidAt = instant;
+      range = intervaloDoPagamento(instant);
+    }
     if (
       !range ||
       !Number.isFinite(ordered) ||
@@ -173,7 +205,7 @@ export async function lerLiquidacaoAsaas(
       range.latest > deps.now.getTime()
     )
       return review();
-    dates.push(remote.paymentDate);
+    dates.push(paidAt);
     pairs.push({ local, remote });
     sum += gross;
     if (!Number.isSafeInteger(sum)) return review();
@@ -301,11 +333,15 @@ export async function lerLiquidacaoAsaas(
     )
       return review();
   }
+  const instant = dates.every((date) => date.includes("T"));
+  // Não misturar uma data incerta com um instante como se tivessem a mesma precisão.
+  if (!instant && dates.some((date) => date.includes("T"))) return review();
   return {
     status: "paid",
     paidCents: sum,
     totalCents: contract.totalCents,
     paidAt: dates.sort().at(-1)!,
+    paidAtPrecision: instant ? "instant" : "day",
     evidence,
   };
 }

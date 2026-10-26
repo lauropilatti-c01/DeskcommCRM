@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Queryable } from "@/lib/agent-engine/queue/queue";
+import { lerSituacaoFinanceira } from "@/lib/leads/fonte-financeira";
 import { lerSituacaoFinanceiraSemOferta } from "@/lib/leads/fonte-financeira-sem-oferta";
+
+import {
+  contratoFicticio,
+  clicksignFicticio,
+  documentoFicticio,
+} from "../helpers/boleto-contrato-ficticio";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
 const CONTACT = "22222222-2222-4222-8222-222222222222";
@@ -99,7 +106,18 @@ function fixture() {
       signal: new AbortController().signal,
       ...override,
     });
+  const readOffer = () =>
+    lerSituacaoFinanceira({
+      db: { query } as unknown as Queryable,
+      organizationId: ORG,
+      contactId: CONTACT,
+      leadId: LEAD,
+      productKey: "curso",
+      now: NOW,
+      signal: new AbortController().signal,
+    });
   return {
+    readOffer,
     guru,
     boleto,
     config,
@@ -122,6 +140,150 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe("qualquer compra também bloqueia depois da oferta", () => {
+  it("compra anterior da mesma pessoa em outro produto impede oferta sem marcar Ganho", async () => {
+    const f = fixture();
+    Object.assign(f.row.custom_fields, { produto_chave: "curso", plano_oferecido: "anual" });
+    f.transactions.push(f.remote);
+    expect(await f.readOffer()).toMatchObject({ status: "confirmado", complete: true });
+    expect(f.query.mock.calls.every(([sql]) => /^select /i.test(sql))).toBe(true);
+  });
+  it("entrada paga com parcelas pendentes e oportunidade aberta permanece retida", async () => {
+    const f = fixture();
+    Object.assign(f.row.custom_fields, { produto_chave: "curso", plano_oferecido: "anual" });
+    f.orders.push({
+      id: "pedido",
+      org_id: ORG,
+      status: "active",
+      created_at: "2026-10-21T12:00:00Z",
+      total_value: 100,
+      customers: { id: "cliente", org_id: ORG, phone: PHONE, email: EMAIL, anonymized: false },
+      products: { id: "outro-produto", org_id: ORG },
+      payments: [
+        {
+          id: "entrada",
+          org_id: ORG,
+          status: "paid",
+          amount_paid: 20,
+          paid_at: "2026-10-21T13:00:00Z",
+        },
+        { id: "parcela", org_id: ORG, status: "pending", amount_paid: null, paid_at: null },
+      ],
+    });
+    expect(await f.readOffer()).toMatchObject({ status: "revisao", complete: false });
+    expect(f.row.status).toBe("open");
+    expect(f.query.mock.calls.every(([sql]) => /^select /i.test(sql))).toBe(true);
+  });
+  it("relê entrada RECEIVED no Asaas e retém a venda com parcela PENDING, sem criar Ganho", async () => {
+    const f = fixture();
+    Object.assign(f.row.custom_fields, { produto_chave: "curso", plano_oferecido: "anual" });
+    const walletId = "88888888-8888-4888-8888-888888888888";
+    Object.assign(f.boleto, {
+      asaasSettlement: {
+        enabled: true,
+        environment: "production",
+        walletId,
+        apiToken: "ficticio",
+        clicksign: clicksignFicticio,
+      },
+    });
+    f.config();
+    const order = contratoFicticio(
+      {
+        id: "99999999-9999-4999-8999-999999999999",
+        org_id: ORG,
+        status: "active",
+        created_at: "2026-10-19T12:00:00Z",
+        total_value: 100,
+        customers: {
+          id: "cliente",
+          org_id: ORG,
+          phone: PHONE,
+          email: EMAIL,
+          anonymized: false,
+          external_customer_id_asaas: "cus_ficticio",
+        },
+        products: { id: "outro-produto", org_id: ORG },
+        payments: [
+          {
+            id: "entrada",
+            org_id: ORG,
+            order_id: "99999999-9999-4999-8999-999999999999",
+            asaas_payment_id: "pay_entrada",
+            type: "entry_pix",
+            installment_number: null,
+            amount: 20,
+            due_date: "2026-10-21",
+            status: "pending",
+          },
+          {
+            id: "parcela",
+            org_id: ORG,
+            order_id: "99999999-9999-4999-8999-999999999999",
+            asaas_payment_id: "pay_parcela",
+            type: "installment_pix_automatic",
+            installment_number: 1,
+            amount: 80,
+            due_date: "2026-11-21",
+            status: "pending",
+          },
+        ],
+      },
+      [80],
+      20,
+    );
+    f.fetcher.mockImplementation(async (url) => {
+      const u = new URL(String(url));
+      if (u.hostname === "boleto.example.test") return Response.json([order]);
+      if (u.hostname === "guru.example.test")
+        return Response.json({ data: [], has_more_pages: false });
+      if (u.hostname === "app.clicksign.com") return Response.json(documentoFicticio(order));
+      if (u.pathname === "/v3/wallets/")
+        return Response.json({ hasMore: false, totalCount: 1, data: [{ id: walletId }] });
+      const entry = u.pathname === "/v3/payments/pay_entrada";
+      return Response.json({
+        id: entry ? "pay_entrada" : "pay_parcela",
+        customer: "cus_ficticio",
+        status: entry ? "RECEIVED" : "PENDING",
+        billingType: "PIX",
+        value: entry ? 20 : 80,
+        dueDate: entry ? "2026-10-21" : "2026-11-21",
+        paymentDate: "2026-10-21",
+        externalReference: "99999999-9999-4999-8999-999999999999",
+      });
+    });
+    expect(await f.readOffer()).toMatchObject({ status: "revisao", complete: false });
+    expect(
+      f.fetcher.mock.calls.some(([url]) => String(url).endsWith("/payments/pay_entrada")),
+    ).toBe(true);
+    expect(
+      f.fetcher.mock.calls.some(([url]) => String(url).endsWith("/payments/pay_parcela")),
+    ).toBe(true);
+    expect(f.row.status).toBe("open");
+    expect(f.query.mock.calls.every(([sql]) => /^select /i.test(sql))).toBe(true);
+  });
+  it("troca de plano durante os GETs invalida a negativa da oferta", async () => {
+    const f = fixture();
+    Object.assign(f.row.custom_fields, { produto_chave: "curso", plano_oferecido: "anual" });
+    const original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (...args) => {
+      Object.assign(f.row.custom_fields, { plano_oferecido: "vitalicio" });
+      return original(...args);
+    });
+    expect(await f.readOffer()).toMatchObject({
+      status: "revisao",
+      complete: false,
+      reason: "identidade_ou_oportunidade_alterada_durante_consulta",
+    });
+  });
+  it("produto alterado depois da oferta invalida a prova antes dos GETs", async () => {
+    const f = fixture();
+    Object.assign(f.row.custom_fields, { produto_chave: "outro" });
+    expect(await f.readOffer()).toMatchObject({ status: "revisao", complete: false });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
 });
 
 describe("negativa financeira antes da escolha do produto", () => {

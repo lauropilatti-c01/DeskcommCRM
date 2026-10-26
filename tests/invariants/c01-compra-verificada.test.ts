@@ -962,6 +962,7 @@ describe("guarda financeira com banco real e as duas APIs", () => {
       ...f.integration,
       baseUrl: "https://digitalmanager.guru/api/v2",
       apiToken: "teste-guru",
+      historyCoverage: { startedAt: "2025-01-01T00:00:00Z", evidenceHash: "c".repeat(64) },
     };
     const boleto = {
       ...guru,
@@ -1035,23 +1036,19 @@ describe("guarda financeira com banco real e as duas APIs", () => {
   });
   it.each([
     "source",
-    "map",
+    "coverage",
     "identity",
     "opportunity",
     "partial",
-    "old_order",
     "cross_tenant",
     "off",
   ] as const)("recusa negativa quando há %s", async (kind) => {
     const f = await readerFixture();
     if (kind === "source") f.fetcher.mockRejectedValue(new Error("indisponível"));
-    if (kind === "map")
+    if (kind === "coverage")
       vi.stubEnv(
         "C01_FINANCIAL_INTEGRATIONS_JSON",
-        JSON.stringify([
-          f.guru,
-          { ...f.boleto, products: [{ ...f.boleto.products[0], crmOfferKey: "outro" }] },
-        ]),
+        JSON.stringify([{ ...f.guru, historyCoverage: undefined }, f.boleto]),
       );
     if (kind === "identity") {
       await pool.query("update contacts set email=null where id=$1", [f.contact]);
@@ -1097,19 +1094,6 @@ describe("guarda financeira com banco real e as duas APIs", () => {
           },
         ],
       });
-    if (kind === "old_order") {
-      f.remote.dates.ordered_at = 1756684800;
-      f.fetcher.mockImplementation(async (url) =>
-        String(url).includes("boleto.example.test")
-          ? new Response("[]")
-          : new Response(
-              JSON.stringify({
-                data: String(url).includes("confirmed_at_ini") ? [f.remote] : [],
-                has_more_pages: false,
-              }),
-            ),
-      );
-    }
     if (kind === "cross_tenant")
       vi.stubEnv(
         "C01_FINANCIAL_INTEGRATIONS_JSON",

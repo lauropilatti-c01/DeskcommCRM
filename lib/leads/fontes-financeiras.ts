@@ -186,6 +186,7 @@ export function criarFonteFinanceira(
     let evidenceIncomplete = false;
     let freeWithoutPayment = false;
     let providerEvidence: unknown;
+    let paidAtPrecision: "day" | "instant" | undefined;
     if (cfg.provider === "guru") {
       p = rec(row.product);
       c = rec(row.contact);
@@ -269,6 +270,7 @@ export function criarFonteFinanceira(
           totalCents = settlement.totalCents;
         paidCents = settlement.paidCents;
         paidAt = settlement.paidAt;
+        paidAtPrecision = settlement.status === "paid" ? settlement.paidAtPrecision : undefined;
         providerEvidence = settlement.evidence;
         evidenceIncomplete = status === "review";
       } else {
@@ -344,7 +346,7 @@ export function criarFonteFinanceira(
         offerId,
         status: "paid",
         paidAt,
-        ...(providerEvidence ? { paidAtPrecision: "day" as const } : {}),
+        ...(paidAtPrecision ? { paidAtPrecision } : {}),
         orderedAt,
         observedAt: now().toISOString(),
         paidCents,

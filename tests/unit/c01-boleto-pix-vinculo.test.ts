@@ -131,7 +131,8 @@ function fixture() {
       },
     ],
   };
-  return { order, entry, installment, authorization, instructions, collision: "" };
+  const transactions: Record<string, Record<string, unknown>> = {};
+  return { order, entry, installment, authorization, instructions, transactions, collision: "" };
 }
 function harness(f = fixture()) {
   const fetcher = vi.fn<typeof fetch>(async (url) => {
@@ -152,6 +153,8 @@ function harness(f = fixture()) {
     if (u.hostname === "app.clicksign.com") return Response.json(documentoFicticio(f.order));
     if (u.pathname === "/v3/wallets/")
       return Response.json({ hasMore: false, totalCount: 1, data: [{ id: walletId }] });
+    if (u.pathname.startsWith("/v3/pix/transactions/"))
+      return Response.json(f.transactions[u.pathname.split("/").at(-1)!]);
     if (u.pathname === "/v3/payments/pay_entrada") return Response.json(f.entry);
     if (u.pathname === "/v3/payments/pay_parcela") return Response.json(f.installment);
     if (u.pathname === `/v3/pix/automatic/authorizations/${authId}`)
@@ -170,6 +173,59 @@ function harness(f = fixture()) {
   return { fetcher, source };
 }
 const signal = () => new AbortController().signal;
+
+function sameDay() {
+  const f = fixture();
+  for (const [index, payment] of [f.entry, f.installment].entries()) {
+    payment.paymentDate = "2026-10-19";
+    Object.assign(payment, { pixTransaction: `tx_${index}` });
+    f.transactions[`tx_${index}`] = {
+      id: `tx_${index}`,
+      payment: payment.id,
+      status: "DONE",
+      type: "CREDIT",
+      value: payment.value,
+      refundedValue: 0,
+      effectiveDate: `2026-10-19 12:0${index}:00`,
+    };
+  }
+  return f;
+}
+
+describe("Pix: instante da transação no dia do pedido", () => {
+  it("interpreta sem offset como Brasília, mantendo o vínculo e a prova instantânea", async () => {
+    const f = sameDay();
+    expect(await harness(f).source.readPayment(orderId, signal())).toMatchObject({
+      status: "paid",
+      paidAt: "2026-10-19T15:01:00.000Z",
+      paidAtPrecision: "instant",
+    });
+  });
+  it.each(["payment", "id", "status", "type", "value", "refundedValue", "effectiveDate"])(
+    "recusa transação divergente: %s",
+    async (field) => {
+      const f = sameDay();
+      f.transactions.tx_0![field] = field === "value" || field === "refundedValue" ? 1 : "invalido";
+      expect((await harness(f).source.readRecord(orderId, signal())).status).toBe("review");
+    },
+  );
+  it.each(["2026-10-19 08:59:59", "2026-10-25 12:00:00", "2026-02-30 12:00:00", "2026-10-19"])(
+    "não aceita instante anterior, futuro ou inválido: %s",
+    async (date) => {
+      const f = sameDay();
+      f.transactions.tx_0!.effectiveDate = date;
+      expect((await harness(f).source.readRecord(orderId, signal())).status).toBe("review");
+    },
+  );
+  it("preserva o offset explícito em vez de somar Brasília", async () => {
+    const f = sameDay();
+    f.transactions.tx_0!.effectiveDate = "2026-10-19T15:00:00Z";
+    f.transactions.tx_1!.effectiveDate = "2026-10-19T15:01:00Z";
+    expect((await harness(f).source.readPayment(orderId, signal())).paidAt).toBe(
+      "2026-10-19T15:01:00.000Z",
+    );
+  });
+});
 
 describe("Pix: entrada e parcela ancoradas na mesma autorização remota", () => {
   it("aceita apenas a cadeia completa, relida em cada consulta, sem depender de paid local", async () => {
