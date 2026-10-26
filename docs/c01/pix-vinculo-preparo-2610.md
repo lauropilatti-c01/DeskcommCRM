@@ -20,6 +20,16 @@ Prova estrutural privada: 20 predicados positivos, 11 GETs, zero mutações. Có
 
 Baseline64 testes; RED confirmou dois casos positivos recusados pelo leitor anterior. Com a implementação: 103 testes focados (64 anteriores +39 novos) passaram. Revisão independente executou 10 cenários próprios, inclusive falha de transporte nas novas consultas, estorno entre leituras, colisões, ausência de identificação e troca de pedido do mesmo cliente. Parecer final, hashes e logs privados em `~/workspace/dados/deskcomm-c01/preparo-pix-guru-20261026/`.
 
-**Parada na verificação adicional de tipos:** `pnpm typecheck` terminou com saída 134 por falta de memória do Node (`JavaScript heap out of memory`). Não foi repetido nem tratado como aprovado. Lint dos três arquivos passou. A candidata fica incompleta para integração/publicação até resolver essa pendência, conforme a trava do Lauro.
+**Histórico da primeira tentativa de tipos:** `pnpm typecheck` terminou com saída 134 por falta de memória do Node (`JavaScript heap out of memory`). A parada foi registrada. Depois, por autorização explícita do Lauro, o mesmo typecheck completo rodou sozinho com `NODE_OPTIONS=--max-old-space-size=8192` e passou (saída0,14,47s, HEAD5efbaee37). Lint dos três arquivos já havia passado. Logs e comando em `typecheck-8gb/` na base privada. Nenhum código mudou para obter esse resultado.
 
 Não é prova de release: suíte completa, ensaio de banco, volta, publicação nominal e prova no ar não foram executados nesta fatia. Publicação e ON exigem decisão do Lauro e pré-condições novas. Não reaproveitar aprovação ou janela vencida. Para abandonar a candidata basta não integrá-la: produção e `main` continuam em c01.6; a cópia fica aberta para essa decisão, sem apagar trabalho.
+
+## Diagnóstico temporal concluído — 25/10, após23h25
+
+Quatro GETs atuais conferiram carteira, cobrança, transação Pix e pedido. A transação está ligada à cobrança, é CREDIT/DONE, valor/QR conferem e não há estorno observado. Seu campo `effectiveDate` contém hora com segundos, mas não offset. Não confundir a precisão diária da cobrança com inexistência de hora em toda a API.
+
+Interpretar esse horário como UTC ou como UTC-3 inverte a ordem entre pedido e pagamento. Sem contrato autoritativo do fuso, o instante não é comprovável. A documentação oficial consultada descreve a consulta por ID; o schema do produtor não estabelece offset nesse campo. **A guarda permanece, e a amostra continua em revisão.** Não substituir por criação da transação, recebimento de webhook, paid_at local ou identificador ponta a ponta.
+
+Diagnóstico é somente leitura, sem evolução temporal implementada. Evidências privadas `data-pix/DIAGNOSTICO.md` e `DIAGNOSTICO.json`. Para outra fatia: provar fuso/instante e desenhar um caminho de leitura com testes específicos, preservando causalidade e demais guardas. Nenhum merge, tag, publicação, ON, janela, aprovação operacional, F09/áudio ou mensagem autorizado nesta continuação.
+
+Revisão final independente:15 conferências de evidência e2 casos de mesmo dia passaram. Typecheck/log/HEAD e hashes do código confirmados; nenhum novo achado bloqueante no patch. Parecer `revisao-final/PARECER.md`: candidata e diagnóstico aprovados como preparo para decisão, mantendo guarda. Não autoriza publicação, ON nem quitação da amostra.
