@@ -12,7 +12,7 @@ Carteira, contrato/assinatura, organização, cliente, cobrança RECEIVED, valor
 
 ## Limites explícitos
 
-Não aceita entrada isolada, referência por substring, `billing_obligation`, reprogramação com vencimentos divergentes, lista parcial ou vínculo sustentado apenas pelo status local. Não muda o critério de quem está pago. A amostra real possui data de entrada sem hora no mesmo dia da criação: **continua em revisão**, mesmo com vínculo e soma comprovados. Não se inventa horário nem se aprova a ON.
+Não aceita entrada isolada, referência por substring, `billing_obligation`, reprogramação com vencimentos divergentes, lista parcial ou vínculo sustentado apenas pelo status local. Amplia os vínculos que o leitor pode reconhecer, mantendo quitação integral e precisão da data obrigatórias; por isso a publicação depende do OK do Lauro. A amostra real possui data de entrada sem hora no mesmo dia da criação: **continua em revisão**, mesmo com vínculo e soma comprovados. Não se inventa horário nem se aprova a ON.
 
 Prova estrutural privada: 20 predicados positivos, 11 GETs, zero mutações. Código do produtor analisado no commit `42079b32`; versão servida do produtor não foi comprovada por essa leitura. Migrações descrevem unicidade, enquanto as consultas provam somente o estado observado. Identidades e respostas reais ficam fora do Git.
 
