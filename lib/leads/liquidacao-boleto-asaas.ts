@@ -27,7 +27,12 @@ function cents(v: unknown): number | null {
 export async function lerLiquidacaoAsaas(
   order: Objeto,
   cfg: ConfiguracaoLiquidacaoAsaas,
-  deps: { fetch: typeof fetch; now: Date; signal: AbortSignal },
+  deps: {
+    fetch: typeof fetch;
+    now: Date;
+    signal: AbortSignal;
+    getBoleto?: (path: string, signal: AbortSignal) => Promise<unknown>;
+  },
 ): Promise<{
   status: "paid" | "review";
   paidCents: number;
@@ -113,6 +118,7 @@ export async function lerLiquidacaoAsaas(
   const localIds = new Set<string>(),
     providerIds = new Set<string>();
   const dates: string[] = [];
+  const pairs: { local: Objeto; remote: Objeto }[] = [];
   let sum = 0;
   for (const item of payments) {
     const local = rec(item);
@@ -142,7 +148,6 @@ export async function lerLiquidacaoAsaas(
     if (
       remote.id !== id ||
       remote.customer !== customer.external_customer_id_asaas ||
-      remote.externalReference !== order.id ||
       remote.status !== "RECEIVED" ||
       !["BOLETO", "PIX"].includes(String(remote.billingType)) ||
       remote.deleted === true ||
@@ -169,10 +174,133 @@ export async function lerLiquidacaoAsaas(
     )
       return review();
     dates.push(remote.paymentDate);
+    pairs.push({ local, remote });
     sum += gross;
     if (!Number.isSafeInteger(sum)) return review();
   }
   if (sum <= 0 || sum !== contract.totalCents) return review();
+  // O caminho antigo permanece exato. A exceção Pix exige uma cadeia completa
+  // e unívoca; QR/cliente/status local isolados nunca vinculam compra a pedido.
+  if (!pairs.every(({ remote }) => remote.externalReference === order.id)) {
+    const authId = order.pix_automatic_authorization_id;
+    if (
+      !z.uuid().safeParse(order.id).success ||
+      !z.uuid().safeParse(authId).success ||
+      !deps.getBoleto
+    )
+      return review();
+    const entries = pairs.filter(({ local }) => local.type === "entry_pix");
+    const installments = pairs.filter(({ local }) => local.type === "installment_pix_automatic");
+    if (
+      entries.length !== 1 ||
+      installments.length < 1 ||
+      entries.length + installments.length !== pairs.length ||
+      pairs.some(({ remote }) => remote.billingType !== "PIX")
+    )
+      return review();
+    const entry = entries[0]!;
+    const qr = entry.local.external_id;
+    if (
+      typeof qr !== "string" ||
+      !/^[a-zA-Z0-9]{1,100}$/.test(qr) ||
+      entry.remote.pixQrCodeId !== qr ||
+      entry.remote.externalReference != null ||
+      installments.some(
+        ({ local, remote }) =>
+          !Number.isSafeInteger(local.installment_number) ||
+          Number(local.installment_number) < 1 ||
+          remote.externalReference !==
+            `pix_instruction:${order.id}:${local.installment_number}:${local.due_date}`,
+      )
+    )
+      return review();
+    const authorization = await get(`pix/automatic/authorizations/${authId}`);
+    evidence.push(authorization);
+    const e2e = authorization.endToEndIdentifier;
+    if (
+      authorization.id !== authId ||
+      authorization.customerId !== customer.external_customer_id_asaas ||
+      !["ACTIVE", "EXPIRED"].includes(String(authorization.status)) ||
+      authorization.cancellationDate != null ||
+      authorization.cancellationReason != null ||
+      typeof e2e !== "string" ||
+      !/^[a-zA-Z0-9]{1,100}$/.test(e2e) ||
+      rec(authorization.immediateQrCode).conciliationIdentifier !== qr
+    )
+      return review();
+    const instructions = await get(
+      `pix/automatic/paymentInstructions?authorizationId=${authId}&limit=100&offset=0`,
+    );
+    evidence.push(instructions);
+    if (
+      instructions.hasMore !== false ||
+      instructions.offset !== 0 ||
+      !Array.isArray(instructions.data) ||
+      instructions.totalCount !== instructions.data.length ||
+      instructions.data.length !== installments.length
+    )
+      return review();
+    const instructionIds = new Set<string>(),
+      paymentIds = new Set<string>();
+    for (const raw of instructions.data) {
+      const instruction = rec(raw),
+        auth = rec(instruction.authorization);
+      const pair = installments.find(({ remote }) => remote.id === instruction.paymentId);
+      if (
+        typeof instruction.id !== "string" ||
+        !z.uuid().safeParse(instruction.id).success ||
+        instructionIds.has(instruction.id) ||
+        typeof instruction.paymentId !== "string" ||
+        paymentIds.has(instruction.paymentId) ||
+        !pair ||
+        instruction.status !== "DONE" ||
+        instruction.dueDate !== pair.local.due_date ||
+        auth.id !== authId ||
+        auth.customerId !== customer.external_customer_id_asaas ||
+        auth.endToEndIdentifier !== e2e ||
+        instruction.refusalReason != null ||
+        instruction.retryAttempt != null
+      )
+        return review();
+      instructionIds.add(instruction.id);
+      paymentIds.add(instruction.paymentId);
+    }
+    // Não presumir que a migration UNIQUE do produtor está aplicada. Consulta
+    // global limitada a dois registros detecta colisões entre pedidos/contas.
+    async function unique(path: string, expected: Objeto): Promise<boolean> {
+      const rows = await deps.getBoleto!(path, signal);
+      evidence.push(rows);
+      return (
+        Array.isArray(rows) &&
+        rows.length === 1 &&
+        Object.entries(expected).every(([key, value]) => rec(rows[0])[key] === value)
+      );
+    }
+    if (
+      !(await unique(
+        `rest/v1/orders?select=id,org_id&pix_automatic_authorization_id=eq.${authId}&limit=2`,
+        { id: order.id, org_id: order.org_id },
+      ))
+    )
+      return review();
+    for (const { local } of pairs) {
+      if (
+        !(await unique(
+          `rest/v1/payments?select=id,org_id,order_id&asaas_payment_id=eq.${local.asaas_payment_id}&limit=2`,
+          { id: local.id, org_id: order.org_id, order_id: order.id },
+        ))
+      )
+        return review();
+    }
+    if (
+      !(await unique(`rest/v1/payments?select=id,org_id,order_id&external_id=eq.${qr}&limit=2`, {
+        id: entry.local.id,
+        org_id: order.org_id,
+        order_id: order.id,
+      }))
+    )
+      return review();
+  }
   return {
     status: "paid",
     paidCents: sum,
