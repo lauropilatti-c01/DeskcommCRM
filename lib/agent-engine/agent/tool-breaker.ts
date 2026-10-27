@@ -62,6 +62,7 @@ export const READ_ONLY_TOOLS = [
   'get_lead_note',
   'search_knowledge',
   'read_skill_reference',
+  'read_skill',
   // As tools do banco externo (Fase 5). São leitura pura — montam SELECT em
   // transação somente-leitura — então o modo no_progress do breaker pode
   // detectar a repetição idêntica sem confundir com mutação.

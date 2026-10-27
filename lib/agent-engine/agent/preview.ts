@@ -302,6 +302,7 @@ export function applyPreviewPolicy(
         'get_lead_note',
         'search_knowledge',
         'read_skill_reference',
+        'read_skill',
       ].includes(name);
       const catalog = getToolByName(name);
       if (

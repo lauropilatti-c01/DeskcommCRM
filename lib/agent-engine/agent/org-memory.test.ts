@@ -43,6 +43,6 @@ describe('composeSystemPrompt', () => {
     const full = composeSystemPrompt({ playbookPrompt: 'P', orgMemoryBlock: 'M', skillIndex: 'S' });
     expect(full.indexOf('P')).toBeLessThan(full.indexOf('M'));
     expect(full.indexOf('M')).toBeLessThan(full.indexOf('S'));
-    expect(full).toContain('=== skills (índice — o corpo carrega no turno quando a situação dispara) ===');
+    expect(full).toContain('=== skills (índice — o corpo carrega no turno quando a situação dispara; se a situação de uma skill se aplica e ela não veio, use read_skill(nome)) ===');
   });
 });

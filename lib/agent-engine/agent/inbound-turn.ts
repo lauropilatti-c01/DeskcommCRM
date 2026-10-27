@@ -221,7 +221,9 @@ import { cancelPendingCronsForLead } from '../cron/scheduler';
 import {
   latestInboundSignal,
   recentInboundSignal,
+  lerSkillPorJulgamento,
   loadSkills,
+  MAX_SKILLS_POR_JULGAMENTO,
   matchSkills,
   recordSkillMissCandidates,
   renderMatchedSkillBodies,
@@ -571,6 +573,20 @@ export const AGENT_TOOL_DEFS = {
           .optional()
           .describe('o que a pessoa está pedindo, nas palavras dela'),
         reason: z.string().optional().describe('sinônimo antigo de por_que (ainda aceito)'),
+      })
+      .passthrough(),
+  },
+  // (C01) Skill do índice puxada por julgamento. A descrição não lista skills: a tool
+  // entra no prefixo em cache e precisa ficar estável entre turnos.
+  read_skill: {
+    description:
+      'Carrega o texto completo de UMA skill do índice de skills que NÃO veio neste turno. Use só quando ' +
+      'a situação descrita no índice para aquela skill se aplica ao que a pessoa está dizendo agora; na ' +
+      'dúvida, não carregue. No máximo 2 por turno. Skill já ativa neste turno ou nome fora do índice ' +
+      'volta erro.',
+    inputSchema: z
+      .object({
+        nome: z.string().min(1).describe('nome exato da skill, como aparece no índice de skills'),
       })
       .passthrough(),
   },
@@ -6463,6 +6479,47 @@ async function executarTurnoDoAgente(
             },
           };
         }
+      },
+    });
+  }
+
+  // (C01) read_skill: o modelo puxa uma skill do índice que a palavra-chave não trouxe.
+  // Condição estável (`skills.length > 0`) para não mexer no prefixo em cache. Sem
+  // registrarConsulta, de propósito: preço ou link de skill não fica liberado por
+  // julgamento (o corpo casado por palavra-chave também não libera).
+  if (skills.length > 0) {
+    const skillsNoTurno = new Set([...skillMatch.matched, ...skillsDoRoteiro].map((sk) => sk.name));
+    let skillsPorJulgamento = 0;
+    rawTools.read_skill = tool({
+      ...AGENT_TOOL_DEFS.read_skill,
+      execute: async ({ nome }) => {
+        if (skillsPorJulgamento >= MAX_SKILLS_POR_JULGAMENTO) {
+          return {
+            ok: false,
+            error: {
+              code: 'limite_do_turno',
+              message: `já foram carregadas ${MAX_SKILLS_POR_JULGAMENTO} skills neste turno — siga com o que já tem.`,
+            },
+          };
+        }
+        const lida = lerSkillPorJulgamento(skills, skillsNoTurno, nome);
+        if (!lida.ok) return lida;
+        skillsNoTurno.add(lida.skill_name);
+        skillsPorJulgamento += 1;
+        runLog.info('skill carregada por julgamento', { skill: lida.skill_name });
+        if (!preview && deps.knobs.goldenCandidates === true) {
+          await recordSkillMissCandidates(
+            pool,
+            {
+              tenantId,
+              leadId,
+              jobId: liveJob().id,
+              candidates: [{ skill: lida.skill_name, reason: 'loaded_by_judgment' }],
+            },
+            runLog,
+          );
+        }
+        return lida;
       },
     });
   }
