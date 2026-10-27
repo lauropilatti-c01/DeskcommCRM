@@ -251,6 +251,7 @@ export function guardServiceTools(tools: ToolSet | undefined): ToolSet | undefin
     "get_lead_note",
     "search_knowledge",
     "read_skill_reference",
+    "read_skill",
     // Leitura do banco externo (Fase 5): não toca o CRM, então não há efeito a
     // proteger com a fronteira de atendimento — o SELECT já corre em transação
     // somente-leitura no banco de origem.

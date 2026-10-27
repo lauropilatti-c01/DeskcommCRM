@@ -228,7 +228,8 @@ function normalize(text: string): string {
 export interface SkillMissCandidate {
   /** nome da skill que a situação sugeria (probe disparou) mas não teve hard-match. */
   skill: string;
-  reason: 'probe_matched_without_hard_match';
+  /** (C01) `loaded_by_judgment`: o modelo puxou a skill por `read_skill` sem palavra-chave. */
+  reason: 'probe_matched_without_hard_match' | 'loaded_by_judgment';
 }
 
 export interface SkillMatchResult {
@@ -274,6 +275,38 @@ export function renderMatchedSkillBodies(matched: readonly LoadedSkill[]): strin
     '## Skills situacionais ativas neste turno (siga o playbook abaixo)',
     ...matched.map((s) => `### ${s.name}\n${s.body}`),
   ].join('\n\n');
+}
+
+/** (C01) Teto de skills que o modelo carrega por julgamento (`read_skill`) num turno. */
+export const MAX_SKILLS_POR_JULGAMENTO = 2;
+
+export type LerSkillPorJulgamentoResult =
+  | { ok: true; skill_name: string; body: string }
+  | { ok: false; error: { code: 'skill_not_found' | 'ja_no_turno'; message: string } };
+
+/**
+ * (C01) Corpo de uma skill do índice que a palavra-chave não puxou (`read_skill`). Skill
+ * já no turno (casada, do roteiro ou lida antes) volta sem corpo: ele já está no contexto.
+ */
+export function lerSkillPorJulgamento(
+  skills: readonly LoadedSkill[],
+  jaNoTurno: ReadonlySet<string>,
+  nome: string,
+): LerSkillPorJulgamentoResult {
+  const skill = skills.find((s) => s.name === nome);
+  if (skill === undefined) {
+    return {
+      ok: false,
+      error: { code: 'skill_not_found', message: `não há skill '${nome}' no índice — use o nome exato do índice.` },
+    };
+  }
+  if (jaNoTurno.has(nome)) {
+    return {
+      ok: false,
+      error: { code: 'ja_no_turno', message: `a skill '${nome}' já está ativa neste turno — siga o texto dela que já está no contexto.` },
+    };
+  }
+  return { ok: true, skill_name: skill.name, body: skill.body };
 }
 
 /** Custo em tokens de um texto — mesma heurística do resto do harness (chars/3,5). */
