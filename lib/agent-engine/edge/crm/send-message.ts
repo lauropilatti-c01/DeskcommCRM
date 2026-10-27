@@ -86,6 +86,8 @@ export interface SendMessageInput {
   interactive?: { type: string } & Record<string, unknown>;
   /** (C01, -c01.5) Vai a `metadata.origem` da linha (ex.: `pre_turn_hook`). */
   origem?: string;
+  /** (C01) Vai a `metadata.c01_imagem` da linha (ver `ChannelSendInput`). */
+  c01Imagem?: ChannelSendInput['c01Imagem'];
 }
 
 /**
@@ -125,7 +127,11 @@ export function corpoDoEnvio(
     ...(input.body !== '' || !input.media ? { body: input.body } : {}),
     // (C01, -c01.5) Botão, lista ou formulário: a linha segue `text`.
     ...(input.interactive && !input.template && !input.media ? { interactive: input.interactive } : {}),
-    metadata: { idempotency_key: idempotencyKey, ...(input.origem ? { origem: input.origem } : {}) },
+    metadata: {
+      idempotency_key: idempotencyKey,
+      ...(input.origem ? { origem: input.origem } : {}),
+      ...(input.c01Imagem ? { c01_imagem: input.c01Imagem } : {}),
+    },
   };
 }
 
