@@ -59,7 +59,7 @@ export function composeSystemPrompt(input: {
   if (input.orgMemoryBlock !== '') blocks.push(input.orgMemoryBlock);
   if (input.skillIndex !== '') {
     blocks.push(
-      `=== skills (índice — o corpo carrega no turno quando a situação dispara) ===\n${input.skillIndex}`,
+      `=== skills (índice — o corpo carrega no turno quando a situação dispara; se a situação de uma skill se aplica e ela não veio, use read_skill(nome)) ===\n${input.skillIndex}`,
     );
   }
   return blocks.join('\n\n');

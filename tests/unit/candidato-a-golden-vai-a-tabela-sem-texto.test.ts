@@ -123,6 +123,30 @@ describe('candidato ao golden set vira linha de rótulo', () => {
     }
   });
 
+  it('(C01) skill carregada por julgamento: motivo loaded_by_judgment, sem texto do cliente', async () => {
+    const { db, linhas } = banco();
+    const log = silencioso();
+
+    await recordSkillMissCandidates(
+      db,
+      {
+        tenantId: ORG,
+        leadId: LEAD,
+        jobId: JOB,
+        candidates: [{ skill: 'objecao-preco', reason: 'loaded_by_judgment' }],
+      },
+      log,
+    );
+
+    expect(linhas).toHaveLength(1);
+    expect(linhas[0]!.sql).toContain("'skill_match_miss'");
+    expect(linhas[0]!.params).toEqual([ORG, LEAD, JOB, 'objecao-preco', 'loaded_by_judgment']);
+    semTextoDoCliente(linhas);
+    for (const [, args] of (log.info as ReturnType<typeof vi.fn>).mock.calls) {
+      semTextoDoCliente(args);
+    }
+  });
+
   it('divergência de estágio: uma linha com os dois rótulos e os ponteiros', async () => {
     const { db, linhas } = banco();
     const log = silencioso();
