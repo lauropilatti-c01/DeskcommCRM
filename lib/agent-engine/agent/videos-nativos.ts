@@ -17,13 +17,20 @@ const itemSchema = z.object({
 const policySchema = z.object({
   enabled: z.boolean(),
   flow_mp4: z.boolean().default(false),
+  // (C01, 27/10) Público da resposta ao lead: sem `audience`, só os celulares de teste (lista vazia =
+  // ninguém). Ligar para todos é explícito. Não vale para `flow_mp4` (acompanhamento, URL do operador).
+  audience: z.enum(['somente_celulares_de_teste', 'todos']).default('somente_celulares_de_teste'),
+  testPhones: z.array(z.string().regex(/^\+[1-9][0-9]{7,14}$/)).max(100).default([]),
   catalog: z.array(itemSchema).max(100),
 }).strict().refine(p => new Set(p.catalog.map(v => v.key)).size === p.catalog.length);
 export type PoliticaDeVideo = z.infer<typeof policySchema>;
-const desligada = (): PoliticaDeVideo => ({ enabled: false, flow_mp4: false, catalog: [] });
+const desligada = (): PoliticaDeVideo => ({ enabled: false, flow_mp4: false, audience: 'somente_celulares_de_teste', testPhones: [], catalog: [] });
+/** Telefone em E.164 (`+55…`); `null` (contato sem telefone) só passa com público `todos`. */
+export const videoParaOTelefone = (p: PoliticaDeVideo, telefone: string | null): boolean =>
+  p.enabled && (p.audience === 'todos' || (telefone !== null && p.testPhones.includes(telefone)));
 const BUCKET = 'whatsapp-media';
-/** Limite conservador desta capacidade; não muda o limite geral do Inbox. */
-export const MAX_VIDEO_NATIVO_BYTES = 16 * 1024 * 1024;
+/** Limite conservador desta capacidade; não muda o limite geral do Inbox. Lauro, 27/10: 15 MB no WhatsApp. */
+export const MAX_VIDEO_NATIVO_BYTES = 15_000_000;
 export const MAX_LEGENDA_VIDEO = 1024;
 export const legendaDoVideoValida = (body: string): boolean => !!body.trim() && body.length <= MAX_LEGENDA_VIDEO;
 function politicaDoValor(raw: unknown): PoliticaDeVideo {
@@ -89,7 +96,7 @@ export function copiarVideoNoStorage(): CopiarVideo {
 
 export async function prepararVideoNativo(
   db: Queryable, copiar: CopiarVideo,
-  input: { tenantId: string; conversationId: string; chave: string },
+  input: { tenantId: string; conversationId: string; chave: string; telefone?: string | null },
 ): Promise<VideoPreparado> {
   // IDs do turno, nunca segmentos escolhidos pelo modelo. Também protege fixtures
   // ou callers futuros que passem caminho em vez de identificador.
@@ -97,7 +104,7 @@ export async function prepararVideoNativo(
     return recusado('video_destino_invalido', 'Não foi possível preparar o vídeo nesta conversa.');
   }
   const policy = await lerPoliticaDeVideo(db, input.tenantId);
-  if (!policy.enabled) return recusado('video_desligado', 'O envio de vídeo nativo está desligado. Não anuncie um vídeo anexado.');
+  if (!videoParaOTelefone(policy, input.telefone ?? null)) return recusado('video_desligado', 'O envio de vídeo nativo está desligado. Não anuncie um vídeo anexado.');
   const item = policy.catalog.find(v => v.key === input.chave);
   if (!item) return recusado('video_nao_cadastrado', 'A chave não corresponde a um vídeo aprovado desta organização. Não anuncie um vídeo anexado.');
   const source = `${input.tenantId}/native-videos/${item.sha256}.mp4`;

@@ -116,7 +116,7 @@ import {
   type FotoParaEnvio,
 } from './fotos-do-produto';
 import { completarConsultaDaPagina, copiarImagemNoStorage, enfaseDoCard, enviarImagemDaPagina, escolherComCard, jaRecebeuNaConversa, lerPoliticaDeImagens, paginasDaConsulta, politicaDoTurno, prepararImagemDaResposta, retratoDoEnvio, telefoneE164, type CopiarImagem, type ImagemParaEnvio, type ImagemPreparada, type PaginaConsultada } from './c01-imagens';
-import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, MAX_LEGENDA_VIDEO, lerPoliticaDeVideo, prepararVideoNativo, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
+import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, MAX_LEGENDA_VIDEO, lerPoliticaDeVideo, prepararVideoNativo, videoParaOTelefone, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
 import {
   applyLeadStateUpdate,
@@ -4176,7 +4176,8 @@ async function executarTurnoDoAgente(
     () => lerPoliticaDeImagens(pool, tenantId),
   );
   const paginasDaResposta: PaginaConsultada[] = [];
-  const telefoneDoContato = imagensDaOrg.enabled && leadId
+  const politicaDeVideoDoTurno = preview ? null : await lerPoliticaDeVideo(pool, tenantId);
+  const telefoneDoContato = (imagensDaOrg.enabled || politicaDeVideoDoTurno?.enabled) && leadId
     ? await pool.query<{ phone_number: string | null }>(
         'select phone_number from contacts where organization_id = $1 and id = $2', [tenantId, leadId],
       ).then((r) => telefoneE164(r.rows[0]?.phone_number), () => null)
@@ -4953,7 +4954,7 @@ async function executarTurnoDoAgente(
   let propostaDeContinuacaoC01: PropostaContinuacaoC01 | undefined;
   const configDeContinuacaoC01 = configOrigemC01();
   // O schema não é autorização: prepararVideoNativo relê a política no envio.
-  const videoNativoDisponivelNoTurno = !preview && (await lerPoliticaDeVideo(pool, tenantId)).enabled;
+  const videoNativoDisponivelNoTurno = politicaDeVideoDoTurno !== null && videoParaOTelefone(politicaDeVideoDoTurno, telefoneDoContato);
   const rawTools: ToolSet = {
     get_lead_context: tool({
       ...AGENT_TOOL_DEFS.get_lead_context,
@@ -5425,7 +5426,7 @@ async function executarTurnoDoAgente(
           // segue (degradar para só texto). Ver `agent/fotos-do-produto.ts`.
           if (video_chave !== undefined) {
             const preparado = await prepararVideoNativo(pool, deps.copiarVideo ?? copiarVideoNoStorage(), {
-              tenantId, conversationId: input.conversationId, chave: video_chave,
+              tenantId, conversationId: input.conversationId, chave: video_chave, telefone: telefoneDoContato,
             });
             if (!preparado.ok) {
               dupTrava.liberar(body);
