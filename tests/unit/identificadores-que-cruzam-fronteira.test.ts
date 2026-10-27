@@ -168,6 +168,8 @@ const SITES: { arquivo: string; fronteira: string; papel?: "gerador" | "validado
   // o hash exige 64 hexadecimais. O modelo só fornece a chave do catálogo.
   // c01-videos-nativos.test.ts prova os caminhos e recusa traversal/catálogo estranho.
   { arquivo: "lib/agent-engine/agent/videos-nativos.ts", fronteira: "storage.chave-de-objeto" },
+  // c01-imagens.test.ts prova o destino (UUIDs do turno, chave e sha256 validados) e a recusa de id que não é UUID.
+  { arquivo: "lib/agent-engine/agent/c01-imagens.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "lib/ai/skills/install.ts", fronteira: "storage.chave-de-objeto" },
   // Herança de arquivos do pacote no save textual (#2047): a chave é montada
   // com os MESMOS pedaços do install — org (uuid do JWT), name (vem da

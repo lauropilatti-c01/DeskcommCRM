@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import {
-  completarConsultaDaPagina, copiarImagemNoStorage, destinoNaConversa, enviarImagemAntesDoTexto, escolherImagem,
-  jaRecebeuNaConversa, lerPoliticaDeImagens, marcaDaImagemEnviada, paginasDaConsulta, politicaDeImagens,
+  completarConsultaDaPagina, copiarImagemNoStorage, destinoNaConversa, enviarImagemAntes, escolherImagem,
+  jaRecebeuNaConversa, lerPoliticaDeImagens, marcaDaImagemEnviada, paginasDaConsulta, politicaDeImagens, politicaValida,
   prepararImagem, telefoneE164, validarImagem, versaoDaTentativa, type ImagemEscolhida,
 } from '@/lib/agent-engine/agent/c01-imagens';
 
@@ -65,12 +65,9 @@ describe('c01_imagens: contrato da configuração', () => {
   });
   const casos = process.env.C01_IMAGENS_CONTRATO_CASOS;
   it.skipIf(!casos || !existsSync(casos))('casos compartilhados do contrato (crm-agentico)', () => {
-    const lista = JSON.parse(readFileSync(casos!, 'utf8')) as { casos: { nome: string; payload: unknown; valido: boolean }[] };
-    for (const c of lista.casos) {
-      const p = politicaDeImagens(c.payload);
-      const aceito = JSON.stringify(p) !== JSON.stringify(politicaDeImagens(null)) || (c.payload as { enabled?: boolean })?.enabled === false;
-      expect([c.nome, aceito]).toEqual([c.nome, c.valido]);
-    }
+    const lista = JSON.parse(readFileSync(casos!, 'utf8')) as { name: string; valid: boolean; config: unknown }[];
+    expect(lista.length).toBeGreaterThan(0);
+    expect(lista.filter((c) => politicaValida(c.config) !== c.valid).map((c) => c.name)).toEqual([]);
   });
 });
 
@@ -175,16 +172,16 @@ describe('c01_imagens: arquivo, versão e frequência', () => {
 describe('c01_imagens: ordem, teto e desfechos', () => {
   const imagem: ImagemEscolhida = { key: 'vitalicio-pagina', version: 1, sha256: shaPng, description: 'd',
     media: { storagePath: `${org}/${conv}/imagem-vitalicio-pagina-${shaPng}.png`, mime: 'image/png' } };
-  const roteiro = (restantes: number, bolhas: number, kindImagem = 'sent', conhecida = false) => {
+  const roteiro = async (restantes: number, bolhas: number, kindImagem = 'sent', conhecida = false) => {
     const ordem: string[] = [];
     const registros: string[] = [];
-    const p = enviarImagemAntesDoTexto(imagem, {
+    const parou = await enviarImagemAntes(imagem, {
       restantes: () => restantes, bolhasDoTexto: bolhas, jaRegistrada: async () => conhecida,
       enviarImagem: async () => { ordem.push('imagem'); return { kind: kindImagem }; },
-      enviarTexto: async () => { ordem.push('texto'); return { kind: 'sent' }; },
       sleep: async () => { ordem.push('pausa'); }, jitter: () => 1, registrar: (d) => registros.push(d),
     });
-    return p.then((r) => ({ r, ordem, registros }));
+    if (!parou) ordem.push('texto'); // o turno segue com o texto, pelo caminho de sempre
+    return { r: parou ?? { kind: 'sent' }, ordem, registros };
   };
   it('caso 1: imagem, pausa anti-ban e depois o texto', async () => {
     expect(await roteiro(3, 2)).toEqual({ r: { kind: 'sent' }, ordem: ['imagem', 'pausa', 'texto'], registros: ['enviada'] });
@@ -214,5 +211,50 @@ describe('c01_imagens: histórico da Marina', () => {
     expect(marcaDaImagemEnviada({ direction: 'outbound', media_storage_path: caminho('c'.repeat(64)), status: 'sent' }, politica)).toContain('não está mais na biblioteca');
     expect(marcaDaImagemEnviada({ direction: 'inbound', media_storage_path: caminho(shaPng) }, politica)).toBeNull();
     expect(marcaDaImagemEnviada({ direction: 'outbound', media_storage_path: `${org}/${conv}/catalogo-x.png` }, politica)).toBeNull();
+  });
+});
+
+describe('c01_imagens: ligação no histórico da Marina', () => {
+  const caminho = `${org}/${conv}/imagem-vitalicio-pagina-${shaPng}.png`;
+  const linha = (m: Record<string, unknown>) => ({ direction: 'outbound' as const, type: 'image', body: null, media_url: null,
+    media_storage_path: caminho, media_mime: 'image/png', media_derived_text: null, sent_at: new Date('2026-10-27T15:00:00Z'), status: 'delivered', ...m });
+  it('a imagem do atendimento vira a marca, mesmo com derivado; sem imagem, nem lê a política', async () => {
+    const { marcarImagensDaBiblioteca, __test_fitToBudget } = await import('@/lib/agent-engine/edge/crm/get-lead-context');
+    const db = { query: vi.fn(async () => ({ rows: [{ policy: ligada() }] })) };
+    const marcadas = await marcarImagensDaBiblioteca(db as never, org, [linha({ media_derived_text: 'descrição automática' })]);
+    const base = { lead_id: 'l1', contact: { name: 'x', phone: null, email: null, tags: [], is_blocked: false }, conversation_id: 'c1', last_human_decision: null };
+    const corpo = __test_fitToBudget(base as never, marcadas as never, 100000, 'UTC').messages[0]!.body;
+    expect(corpo).toBe('[Você mandou esta imagem antes do link (imagem vitalicio-pagina, v1, entregue): Arte do Vitalício, sem preço.]');
+    expect(corpo).not.toContain('Mídia do cliente');
+    const semImagem = { query: vi.fn() };
+    await marcarImagensDaBiblioteca(semImagem as never, org, [linha({ direction: 'inbound' })]);
+    expect(semImagem.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('c01_imagens: ligação no turno (âncoras de código)', () => {
+  const TURNO = readFileSync('lib/agent-engine/agent/inbound-turn.ts', 'utf8');
+  const PREVIA = readFileSync('lib/agent-engine/agent/preview.ts', 'utf8');
+  it('a consulta à base desta resposta alimenta as páginas, pela conexão do contrato', () => {
+    expect(TURNO).toMatch(/if \(imagensDaOrg\.enabled\) args\[0\] = completarConsultaDaPagina\(args\[0\]\)/);
+    expect(TURNO).toMatch(/paginasDaResposta\.push\(\.\.\.paginasDaConsulta\(args\[0\], resultado, imagensDaOrg\.connectionId\)\)/);
+  });
+  it('a escolha e o preparo vêm antes do plano da retomada, fora da prévia, do vídeo e das fotos', () => {
+    const escolha = TURNO.indexOf('const escolha = escolherImagem(');
+    expect(escolha).toBeGreaterThan(0);
+    expect(TURNO.lastIndexOf('if (imagensDaOrg.enabled && !preview && !videoNativo && fotosDoProduto.length === 0)', escolha)).toBeGreaterThan(0);
+    expect(TURNO.indexOf('planejarRetomada(body, fotosDoProduto, videoNativo, imagemDaPagina?.media)')).toBeGreaterThan(escolha);
+  });
+  it('no envio, depois da cadeia, a imagem vai antes do texto e só se o link sobreviveu', () => {
+    const imagem = TURNO.indexOf('const parou = await enviarImagemAntes(imagem, {');
+    const texto = TURNO.indexOf('return enviarComFotos(finalBody, fotosDoProduto, {');
+    expect(imagem).toBeGreaterThan(0);
+    expect(texto).toBeGreaterThan(imagem);
+    expect(TURNO.slice(imagem - 200, imagem)).toContain('linksDaImagem.some((u) => finalBody.includes(u))');
+    expect(TURNO.slice(imagem, texto)).toContain('restantes: () => maxSendsPerTurn - seq');
+  });
+  it('a prévia só informa, sem copiar nem enviar', () => {
+    expect(PREVIA).toMatch(/const imagem = previaDaImagem\?\.\(result\.body\)/);
+    expect(TURNO).toMatch(/Nada foi copiado nem enviado/);
   });
 });

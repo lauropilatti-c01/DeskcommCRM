@@ -11,7 +11,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { ChannelSendResult } from '../channel-adapter';
 import type { Queryable } from '../queue/queue';
 import { OK_KINDS } from './split-message';
 
@@ -21,6 +20,8 @@ const BUCKET = 'whatsapp-media';
 const CHAVE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const SHA = /^[a-f0-9]{64}$/;
 const MIME = z.enum(['image/png', 'image/jpeg']);
+// 600 em unidades UTF-16 (o `.length` do JS), não em code points; só espaços não conta.
+const DESCRICAO = z.string().refine(d => d.trim().length > 0 && d.length <= 600);
 const EXTENSAO = { 'image/png': 'png', 'image/jpeg': 'jpg' } as const;
 export const AUDIENCIA_RESTRITA = 'somente_celulares_de_teste';
 
@@ -35,14 +36,14 @@ const itemSchema = z.object({
   triggers: z.array(z.literal('pagina_de_pagamento')).min(1),
   position: z.literal('antes_do_texto'),
   frequency: z.enum(['sempre', 'primeira_vez']),
-  plans: z.array(z.string().min(1)).min(1).refine(p => new Set(p).size === p.length),
-  description: z.string().min(1).max(600),
+  plans: z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,199}$/)).min(1).refine(p => new Set(p).size === p.length),
+  description: DESCRICAO,
 }).strict();
 const policySchema = z.object({
   enabled: z.boolean(),
   audience: z.enum([AUDIENCIA_RESTRITA, 'todos']),
   connectionId: z.uuid().nullable(),
-  testPhones: z.array(z.string().regex(/^\+[1-9]\d{7,14}$/)).max(100),
+  testPhones: z.array(z.string().regex(/^\+[1-9]\d{7,14}$/)).max(100).refine(t => new Set(t).size === t.length),
   items: z.array(itemSchema).max(100),
   /** Versões anteriores já publicadas: só para retomar o que o ledger já tem e para o histórico.
    * Nunca elegíveis para envio novo; podem repetir plano das atuais. */
@@ -63,6 +64,9 @@ const policySchema = z.object({
 export type PoliticaDeImagens = z.infer<typeof policySchema>;
 export type ItemDeImagem = z.infer<typeof itemSchema>;
 const desligada = (): PoliticaDeImagens => ({ enabled: false, audience: AUDIENCIA_RESTRITA, connectionId: null, testPhones: [], items: [] });
+
+/** O contrato aceita esta configuração como está (ligada ou desligada)? */
+export const politicaValida = (raw: unknown): boolean => policySchema.safeParse(raw).success;
 
 /** Ausente, inválida ou ilegível = desligada. */
 export function politicaDeImagens(raw: unknown): PoliticaDeImagens {
@@ -237,27 +241,27 @@ export async function prepararImagem(
 }
 
 /** A imagem antes do texto, contando no teto. Sem vaga para a imagem E para todas as bolhas
- * do texto, ela não sai (o teto e o texto ficam como seriam). Bloqueio ou canal fora param
- * tudo, como nas fotos; falha registrada da imagem não segura a página. */
-export async function enviarImagemAntesDoTexto<T extends { kind: string }>(
+ * do texto, ela não sai (o teto e o texto ficam como seriam). Devolve o desfecho que para a
+ * resposta inteira (bloqueio, canal fora, como nas fotos) ou `null` para o texto seguir;
+ * falha registrada da imagem não segura a página. */
+export async function enviarImagemAntes<R extends { kind: string }>(
   imagem: ImagemEscolhida,
   o: {
     restantes: () => number; bolhasDoTexto: number; jaRegistrada?: () => Promise<boolean>;
-    enviarImagem: () => Promise<T>; enviarTexto: () => Promise<T>;
-    sleep: (ms: number) => Promise<void>; jitter: () => number;
+    enviarImagem: () => Promise<R>; sleep: (ms: number) => Promise<void>; jitter: () => number;
     registrar: (desfecho: string, extra?: Record<string, unknown>) => void;
   },
-): Promise<T> {
+): Promise<R | null> {
   const conhecida = (await o.jaRegistrada?.()) === true;
   if (!conhecida && o.restantes() < o.bolhasDoTexto + 1) {
     o.registrar('sem_vaga', { restantes: o.restantes(), bolhas: o.bolhasDoTexto });
-    return o.enviarTexto();
+    return null;
   }
   const r = await o.enviarImagem();
   if (r.kind === 'blocked' || r.kind === 'unavailable') return r;
   o.registrar(OK_KINDS.has(r.kind) ? 'enviada' : 'falhou', { kind: r.kind, key: imagem.key, version: imagem.version });
   await o.sleep(o.jitter());
-  return o.enviarTexto();
+  return null;
 }
 
 const ESTADO: Record<string, string> = { sent: 'aceita', delivered: 'entregue', read: 'entregue', failed: 'falhou' };
