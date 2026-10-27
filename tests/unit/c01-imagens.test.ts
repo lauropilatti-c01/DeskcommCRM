@@ -399,7 +399,7 @@ describe('c01_imagens: costura do turno com dublês', () => {
   it('acompanhamento automático (followup_turn) com link elegível: o texto sai igual, nenhuma imagem copiada nem enviada', async () => {
     const { eTurnoDeResposta } = await import('@/lib/agent-engine/agent/inbound-turn');
     const ler = vi.fn(async () => politicaDeImagens(ligada()));
-    const doTurno = (kind: string, preview = false) => politicaDoTurno({ resposta: eTurnoDeResposta({ kind } as never), preview }, ler);
+    const doTurno = (kind: string, preview = false) => politicaDoTurno({ preview, resposta: () => eTurnoDeResposta({ kind } as never) }, ler);
     const followup = await doTurno('followup_turn');
     expect(followup.enabled).toBe(false);
     expect(ler).not.toHaveBeenCalled();
@@ -410,6 +410,18 @@ describe('c01_imagens: costura do turno com dublês', () => {
     expect((await doTurno('inbound_turn')).enabled).toBe(true);
     expect((await doTurno('case_reply_turn')).enabled).toBe(true);
     expect((await doTurno('followup_turn', true)).enabled).toBe(true); // a prévia continua simulável
+  });
+  it('na prévia não há job: lê a política sem chamar `liveJob()` (que lança)', async () => {
+    const liveJob = vi.fn((): { kind: string } => { throw new Error('preview_operational_job_forbidden'); });
+    const { eTurnoDeResposta } = await import('@/lib/agent-engine/agent/inbound-turn');
+    const ler = vi.fn(async () => politicaDeImagens(ligada()));
+    expect((await politicaDoTurno({ preview: true, resposta: () => eTurnoDeResposta(liveJob() as never) }, ler)).enabled).toBe(true);
+    expect(liveJob).not.toHaveBeenCalled();
+    expect(ler).toHaveBeenCalledTimes(1);
+    // desligada também não chama o job
+    const desl = vi.fn(async () => politicaDeImagens(null));
+    expect((await politicaDoTurno({ preview: true, resposta: () => eTurnoDeResposta(liveJob() as never) }, desl)).enabled).toBe(false);
+    expect(liveJob).not.toHaveBeenCalled();
   });
   it('ficha que cai num guarda (card contradiz, desligada): nada copiado, nada enviado além do texto', async () => {
     const m = mundo();
@@ -431,7 +443,7 @@ describe('c01_imagens: ligação no turno (âncoras de código)', () => {
   const PREVIA = readFileSync('lib/agent-engine/agent/preview.ts', 'utf8');
   it('a política só vale no turno de resposta e na prévia (fora o acompanhamento automático)', () => {
     expect(TURNO).toContain(`const imagensDaOrg = await politicaDoTurno(
-    { resposta: eTurnoDeResposta(liveJob()), preview: preview !== undefined },
+    { preview: preview !== undefined, resposta: () => eTurnoDeResposta(liveJob()) },
     () => lerPoliticaDeImagens(pool, tenantId),
   );`);
     expect(TURNO.match(/lerPoliticaDeImagens\(/g)).toHaveLength(1);

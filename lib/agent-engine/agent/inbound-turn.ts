@@ -4172,7 +4172,7 @@ async function executarTurnoDoAgente(
   // nada muda) e as páginas que a consulta à base desta resposta devolveu. Acompanhamento
   // automático fica de fora; a prévia continua simulável.
   const imagensDaOrg = await politicaDoTurno(
-    { resposta: eTurnoDeResposta(liveJob()), preview: preview !== undefined },
+    { preview: preview !== undefined, resposta: () => eTurnoDeResposta(liveJob()) },
     () => lerPoliticaDeImagens(pool, tenantId),
   );
   const paginasDaResposta: PaginaConsultada[] = [];

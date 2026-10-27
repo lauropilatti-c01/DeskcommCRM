@@ -76,11 +76,12 @@ export function politicaDeImagens(raw: unknown): PoliticaDeImagens {
 }
 
 /** A política que vale neste turno: só resposta ao lead (`eTurnoDeResposta`) e a prévia. O
- * acompanhamento automático (`followup_turn`) fica fora do contrato, então nem lê a política. */
+ * acompanhamento automático (`followup_turn`) fica fora do contrato, então nem lê a política.
+ * `resposta` é preguiçosa: na prévia não há job (`liveJob()` lança), e ela nem é chamada. */
 export async function politicaDoTurno(
-  turno: { resposta: boolean; preview: boolean }, ler: () => Promise<PoliticaDeImagens>,
+  turno: { preview: boolean; resposta: () => boolean }, ler: () => Promise<PoliticaDeImagens>,
 ): Promise<PoliticaDeImagens> {
-  return turno.resposta || turno.preview ? ler() : desligada();
+  return turno.preview || turno.resposta() ? ler() : desligada();
 }
 
 export async function lerPoliticaDeImagens(db: Queryable, tenantId: string): Promise<PoliticaDeImagens> {
