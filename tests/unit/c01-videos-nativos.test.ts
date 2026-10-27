@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { classificarMidiaComLegenda } from '@/lib/messaging/media/midia-com-legenda';
 import { corpoDoEnvio } from '@/lib/agent-engine/edge/crm/send-message';
 import { hashDoConteudo, sendWithLedger } from '@/lib/agent-engine/edge/crm/send-ledger';
-import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, lerPoliticaDeVideo, lerPoliticaDeVideoSupabase, prepararVideoNativo, validarVideoMp4 } from '@/lib/agent-engine/agent/videos-nativos';
+import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, lerPoliticaDeVideo, lerPoliticaDeVideoSupabase, prepararVideoNativo, validarVideoMp4, videoParaOTelefone, MAX_VIDEO_NATIVO_BYTES } from '@/lib/agent-engine/agent/videos-nativos';
 import { AGENT_TOOL_DEFS } from '@/lib/agent-engine/agent/inbound-turn';
 import { applyPreviewPolicy, newPreviewResult, type TurnPreview } from '@/lib/agent-engine/agent/preview';
 import type { GateContext } from '@/lib/agent-engine/guardrails/before-send';
@@ -18,7 +18,7 @@ const blob = (bytes = bytesMp4, type = 'video/mp4') => ({ size: bytes.length, ty
 const org = '11111111-1111-4111-8111-111111111111';
 const conv = '22222222-2222-4222-8222-222222222222';
 const digest = 'a'.repeat(64);
-const config = { enabled: true, flow_mp4: false, catalog: [{ key: 'fixture', sha256: digest }] };
+const config = { enabled: true, flow_mp4: false, audience: 'todos', catalog: [{ key: 'fixture', sha256: digest }] };
 const banco = (policy: unknown) => ({ query: vi.fn(async () => ({ rows: [{ policy }] })) });
 const fakeDb = (policy: unknown) => banco(policy) as unknown as Parameters<typeof lerPoliticaDeVideo>[0];
 
@@ -210,4 +210,36 @@ it('V3: leitor inline usa a mesma política por organização e falha fechado', 
   expect(eq).toHaveBeenCalledWith('id', org);
   reply.mockResolvedValueOnce({ data: { settings: { c01_native_videos: config } }, error: new Error('offline') });
   expect((await lerPoliticaDeVideoSupabase(db, org)).enabled).toBe(false);
+});
+
+describe('vídeo nativo: só para os celulares de teste (27/10)', () => {
+  const restrita = { enabled: true, flow_mp4: false, audience: 'somente_celulares_de_teste', testPhones: ['+5500911127001'], catalog: config.catalog };
+  const preparar = (policy: unknown, telefone: string | null | undefined) => {
+    const copiar = vi.fn(async () => true);
+    return prepararVideoNativo(fakeDb(policy), copiar, { tenantId: org, conversationId: conv, chave: 'fixture', telefone })
+      .then((r) => ({ ok: r.ok, copiou: copiar.mock.calls.length }));
+  };
+  it('celular da lista recebe; fora da lista, sem telefone ou sem lista, não copia nem envia', async () => {
+    expect(await preparar(restrita, '+5500911127001')).toEqual({ ok: true, copiou: 1 });
+    expect(await preparar(restrita, '+5521999999999')).toEqual({ ok: false, copiou: 0 });
+    expect(await preparar(restrita, null)).toEqual({ ok: false, copiou: 0 });
+    expect(await preparar(restrita, undefined)).toEqual({ ok: false, copiou: 0 });
+    const { audience: _a, testPhones: _t, ...semPublico } = restrita;
+    expect(await preparar({ ...semPublico }, '+5500911127001')).toEqual({ ok: false, copiou: 0 });
+    expect(await preparar({ ...restrita, audience: 'todos', testPhones: [] }, null)).toEqual({ ok: true, copiou: 1 });
+  });
+  it('telefone fora do E.164 invalida a política inteira (desligada)', async () => {
+    expect((await lerPoliticaDeVideo(fakeDb({ ...restrita, testPhones: ['5500911127001'] }), org)).enabled).toBe(false);
+  });
+  it('o schema do turno só oferece video_chave a quem pode receber', () => {
+    const src = readFileSync('lib/agent-engine/agent/inbound-turn.ts', 'utf8');
+    expect(src).toContain('const videoNativoDisponivelNoTurno = politicaDeVideoDoTurno !== null && videoParaOTelefone(politicaDeVideoDoTurno, telefoneDoContato);');
+    expect(src).toContain('chave: video_chave, telefone: telefoneDoContato,');
+    expect(videoParaOTelefone({ ...restrita, enabled: false } as never, '+5500911127001')).toBe(false);
+  });
+  it('teto de 15 MB (Lauro): 15.000.001 bytes recusa', () => {
+    expect(MAX_VIDEO_NATIVO_BYTES).toBe(15_000_000);
+    const grande = Buffer.alloc(15_000_001); bytesMp4.copy(grande);
+    expect(validarVideoMp4(grande, 'video/mp4', createHash('sha256').update(grande).digest('hex'))).toBe(false);
+  });
 });

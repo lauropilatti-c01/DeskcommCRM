@@ -11,9 +11,18 @@ A configuração vive em `organizations.settings.c01_native_videos`, por organiz
 {
   "enabled": false,
   "flow_mp4": false,
+  "audience": "somente_celulares_de_teste",
+  "testPhones": [],
   "catalog": []
 }
 ```
+
+Público (c01.10, 27/10): na resposta ao lead, `video_chave` só é oferecido e só
+é preparado quando `audience` é `todos` ou o telefone do contato, em E.164, está
+em `testPhones` (até 100). Sem `audience`, vale `somente_celulares_de_teste`; com
+a lista vazia, ninguém recebe. Telefone fora do E.164 invalida a política inteira
+(desligada). O acompanhamento com `flow_mp4` não olha o público: deixe `flow_mp4`
+desligado enquanto o público for restrito.
 
 Cada item aprovado de `catalog` tem somente `key` (letras minúsculas, números,
 `_` e `-`) e `sha256` (64 caracteres hexadecimais). A configuração ausente,
@@ -28,7 +37,7 @@ a chave; nunca caminho, organização, URL ou assinatura. Duas chaves do mesmo
 arquivo apontam para a mesma cópia. UUIDs e hash são validados; campos extras
 no catálogo, inclusive caminho arbitrário, são recusados.
 
-O preparo confere MIME, cabeçalho do contêiner MP4, limite próprio de 16 MiB e
+O preparo confere MIME, cabeçalho do contêiner MP4, limite próprio de 15.000.000 bytes (Lauro, 27/10: 15 MB no WhatsApp) e
 SHA-256 dos bytes. Upload não sobrescreve. Conflito no destino exige conferir os
 bytes existentes: encontrar o mesmo nome não basta. A validação não decodifica o
 vídeo nem comprova codec, conteúdo comercial ou reprodução no aparelho; essas
