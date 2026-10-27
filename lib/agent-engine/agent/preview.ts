@@ -295,7 +295,7 @@ export function applyPreviewPolicy(
    */
   conferirAfirmacoes?: (candidata: string) => Promise<ConferenciaDeFato>,
   /** C01: se a imagem da página iria junto deste texto no envio real (nada é copiado). */
-  previaDaImagem?: (body: string) => { code: string; message: string } | null,
+  previaDaImagem?: (body: string) => Promise<{ code: string; message: string } | null>,
 ): ToolSet {
   return Object.fromEntries(
     Object.entries(tools).map(([name, definition]) => {
@@ -402,7 +402,7 @@ export function applyPreviewPolicy(
                 citations: citations(),
                 trace: result.trace,
               });
-              const imagem = previaDaImagem?.(result.body);
+              const imagem = await previaDaImagem?.(result.body);
               if (imagem && !p.result.warnings.some((w) => w.code === imagem.code)) p.result.warnings.push(imagem);
               return {
                 ok: true,

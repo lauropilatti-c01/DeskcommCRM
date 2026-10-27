@@ -115,7 +115,7 @@ import {
   PASTA_DE_TESTE_DE_MIDIA,
   type FotoParaEnvio,
 } from './fotos-do-produto';
-import { completarConsultaDaPagina, copiarImagemNoStorage, enviarImagemAntes, escolherImagem, jaRecebeuNaConversa, lerPoliticaDeImagens, paginasDaConsulta, prepararImagem, telefoneE164, versaoDaTentativa, type CopiarImagem, type ImagemEscolhida, type ImagemParaEnvio, type PaginaConsultada } from './c01-imagens';
+import { completarConsultaDaPagina, copiarImagemNoStorage, enfaseDoCard, enviarImagemDaPagina, escolherComCard, jaRecebeuNaConversa, lerPoliticaDeImagens, paginasDaConsulta, politicaDoTurno, prepararImagemDaResposta, retratoDoEnvio, telefoneE164, type CopiarImagem, type ImagemParaEnvio, type ImagemPreparada, type PaginaConsultada } from './c01-imagens';
 import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, MAX_LEGENDA_VIDEO, lerPoliticaDeVideo, prepararVideoNativo, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
 import {
@@ -149,7 +149,7 @@ import {
   trocarResumoNoContexto,
   type GanchoAntesDoTurnoConfig,
 } from './gancho-antes-do-turno';
-import { projetarCamposDoCard } from '../edge/crm/card-do-contato';
+import { lerCardDoContato, projetarCamposDoCard } from '../edge/crm/card-do-contato';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { buildOrigemBlock } from './abertura/origem-do-contato';
 import { agendaNoFechamento } from './abertura/agenda-no-fechamento';
@@ -4169,14 +4169,21 @@ async function executarTurnoDoAgente(
   const politicaMatricula = preview ? { enabled: false as const } : await lerPoliticaMatricula(pool, tenantId);
   const paginasMatricula = new Set<string>();
   // (C01) Biblioteca de imagens: política da organização lida uma vez por turno (desligada,
-  // nada muda) e as páginas que a consulta à base desta resposta devolveu.
-  const imagensDaOrg = await lerPoliticaDeImagens(pool, tenantId);
+  // nada muda) e as páginas que a consulta à base desta resposta devolveu. Acompanhamento
+  // automático fica de fora; a prévia continua simulável.
+  const imagensDaOrg = await politicaDoTurno(
+    { resposta: eTurnoDeResposta(liveJob()), preview: preview !== undefined },
+    () => lerPoliticaDeImagens(pool, tenantId),
+  );
   const paginasDaResposta: PaginaConsultada[] = [];
   const telefoneDoContato = imagensDaOrg.enabled && leadId
     ? await pool.query<{ phone_number: string | null }>(
         'select phone_number from contacts where organization_id = $1 and id = $2', [tenantId, leadId],
       ).then((r) => telefoneE164(r.rows[0]?.phone_number), () => null)
     : null;
+  // A ênfase do card contra a da consulta, lida na hora da escolha; ilegível (`false`) = sem imagem.
+  const lerEnfaseDoCard = (): Promise<string | null | false> =>
+    leadId ? lerCardDoContato(pool, tenantId, leadId).then(enfaseDoCard, () => false as const) : Promise.resolve(null);
   const videosConsultadosC01: VideoConsultadoC01[] = [];
   // (C01, -c01.7) O que as ferramentas de CONSULTA devolveram neste turno — as URLs e os
   // valores (em centavos) que a trava "link e valor de ferramenta" libera. As de consulta
@@ -5357,8 +5364,7 @@ async function executarTurnoDoAgente(
         // ele segue inteiramente síncrono do `checar` até a reserva.
         let fotosDoProduto: FotoParaEnvio[] = [];
         let videoNativo: VideoParaEnvio | null = null;
-        let imagemDaPagina: ImagemEscolhida | null = null;
-        let linksDaImagem: readonly string[] = [];
+        let imagemDaPagina: ImagemPreparada | null = null;
         let fotosQueFaltaram = 0;
         // (C01) Ligado pelo fail-safe de vocabulário interno antes de mandar a frase de
         // espera: é o ÚNICO envio que passa pela reconferência de `enviarPeloCanal`
@@ -5448,20 +5454,17 @@ async function executarTurnoDoAgente(
           // (C01) Imagem da página: só no texto puro com link da consulta desta resposta.
           // Qualquer dúvida ou falha de arquivo = só o texto, com o motivo no log.
           if (imagensDaOrg.enabled && !preview && !videoNativo && fotosDoProduto.length === 0) {
-            const escolha = escolherImagem({ politica: imagensDaOrg, paginas: paginasDaResposta, corpo: body, telefone: telefoneDoContato });
             const ids = { tenantId, conversationId: input.conversationId };
-            if (escolha.item === null) {
-              if (escolha.motivo !== 'sem_pagina') runLog.info('imagem da página não vai', { motivo: escolha.motivo });
-            } else if (escolha.item.frequency === 'primeira_vez' && await jaRecebeuNaConversa(pool, ids, escolha.item.key).catch(() => true)) {
-              runLog.info('imagem da página não vai', { motivo: 'ja_recebeu', key: escolha.item.key });
-            } else {
-              const imagem = await versaoDaTentativa(imagensDaOrg, escolha.item, ids, (media) => conhecido({ body: '', media }));
-              const preparada = await prepararImagem(deps.copiarImagem ?? copiarImagemNoStorage(), ids, imagem, imagensDaOrg);
-              if (preparada.ok) { imagemDaPagina = imagem; linksDaImagem = escolha.pagina.urls; }
-              else runLog.warn('imagem da página não vai', { motivo: preparada.motivo, key: imagem.key, version: imagem.version });
-            }
+            imagemDaPagina = await prepararImagemDaResposta({
+              politica: imagensDaOrg, paginas: paginasDaResposta, corpo: body, telefone: telefoneDoContato,
+              lerEnfaseDoCard, ids,
+              jaRecebeu: (key) => jaRecebeuNaConversa(pool, ids, key),
+              jaNoJob: (media) => conhecido({ body: '', media }),
+              copiar: deps.copiarImagem ?? copiarImagemNoStorage(),
+              log: (msg, extra) => runLog.info(msg, extra),
+            });
           }
-          retomada = tetoCheio() ? await planejarRetomada(body, fotosDoProduto, videoNativo, imagemDaPagina?.media) : null;
+          retomada = tetoCheio() ? await planejarRetomada(body, fotosDoProduto, videoNativo, imagemDaPagina?.imagem.media) : null;
           if (retomada !== null && retomada.conhecidas.length === 0) {
             dupTrava.liberar(body);
             return recusaPorTeto();
@@ -5675,6 +5678,7 @@ async function executarTurnoDoAgente(
                     ...(media ? { media } : {}),
                     ...identidadeDoEnvio(corpo, finalBody, comoACadeiaComeca(corpoDaCadeia())),
                     ...(media && 'type' in media && media.type === 'video' ? { identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO } : {}),
+                    ...retratoDoEnvio(imagemDaPagina, media),
                   },
                   { fraseDeEspera: enviandoFraseDeEspera },
                 );
@@ -5693,19 +5697,16 @@ async function executarTurnoDoAgente(
               // teto de legenda sai à parte e também gasta o teto.
               // (C01) A imagem da página antes do texto, contando no teto, só se o link
               // da consulta continua no texto que a cadeia liberou.
-              const imagem = imagemDaPagina;
-              if (imagem !== null && linksDaImagem.some((u) => finalBody.includes(u))) {
-                const parou = await enviarImagemAntes(imagem, {
-                  restantes: () => maxSendsPerTurn - seq,
-                  bolhasDoTexto: Math.max(1, splitForSend(finalBody, agentConfig?.splitMessages ?? false, agentConfig?.splitMaxChars ?? 600).length),
-                  jaRegistrada: () => conhecido({ body: '', media: imagem.media }),
-                  enviarImagem: () => enviar('', imagem.media),
-                  sleep,
-                  jitter,
-                  registrar: (desfecho, extra) => runLog.info(`imagem da página: ${desfecho}`, { key: imagem.key, version: imagem.version, ...extra }),
-                });
-                if (parou) return parou;
-              }
+              const parou = await enviarImagemDaPagina(imagemDaPagina, finalBody, {
+                restantes: () => maxSendsPerTurn - seq,
+                bolhasDoTexto: Math.max(1, splitForSend(finalBody, agentConfig?.splitMessages ?? false, agentConfig?.splitMaxChars ?? 600).length),
+                conhecido: (media) => conhecido({ body: '', media }),
+                enviar,
+                sleep,
+                jitter,
+                registrar: (desfecho, extra) => runLog.info(`imagem da página: ${desfecho}`, { key: imagemDaPagina?.imagem.key, version: imagemDaPagina?.imagem.version, ...extra }),
+              });
+              if (parou) return parou;
               return enviarComFotos(finalBody, fotosDoProduto, {
                 sleep,
                 jitter,
@@ -7099,9 +7100,9 @@ async function executarTurnoDoAgente(
             // (impedimento no assistido, aviso no Teste) em vez de sair calado.
             conferirAfirmacoes,
             // (C01) A prévia diz se a imagem da página iria junto, sem copiar nem enviar.
-            (corpo: string) => {
+            async (corpo: string) => {
               if (!imagensDaOrg.enabled) return null;
-              const e = escolherImagem({ politica: imagensDaOrg, paginas: paginasDaResposta, corpo, telefone: telefoneDoContato });
+              const e = await escolherComCard({ politica: imagensDaOrg, paginas: paginasDaResposta, corpo, telefone: telefoneDoContato, lerEnfaseDoCard });
               if (e.item) return { code: 'imagem_da_pagina', message: `No envio real, a imagem ${e.item.key} v${e.item.version} iria antes do texto, se houver vaga no teto e o arquivo conferir. Nada foi copiado nem enviado.` };
               return e.motivo === 'sem_pagina' ? null : { code: 'imagem_da_pagina_nao_vai', message: `A imagem da página não iria junto: ${e.motivo}.` };
             },

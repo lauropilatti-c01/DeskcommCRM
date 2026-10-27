@@ -19,7 +19,7 @@ import { logger } from '@/lib/logger';
 import { nomeDoContato } from '@/lib/contacts/rotulo-do-contato';
 import { TEXTO_DA_RESPOSTA_DE_FORMULARIO, textoDaRespostaDeFormulario } from '@/lib/channels/interativo';
 import { projetarCamposDoCard, lerCardDoContato } from './card-do-contato';
-import { eImagemDaBiblioteca, lerPoliticaDeImagens, marcaDaImagemEnviada } from '../../agent/c01-imagens';
+import { marcaDaImagemEnviada } from '../../agent/c01-imagens';
 
 /**
  * Heurística conservadora de contagem: ~3,5 chars/token para pt-br (BPE real fica
@@ -238,17 +238,17 @@ interface HistoryRow {
   formulario_resposta?: unknown;
   formulario_processado?: boolean | null;
   status?: string | null;
+  /** (C01) `metadata.c01_imagem`: o retrato da imagem da biblioteca gravado no envio. */
+  c01_imagem?: unknown;
   /** (C01) Imagem da biblioteca que o atendimento mandou: vale no lugar do corpo. */
   marca_c01?: string;
 }
 
-/** (C01) A imagem da biblioteca aparece como enviada pelo atendimento, com a versão e o estado;
- * sem isso ela virava `[image]`. A política só é lida quando há uma no histórico. */
-export async function marcarImagensDaBiblioteca(db: Queryable, tenantId: string, rows: HistoryRow[]): Promise<HistoryRow[]> {
-  if (!rows.some((m) => m.direction === 'outbound' && eImagemDaBiblioteca(m.media_storage_path))) return rows;
-  const politica = await lerPoliticaDeImagens(db, tenantId);
+/** (C01) A imagem da biblioteca aparece como enviada pelo atendimento, com a versão, o estado e
+ * a descrição gravada no envio; sem isso ela virava `[image]`. */
+export function marcarImagensDaBiblioteca(rows: HistoryRow[]): HistoryRow[] {
   return rows.map((m) => {
-    const marca = marcaDaImagemEnviada(m, politica);
+    const marca = marcaDaImagemEnviada(m);
     return marca ? { ...m, marca_c01: marca } : m;
   });
 }
@@ -329,7 +329,7 @@ export async function getLeadContext(
         ? db
             .query<HistoryRow>(
               `select direction, type, body, media_url, media_storage_path, media_mime,
-                      media_derived_text, sent_at, status,
+                      media_derived_text, sent_at, status, metadata -> 'c01_imagem' as c01_imagem,
                       ${COLUNAS_DO_FORMULARIO}
                from messages
                where organization_id = $1 and conversation_id = $2
@@ -342,7 +342,7 @@ export async function getLeadContext(
                limit $3`,
               [input.tenantId, conversationId, knobs.historyLimit],
             )
-            .then((r) => marcarImagensDaBiblioteca(db, input.tenantId, r.rows.reverse()))
+            .then((r) => marcarImagensDaBiblioteca(r.rows.reverse()))
         : Promise.resolve<HistoryRow[]>([]),
       db.query<{ desfecho: string }>(
         `select distinct d.desfecho from demandas d join demanda_conversas dc on dc.demanda_id=d.id and dc.organization_id=d.organization_id

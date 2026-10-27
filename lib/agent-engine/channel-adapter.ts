@@ -74,6 +74,9 @@ export interface ChannelSendInput {
    * da linha da conversa (o gancho antes do turno usa `pre_turn_hook`). Ausente = nada.
    */
   origem?: string;
+  /** (C01) Retrato da imagem da biblioteca que este envio leva: vai a `metadata.c01_imagem`
+   * e é o que o histórico da Marina lê, mesmo depois de a ficha mudar. */
+  c01Imagem?: { key: string; version: number; sha256: string; description: string };
 }
 
 /**
