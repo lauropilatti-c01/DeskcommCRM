@@ -411,8 +411,9 @@ describe("(C01) a ligação no turno", () => {
     expect(FONTE.match(/registrarRespostaAoLead\(/g)).toHaveLength(3);
     expect(FONTE.match(/leadTemResposta = true/g)).toHaveLength(1);
     // (-c01.3) O quarto `maxSendsPerTurn - seq` é o que resta para a trava de texto longo;
-    // (C01) o quinto, a vaga da imagem da página antes do texto (`enviarImagemDaPagina`).
-    expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(5);
+    // (C01) o quinto, a vaga da imagem da página antes do texto (`enviarImagemDaPagina`);
+    // (-c01.12) o sexto, o teto das bolhas com o vídeo, e o sétimo, o que resta para a arte antes do link (`enviarImagemAntes`).
+    expect(FONTE.match(/maxSendsPerTurn - seq\b/g)).toHaveLength(7);
     expect(FONTE).toMatch(
       /perguntaDoRoteiroPodeSair\(\{ turnoDescartado: turnoDescartado \|\| passadoAoHumano, seq, maxSendsPerTurn \}\)/,
     );

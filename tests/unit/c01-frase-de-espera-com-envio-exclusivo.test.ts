@@ -96,7 +96,8 @@ describe("(C01) o `send` exclusivo da frase de espera", () => {
       "let chain = await cadeiaDeEnvio(",
     );
     expect(sendDoModelo).toMatch(
-      /if \(retomada !== null\) return enviarSoAsConhecidas\(retomada\.conhecidas, \{\s*enviar: \(corpo, media\) => media && 'type' in media && media\.type === 'video'\s*\? enviarVideoComLegenda\(corpo, media as VideoParaEnvio, enviar\)\s*: enviar\(corpo, media\),\s*sleep, jitter,\s*\}\);/,
+      // (-c01.12) o vídeo do plano já vem sem legenda: vai direto, como a foto
+      /if \(retomada !== null\) return enviarSoAsConhecidas\(retomada\.conhecidas, \{\s*(?:\/\/.*\n\s*)?enviar: \(corpo, media\) => enviar\(corpo, media\),\s*sleep, jitter,\s*\}\);/,
     );
     expect(sendDoModelo).toMatch(/return enviarComFotos\(finalBody, fotosDoProduto, \{/);
     expect(sendMessage.indexOf("send: async (finalBody: string, dbUnderLock: Queryable) => {")).toBeLessThan(
