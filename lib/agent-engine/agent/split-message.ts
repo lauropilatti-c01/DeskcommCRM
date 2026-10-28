@@ -208,6 +208,16 @@ export interface SendInBubblesOpts<T extends BubbleOutcome = BubbleOutcome> {
    * desligada ou desarmada no turno — para a emenda nunca ser silenciosa. Só números.
    */
   aoEmendar?: (conta: { bolhas: number; enviadas: number }) => void;
+  /**
+   * (C01, -c01.12) A pausa entre bolhas, no lugar do `sleep(jitter())`: o "digitando…" e a espera
+   * proporcional à PRÓXIMA bolha (Lauro, 28/10: sem ela as bolhas chegam juntas). Ausente = o jitter de sempre.
+   */
+  entreBolhas?: (proxima: string) => Promise<void>;
+  /**
+   * (C01, -c01.12) Roda antes de cada bolha (depois da pausa) e pode mandar outra mensagem ali — a arte
+   * antes do link. Um desfecho que não é de sucesso para tudo, como o da própria bolha.
+   */
+  antesDaBolha?: (bolha: string, indice: number) => Promise<T | null>;
 }
 
 /**
@@ -338,7 +348,10 @@ export async function sendInBubbles<T extends BubbleOutcome>(
     // Antes da 1ª: o atraso humano do turno. Entre as demais: o jitter anti-ban
     // que já existia. Nunca os dois na mesma pausa.
     if (i === 0) await opts.antesDaPrimeira?.(bubbles[0]!);
+    else if (opts.entreBolhas) await opts.entreBolhas(bubbles[i]!);
     else await opts.sleep(opts.jitter());
+    const antes = await opts.antesDaBolha?.(bubbles[i]!, i);
+    if (antes && !OK_KINDS.has(antes.kind)) return antes;
     last = await opts.send(bubbles[i]!);
     if (!OK_KINDS.has(last.kind)) return last; // veto/bloqueio/falha: para aqui
   }

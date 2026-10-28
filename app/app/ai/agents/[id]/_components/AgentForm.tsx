@@ -469,14 +469,14 @@ export function AgentForm(props: Props) {
       errors.priority = t("A ordem de preferência vai de 0 a 1000.");
     if (form.system_prompt.trim().length < 10)
       errors.system_prompt = t("Escreva as instruções do agente (pelo menos uma frase).");
-    // `.trim()` porque é o que o servidor mede: `z.string().trim().max(24000)`
+    // `.trim()` porque é o que o servidor mede: `z.string().trim().max(32000)`
     // em lib/ai/agents/validation.ts — o trim roda ANTES do max. Duas réguas
     // diferentes barrariam aqui um texto que o servidor aceitaria.
     const tamanhoDoPrompt = form.system_prompt.trim().length;
-    if (tamanhoDoPrompt > 24000)
+    if (tamanhoDoPrompt > 32000)
       errors.system_prompt =
-        `${t("As instruções têm")} ${tamanhoDoPrompt.toLocaleString("pt-BR")} ${t("caracteres, e o máximo é 24.000. Corte")} ` +
-        `${(tamanhoDoPrompt - 24000).toLocaleString("pt-BR")} ${t("para conseguir salvar.")}`;
+        `${t("As instruções têm")} ${tamanhoDoPrompt.toLocaleString("pt-BR")} ${t("caracteres, e o máximo é 32.000. Corte")} ` +
+        `${(tamanhoDoPrompt - 32000).toLocaleString("pt-BR")} ${t("para conseguir salvar.")}`;
     if (!form.model) errors.model = t("Escolha o modelo de inteligência artificial.");
     if (!form.credential_id)
       errors.credential_id = t("Escolha a chave de acesso da empresa de inteligência artificial.");
@@ -1157,12 +1157,12 @@ export function AgentForm(props: Props) {
                 <span
                   data-testid="contador-do-prompt"
                   className={
-                    form.system_prompt.trim().length > 24000
+                    form.system_prompt.trim().length > 32000
                       ? "text-xs text-destructive"
                       : "text-xs text-muted-foreground"
                   }
                 >
-                  {form.system_prompt.trim().length.toLocaleString("pt-BR")}/24.000
+                  {form.system_prompt.trim().length.toLocaleString("pt-BR")}/32.000
                 </span>
                 <TokenCounter
                   text={form.system_prompt}

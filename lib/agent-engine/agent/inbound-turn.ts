@@ -115,8 +115,8 @@ import {
   PASTA_DE_TESTE_DE_MIDIA,
   type FotoParaEnvio,
 } from './fotos-do-produto';
-import { completarConsultaDaPagina, copiarImagemNoStorage, enfaseDoCard, enviarImagemDaPagina, escolherComCard, jaRecebeuNaConversa, lerPoliticaDeImagens, paginasDaConsulta, politicaDoTurno, prepararImagemDaResposta, retratoDoEnvio, telefoneE164, type CopiarImagem, type ImagemParaEnvio, type ImagemPreparada, type PaginaConsultada } from './c01-imagens';
-import { copiarVideoNoStorage, enviarVideoComLegenda, IDENTIDADE_DA_LEGENDA_DO_VIDEO, MAX_LEGENDA_VIDEO, lerPoliticaDeVideo, prepararVideoNativo, videoParaOTelefone, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
+import { arteAntesDoLink, citaAlgumLink, completarConsultaDaPagina, copiarImagemNoStorage, enfaseDoCard, enviarImagemAntes, enviarImagemDaPagina, escolherComCard, jaRecebeuNaConversa, lerPoliticaDeImagens, paginasDaConsulta, politicaDoTurno, prepararImagemDaResposta, retratoDoEnvio, telefoneE164, type CopiarImagem, type ImagemParaEnvio, type ImagemPreparada, type PaginaConsultada } from './c01-imagens';
+import { copiarVideoNoStorage, enviarComVideo, IDENTIDADE_DA_LEGENDA_DO_VIDEO, lerPoliticaDeVideo, ordemComVideo, prepararVideoNativo, videoParaOTelefone, type CopiarVideo, type VideoParaEnvio } from './videos-nativos';
 import { enqueueJob, rescheduleJob, type JobRow, type Queryable } from '../queue/queue';
 import {
   applyLeadStateUpdate,
@@ -246,8 +246,8 @@ import { AVISO_DE_ULTIMA_TENTATIVA } from '../guardrails/vazamento-interno';
 import { isStatusSendable } from '../../channels/meta/template-binding';
 import { capabilitiesOf } from '@/lib/channels/capabilities';
 import { renderTemplateBody } from '@/lib/channels/meta/render-template';
-import { esperarComoHumano, manterDigitando } from './atraso-humano';
-import { instrucaoDeBolhas, OK_KINDS, sendInBubbles, splitForSend } from './split-message';
+import { calcularAtrasoHumano, esperarComoHumano, manterDigitando } from './atraso-humano';
+import { aplicarTetoAsNovas, instrucaoDeBolhas, OK_KINDS, sendInBubbles, splitForSend } from './split-message';
 import { formatarParaWhatsApp } from './formato-whatsapp';
 import { umaRespostaPorTurno } from './c01-uma-resposta-por-turno';
 import type { DisclosureMode } from '../guardrails/disclosure/template';
@@ -420,7 +420,7 @@ export const AGENT_TOOL_DEFS = {
         ),
       video_chave: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/).optional().describe(
         'Chave de vídeo nativo aprovado no catálogo da organização. Só use chave confirmada; nunca URL. ' +
-        'O corpo vira a legenda do vídeo (até 1024 caracteres). Não combine com produto_codigo. ' +
+        'O vídeo sai sem legenda, depois dos parágrafos do corpo e antes do último (a pergunta). Não combine com produto_codigo. ' +
         'Capacidade desligada ou mídia ausente recusa o envio inteiro.',
       ),
     }),
@@ -4611,7 +4611,9 @@ async function executarTurnoDoAgente(
     const [capa, ...demais] = fotos;
     const plano: MensagemPlanejada[] =
       video
-        ? [{ body: texto, media: video, identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO }]
+        // (C01, -c01.12) As bolhas com o vídeo sem legenda entre a penúltima e a última (`ordemComVideo`).
+        ? ordemComVideo(bolhas.map((b) => b.body)).map((b) =>
+            b === null ? { body: '', media: video, identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO } : { body: b })
         : capa === undefined
         ? bolhas
         : texto.length <= LIMITE_DA_LEGENDA
@@ -5209,9 +5211,10 @@ async function executarTurnoDoAgente(
           return { ok: false, error: { code: 'video_desligado', message:
             'Vídeo nativo não está disponível neste turno; nada foi enviado. ' + ORIENTACAO_TEXTO_SEM_MIDIA } };
         }
-        if (video_chave !== undefined && (produto_codigo !== undefined || body.length > MAX_LEGENDA_VIDEO || preview)) {
+        // (C01, -c01.12) O texto não é mais a legenda: sai em bolhas em volta do vídeo, sem o teto de 1024.
+        if (video_chave !== undefined && (produto_codigo !== undefined || preview)) {
           return { ok: false, error: { code: 'video_configuracao_invalida', message:
-            'Vídeo nativo exige legenda de até 1024 caracteres, sem produto_codigo. A prévia não executa vídeo; não considere o anexo enviado. ' + ORIENTACAO_TEXTO_SEM_MIDIA } };
+            'Vídeo nativo não combina com produto_codigo. A prévia não executa vídeo; não considere o anexo enviado. ' + ORIENTACAO_TEXTO_SEM_MIDIA } };
         }
         // (C01, -c01.14) As tabelas cobradas cujo resultado NÃO estava no que o modelo leu
         // ao escrever ESTA mensagem. (`opcoes.messages` abre o passo, sem o passo desta
@@ -5684,21 +5687,46 @@ async function executarTurnoDoAgente(
                   { fraseDeEspera: enviandoFraseDeEspera },
                 );
               if (retomada !== null) return enviarSoAsConhecidas(retomada.conhecidas, {
-                enviar: (corpo, media) => media && 'type' in media && media.type === 'video'
-                  ? enviarVideoComLegenda(corpo, media as VideoParaEnvio, enviar)
-                  : enviar(corpo, media),
+                // (C01, -c01.12) o vídeo do plano já vem sem legenda: vai direto, como a foto
+                enviar: (corpo, media) => enviar(corpo, media),
                 sleep, jitter,
               });
               // V1: só depois de TODOS os guardas, pelo mesmo canal e ledger.
               // A legenda final (inclusive apresentação) precisa caber inteira.
-              if (videoNativo) return enviarVideoComLegenda(finalBody, videoNativo, enviar);
+              // (C01, -c01.12) "digitando…" e a espera proporcional à próxima bolha, nunca menos que o jitter anti-ban.
+              const entreBolhas = async (proxima: string): Promise<void> => {
+                try {
+                  const canal = liveChannel();
+                  await canal.signalTyping?.({ tenantId, conversationId: input.conversationId });
+                } catch { /* sem "digitando" (preview, canal fora): a pausa continua */ }
+                await sleep(Math.max(jitter(), calcularAtrasoHumano(proxima, knobsDeAtrasoHumano)));
+              };
+              if (videoNativo) {
+                // (C01, -c01.12) O texto em bolhas e o vídeo sem legenda antes da última (Lauro, 28/10). O teto do
+                // turno vale só para as novas, como em `sendInBubbles`; o vídeo novo ocupa uma vaga.
+                const video = videoNativo;
+                const naturais = splitForSend(finalBody, agentConfig?.splitMessages ?? false, agentConfig?.splitMaxChars ?? 600);
+                const bolhasNaturais = naturais.length === 0 ? [finalBody] : naturais;
+                const registradas = await Promise.all(bolhasNaturais.map((b) =>
+                  conhecido({ body: b, ...identidadeDoEnvio(b, finalBody, comoACadeiaComeca(corpoDaCadeia())) })));
+                const videoConhecido = await conhecido({ body: '', media: video, identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO });
+                const bolhas = aplicarTetoAsNovas(bolhasNaturais, registradas, Math.max(1, maxSendsPerTurn - seq - (videoConhecido ? 0 : 1)));
+                return enviarComVideo(bolhas, {
+                  enviarTexto: (b) => enviar(b),
+                  enviarVideo: () => enviar('', video),
+                  pausa: (proxima) => proxima === null ? sleep(jitter()) : entreBolhas(proxima),
+                });
+              }
               // Cada foto é uma mensagem física: só vão as que cabem no que resta do teto
               // do turno (a checagem de `max_sends_per_turn` acima roda uma vez, antes).
               // O resto é medido ANTES DE CADA FOTO, depois do texto: o texto acima do
               // teto de legenda sai à parte e também gasta o teto.
               // (C01) A imagem da página antes do texto, contando no teto, só se o link
               // da consulta continua no texto que a cadeia liberou.
-              const parou = await enviarImagemDaPagina(imagemDaPagina, finalBody, {
+              // (C01, -c01.12) Com `antes_do_link`, a arte sai dentro das bolhas (`antesDaBolha`, abaixo).
+              const arteNoLink = arteAntesDoLink(imagemDaPagina, finalBody) ? imagemDaPagina : null;
+              let arteSaiu = false;
+              const parou = arteNoLink ? null : await enviarImagemDaPagina(imagemDaPagina, finalBody, {
                 restantes: () => maxSendsPerTurn - seq,
                 bolhasDoTexto: Math.max(1, splitForSend(finalBody, agentConfig?.splitMessages ?? false, agentConfig?.splitMaxChars ?? 600).length),
                 conhecido: (media) => conhecido({ body: '', media }),
@@ -5719,7 +5747,8 @@ async function executarTurnoDoAgente(
                     enabled: agentConfig?.splitMessages ?? false,
                     maxChars: agentConfig?.splitMaxChars ?? 600,
                     // O teto do turno vale para as bolhas: o que passa dele vai junto na última.
-                    maxBubbles: Math.max(1, maxSendsPerTurn - seq),
+                    // (C01, -c01.12) A arte no meio das bolhas guarda a vaga dela.
+                    maxBubbles: Math.max(1, maxSendsPerTurn - seq - (arteNoLink ? 1 : 0)),
                     // (C01) … mas só para as bolhas NOVAS. Na re-execução do job, a
                     // posição recuperada já conta as bolhas que o canal aceitou; sem
                     // perguntar ao ledger quais são, o mesmo texto era refatiado com
@@ -5738,6 +5767,25 @@ async function executarTurnoDoAgente(
                     // `esperaForaDoLock` (paga antes de o guardrail tomar o lock do número) —
                     // issue #654. Neste ponto fica só o jitter anti-ban entre bolhas.
                     send: (bubble) => enviar(bubble),
+                    entreBolhas,
+                    ...(arteNoLink
+                      ? {
+                          antesDaBolha: async (bolha: string) => {
+                            if (arteSaiu || !citaAlgumLink(bolha, arteNoLink.links)) return null;
+                            arteSaiu = true;
+                            const { imagem } = arteNoLink;
+                            return enviarImagemAntes(imagem, {
+                              restantes: () => maxSendsPerTurn - seq,
+                              bolhasDoTexto: 1,
+                              jaRegistrada: () => conhecido({ body: '', media: imagem.media }),
+                              enviarImagem: () => enviar('', imagem.media),
+                              sleep,
+                              jitter,
+                              registrar: (desfecho, extra) => runLog.info(`imagem da página (antes do link): ${desfecho}`, { key: imagem.key, version: imagem.version, ...extra }),
+                            });
+                          },
+                        }
+                      : {}),
                     // (C01, -c01.15) A emenda do teto nunca é silenciosa.
                     aoEmendar: (conta) =>
                       runLog.warn('bolhas além do teto do turno emendadas na última', {

@@ -721,7 +721,8 @@ describe("(C01) a ligação no turno, no envio com fotos e no ledger", () => {
       /retomada = tetoCheio\(\) \? await planejarRetomada\(body, fotosDoProduto, videoNativo(?:, imagemDaPagina\?\.imagem\.media)?\) : null;\s*if \(retomada !== null && retomada\.conhecidas\.length === 0\) \{\s*dupTrava\.liberar\(body\);\s*return recusaPorTeto\(\);\s*\}/,
     );
     expect(TURNO).toMatch(
-      /if \(retomada !== null\) return enviarSoAsConhecidas\(retomada\.conhecidas, \{\s*enviar: \(corpo, media\) => media && 'type' in media && media\.type === 'video'\s*\? enviarVideoComLegenda\(corpo, media as VideoParaEnvio, enviar\)\s*: enviar\(corpo, media\),\s*sleep, jitter,\s*\}\);/,
+      // (C01, -c01.12) o vídeo do plano já vem sem legenda: vai direto, como a foto
+      /if \(retomada !== null\) return enviarSoAsConhecidas\(retomada\.conhecidas, \{[^}]*?enviar: \(corpo, media\) => enviar\(corpo, media\),\s*sleep, jitter,\s*\}\);/,
     );
     // O plano vem DEPOIS de preparar as fotos: elas entram nele.
     expect(TURNO.indexOf("retomada = tetoCheio()")).toBeGreaterThan(

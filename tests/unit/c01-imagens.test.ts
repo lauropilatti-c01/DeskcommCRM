@@ -459,7 +459,7 @@ describe('c01_imagens: ligação no turno (âncoras de código)', () => {
     expect(TURNO.indexOf('planejarRetomada(body, fotosDoProduto, videoNativo, imagemDaPagina?.imagem.media)')).toBeGreaterThan(escolha);
   });
   it('no envio, depois da cadeia, a imagem vai antes do texto e só se o link sobreviveu', () => {
-    const imagem = TURNO.indexOf('const parou = await enviarImagemDaPagina(imagemDaPagina, finalBody, {');
+    const imagem = TURNO.indexOf('const parou = arteNoLink ? null : await enviarImagemDaPagina(imagemDaPagina, finalBody, {');
     const texto = TURNO.indexOf('return enviarComFotos(finalBody, fotosDoProduto, {');
     expect(imagem).toBeGreaterThan(0);
     expect(texto).toBeGreaterThan(imagem);

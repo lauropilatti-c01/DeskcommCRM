@@ -35,7 +35,9 @@ const itemSchema = z.object({
   width: z.number().int().min(1).max(MAX_LADO),
   height: z.number().int().min(1).max(MAX_LADO),
   triggers: z.array(z.literal('pagina_de_pagamento')).min(1).max(1),
-  position: z.literal('antes_do_texto'),
+  // (C01, -c01.12) `antes_do_link`: entre as bolhas do texto, logo antes da que tem o link (Lauro, 28/10).
+  // A versão de antes recusa a política inteira com ele: voltar o programa pede voltar a posição.
+  position: z.enum(['antes_do_texto', 'antes_do_link']),
   frequency: z.enum(['sempre', 'primeira_vez']),
   plans: z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,199}$/)).min(1).max(100).refine(p => new Set(p).size === p.length),
   description: DESCRICAO,
@@ -180,8 +182,8 @@ export function escolherImagem(input: {
 
 /** O que o canal recebe: o mesmo formato da foto do catálogo (o handler já sabe mandar). */
 export type ImagemParaEnvio = { storagePath: string; mime: 'image/png' | 'image/jpeg' };
-export type ImagemEscolhida = { key: string; version: number; sha256: string; description: string; media: ImagemParaEnvio };
-type Versao = Pick<ItemDeImagem, 'version' | 'sha256' | 'mime' | 'description'>;
+export type ImagemEscolhida = { key: string; version: number; sha256: string; description: string; media: ImagemParaEnvio; position?: ItemDeImagem['position'] };
+type Versao = Pick<ItemDeImagem, 'version' | 'sha256' | 'mime' | 'description'> & Partial<Pick<ItemDeImagem, 'position'>>;
 
 export const origemNaBiblioteca = (org: string, v: Pick<Versao, 'sha256' | 'mime'>): string =>
   `${org}/biblioteca-imagens/${v.sha256}.${EXTENSAO[v.mime]}`;
@@ -196,6 +198,7 @@ export const retratoDaImagem = (i: ImagemEscolhida): { key: string; version: num
 const escolhida = (org: string, conv: string, key: string, v: Versao): ImagemEscolhida => ({
   key, version: v.version, sha256: v.sha256, description: v.description,
   media: { storagePath: destinoNaConversa(org, conv, key, v), mime: v.mime },
+  ...(v.position ? { position: v.position } : {}),
 });
 
 /** Versão fixada: se a execução já registrou uma versão desta imagem no ledger (aceita ou
@@ -380,3 +383,7 @@ export function marcaDaImagemEnviada(
 
 /** A marca vale para qualquer organização com caminho `imagem-<key>-<sha>`. */
 export const eImagemDaBiblioteca = (path: string | null | undefined): boolean => !!path && MARCA_NO_CAMINHO.test(path);
+
+/** (C01, -c01.12) A arte vai entre as bolhas, antes da primeira que cita o link da consulta, e não antes do texto. */
+export const arteAntesDoLink = (preparada: ImagemPreparada | null, textoFinal: string): preparada is ImagemPreparada =>
+  preparada !== null && preparada.imagem.position === 'antes_do_link' && citaAlgumLink(textoFinal, preparada.links);

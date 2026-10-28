@@ -83,25 +83,25 @@ describe("editor de instruções do agente", () => {
 
   it("guarda o texto inteiro quando ele passa do limite, em vez de comer o fim", () => {
     const prompt = montar();
-    const gigante = "a".repeat(24_500);
+    const gigante = "a".repeat(32_500);
     fireEvent.change(prompt, { target: { value: gigante } });
     expect(
       prompt.value.length,
       "o campo comeu o fim do texto — é exatamente assim que um prompt vira 19.999 caracteres",
-    ).toBe(24_500);
+    ).toBe(32_500);
   });
 
   it("mostra o tamanho contra o limite enquanto o autor escreve", () => {
     // O aviso que chega ANTES do erro: quem cola um texto grande vê na hora que
     // ele não cabe, em vez de descobrir no salvamento — ou nunca.
     const prompt = montar();
-    fireEvent.change(prompt, { target: { value: "a".repeat(24_500) } });
-    expect(screen.getByTestId("contador-do-prompt")).toHaveTextContent("24.500/24.000");
+    fireEvent.change(prompt, { target: { value: "a".repeat(32_500) } });
+    expect(screen.getByTestId("contador-do-prompt")).toHaveTextContent("32.500/32.000");
   });
 
   it("recusa o salvamento dizendo quanto passou", () => {
     const prompt = montar();
-    fireEvent.change(prompt, { target: { value: "a".repeat(24_500) } });
+    fireEvent.change(prompt, { target: { value: "a".repeat(32_500) } });
     fireEvent.click(screen.getByRole("button", { name: /salvar|criar/i }));
     expect(
       screen.getByText(/corte 500 para conseguir salvar/i),
@@ -110,12 +110,12 @@ describe("editor de instruções do agente", () => {
   });
 
   it("mede o texto como o servidor mede, sem contar espaço de sobra", () => {
-    // O servidor grava `z.string().trim().max(24000)` — o trim roda ANTES do
+    // O servidor grava `z.string().trim().max(32000)` — o trim roda ANTES do
     // max. Se a tela contasse os brancos, ela barraria texto que o servidor
     // aceita, e o autor ficaria preso sem entender o motivo.
     const prompt = montar();
-    fireEvent.change(prompt, { target: { value: "a".repeat(24_000) + "\n\n   " } });
-    expect(screen.getByTestId("contador-do-prompt")).toHaveTextContent("24.000/24.000");
+    fireEvent.change(prompt, { target: { value: "a".repeat(32_000) + "\n\n   " } });
+    expect(screen.getByTestId("contador-do-prompt")).toHaveTextContent("32.000/32.000");
     fireEvent.click(screen.getByRole("button", { name: /salvar|criar/i }));
     expect(screen.queryByText(/conseguir salvar/i)).not.toBeInTheDocument();
   });

@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { createAdminClient } from '@/lib/supabase/admin';
 import type { ChannelSendResult } from '../channel-adapter';
 import type { Queryable } from '../queue/queue';
+import { OK_KINDS } from './split-message';
 
 const itemSchema = z.object({
   key: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/),
@@ -126,4 +127,25 @@ export async function enviarVideoComLegenda(
     return { kind: 'unavailable', reason: 'video_legenda_invalida: use de 1 a 1024 caracteres; nada foi enviado' };
   }
   return enviar(body, media);
+}
+
+/** (C01, -c01.12) Onde o vídeo entra entre as bolhas do turno (`null` = o vídeo): todas menos a última, o vídeo e a
+ * última sozinha, que é a pergunta (Lauro, 28/10). Com uma bolha só, ela vai antes do vídeo. */
+export const ordemComVideo = (bolhas: readonly string[]): Array<string | null> =>
+  bolhas.length <= 1 ? [...bolhas, null] : [...bolhas.slice(0, -1), null, bolhas[bolhas.length - 1]!];
+
+/** (C01, -c01.12) O texto em bolhas e o vídeo sem legenda (o texto do turno não vai mais como legenda), na
+ * `ordemComVideo`. Para no primeiro desfecho que não é de sucesso, como `sendInBubbles`. */
+export async function enviarComVideo<R extends { kind: string }>(
+  bolhas: readonly string[],
+  o: { enviarTexto: (bolha: string) => Promise<R>; enviarVideo: () => Promise<R>; pausa: (proxima: string | null) => Promise<void> },
+): Promise<R> {
+  let ultimo: R | undefined;
+  const ordem = ordemComVideo(bolhas);
+  for (let i = 0; i < ordem.length; i++) {
+    if (i > 0) await o.pausa(ordem[i]!);
+    ultimo = ordem[i] === null ? await o.enviarVideo() : await o.enviarTexto(ordem[i]!);
+    if (!OK_KINDS.has(ultimo.kind)) return ultimo;
+  }
+  return ultimo!;
 }

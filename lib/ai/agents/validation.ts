@@ -111,7 +111,7 @@ export type FollowupConfig = z.infer<typeof followupConfigSchema>;
 
 const versionShapeSchema = z
   .object({
-    system_prompt: z.string().trim().min(10).max(24000),
+    system_prompt: z.string().trim().min(10).max(32000), // (C01, -c01.12) Lauro, 28/10: 24000 → 32000
     provider: z.enum(PROVIDERS),
     model: z.string().trim().min(1).max(120),
     /**

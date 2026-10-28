@@ -473,7 +473,7 @@
   "O nome pode ter até 120 caracteres.": "名称最多可包含 120 个字符。",
   "Escreva as instruções do agente (pelo menos uma frase).": "编写 AI 智能体的指令（至少一句话）。",
   "As instruções têm": "指令有",
-  "caracteres, e o máximo é 24.000. Corte": "个字符，最多为 24,000。请删减",
+  "caracteres, e o máximo é 32.000. Corte": "个字符，最多为 32,000。请删减",
   "para conseguir salvar.": "才能保存。",
   "Escolha o modelo de inteligência artificial.": "选择 AI 模型。",
   "Escolha a chave de acesso da empresa de inteligência artificial.": "选择 AI 公司的访问密钥。",

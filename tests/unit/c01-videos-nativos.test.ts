@@ -193,7 +193,9 @@ describe('fiação V1: ferramenta e prévia', () => {
     const send = source.slice(start, end);
     const callback = send.indexOf('send: async (finalBody: string, dbUnderLock: Queryable) =>');
     expect(callback).toBeGreaterThan(0);
-    expect(send.indexOf('enviarVideoComLegenda(finalBody, videoNativo, enviar)')).toBeGreaterThan(callback);
+    // (C01, -c01.12) o texto em bolhas em volta do vídeo sem legenda, no mesmo `enviar` do canal protegido
+    expect(send.indexOf('return enviarComVideo(bolhas, {')).toBeGreaterThan(callback);
+    expect(send).toContain("enviarVideo: () => enviar('', video),");
     expect(send).toContain('cadeiaDeEnvio(() => runBeforeSend(beforeSendArgs))');
     expect(send).toContain('prepararVideoNativo(pool, deps.copiarVideo ?? copiarVideoNoStorage()');
     expect(send).toContain('identidade: IDENTIDADE_DA_LEGENDA_DO_VIDEO');
