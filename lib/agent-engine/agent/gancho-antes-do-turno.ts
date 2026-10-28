@@ -122,6 +122,7 @@ import { scheduleCronJob } from '../cron/scheduler';
 import { runBeforeSend } from '../guardrails/before-send';
 import type { DesfechoDoAviso } from './aviso-de-escalacao';
 import { performHumanHandoff } from './human-handoff';
+import { lerPoliticaDeVideo } from './videos-nativos';
 import { encerrarChamadoPeloAgente } from './human-cases';
 import { abrirCasoDoPedidoDePessoa } from '@/lib/c01/passagem-desligada';
 import {
@@ -174,6 +175,19 @@ export function ganchoAntesDoTurnoDoAmbiente(env: {
   };
 }
 
+/** (C01, -c01.11) sha256 do arquivo (`…/video-<sha>.mp4`, `prepararVideoNativo`) → chave do catálogo; a política só é lida com vídeo. */
+async function chavesDosVideos(
+  db: Queryable, organizationId: string, linhas: Array<{ video_arquivo?: string | null }>,
+): Promise<(arquivo: string | null | undefined) => string | undefined> {
+  const sha = (arquivo: string | null | undefined) => /\/video-([a-f0-9]{64})\.mp4$/.exec(arquivo ?? '')?.[1];
+  if (!linhas.some((l) => sha(l.video_arquivo))) return () => undefined;
+  const { catalog } = await lerPoliticaDeVideo(db, organizationId);
+  return (arquivo) => {
+    const s = sha(arquivo);
+    return s ? catalog.find((v) => v.sha256 === s)?.key : undefined;
+  };
+}
+
 // ─── o pedido ──────────────────────────────────────────────────────────────────
 
 export interface MensagemDoPedido {
@@ -189,6 +203,12 @@ export interface MensagemDoPedido {
   status?: string;
   /** O código do erro da mensagem que falhou (só o código, nunca o texto). */
   erro?: string;
+  /**
+   * (C01, -c01.11) O vídeo nativo desta linha: a chave do catálogo (`c01_native_videos`) do
+   * arquivo que saiu. Sem ela, o porteiro só via a legenda e não sabia que o vídeo saiu.
+   * Ausente sem vídeo ou com arquivo fora do catálogo; vídeos com o mesmo arquivo dão a 1ª chave.
+   */
+  video_chave?: string;
 }
 
 export interface FormularioDoPedido {
@@ -417,8 +437,10 @@ export async function montarPedidoDoGancho(
     em: Date | string;
     situacao?: string | null;
     erro?: string | null;
+    video_arquivo?: string | null;
   }>(
     `select direction, type, body, metadata->'interactive' as interativo, coalesce(sent_at, created_at) as em,
+            case when type = 'video' then media_storage_path end as video_arquivo,
             case when status = 'failed' then 'failed'
                  when read_at is not null then 'read'
                  when delivered_at is not null then 'delivered'
@@ -431,6 +453,7 @@ export async function montarPedidoDoGancho(
       limit $3`,
     [alvo.organizationId, alvo.conversationId, MENSAGENS_NO_PEDIDO],
   );
+  const chaveDoVideo = await chavesDosVideos(db, alvo.organizationId, linhas);
   // (C01, -c01.6) A reconsulta não atende formulário: a resposta que chegar enquanto
   // ela espera é do turno da própria mensagem (marcá-la aqui a tiraria dele).
   const formulario = alvo.reconsulta === true ? null : await formularioDoTurno(db, alvo);
@@ -469,6 +492,7 @@ export async function montarPedidoDoGancho(
       interativo: objeto(m.interativo),
       ...(m.situacao ? { status: m.situacao } : {}),
       ...(m.erro ? { erro: m.erro.slice(0, 40) } : {}),
+      ...(chaveDoVideo(m.video_arquivo) ? { video_chave: chaveDoVideo(m.video_arquivo) } : {}),
     })),
     ...(formulario !== null ? { formulario: formulario.pedido } : {}),
     ...(alvo.reconsulta === true ? { reconsulta: true as const } : {}),
