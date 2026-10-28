@@ -115,7 +115,8 @@ describe("sendInBubbles", () => {
     // A pausa é medida pela 1ª bolha do MESMO fatiamento que vai ao canal; com
     // maxBubbles 1 a 1ª bolha é o texto inteiro, então os dois têm de receber o teto.
     const turno = readFileSync("lib/agent-engine/agent/inbound-turn.ts", "utf8");
-    expect(turno.match(/Math\.max\(1, maxSendsPerTurn - seq\)/g)?.length).toBe(2);
-    expect(turno).toMatch(/maxBubbles: Math\.max\(1, maxSendsPerTurn - seq\)/);
+    // (C01, -c01.12) no envio, a arte no meio das bolhas guarda a vaga dela
+    expect(turno.match(/Math\.max\(1, maxSendsPerTurn - seq( - \(arteNoLink \? 1 : 0\))?\)/g)?.length).toBe(2);
+    expect(turno).toMatch(/maxBubbles: Math\.max\(1, maxSendsPerTurn - seq( - \(arteNoLink \? 1 : 0\))?\)/);
   });
 });

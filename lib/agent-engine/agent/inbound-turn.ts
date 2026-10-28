@@ -246,7 +246,7 @@ import { AVISO_DE_ULTIMA_TENTATIVA } from '../guardrails/vazamento-interno';
 import { isStatusSendable } from '../../channels/meta/template-binding';
 import { capabilitiesOf } from '@/lib/channels/capabilities';
 import { renderTemplateBody } from '@/lib/channels/meta/render-template';
-import { calcularAtrasoHumano, esperarComoHumano, manterDigitando } from './atraso-humano';
+import { esperarComoHumano, manterDigitando } from './atraso-humano';
 import { aplicarTetoAsNovas, instrucaoDeBolhas, OK_KINDS, sendInBubbles, splitForSend } from './split-message';
 import { formatarParaWhatsApp } from './formato-whatsapp';
 import { umaRespostaPorTurno } from './c01-uma-resposta-por-turno';
@@ -5693,13 +5693,14 @@ async function executarTurnoDoAgente(
               });
               // V1: só depois de TODOS os guardas, pelo mesmo canal e ledger.
               // A legenda final (inclusive apresentação) precisa caber inteira.
-              // (C01, -c01.12) "digitando…" e a espera proporcional à próxima bolha, nunca menos que o jitter anti-ban.
-              const entreBolhas = async (proxima: string): Promise<void> => {
+              // (C01, -c01.12) "digitando…" entre as bolhas, com a pausa de sempre (o jitter anti-ban). Isto roda
+              // com a trava do número presa: uma espera maior aqui seguraria a fila do WhatsApp inteiro (#654).
+              const entreBolhas = async (_proxima: string): Promise<void> => {
                 try {
                   const canal = liveChannel();
                   await canal.signalTyping?.({ tenantId, conversationId: input.conversationId });
                 } catch { /* sem "digitando" (preview, canal fora): a pausa continua */ }
-                await sleep(Math.max(jitter(), calcularAtrasoHumano(proxima, knobsDeAtrasoHumano)));
+                await sleep(jitter());
               };
               if (videoNativo) {
                 // (C01, -c01.12) O texto em bolhas e o vídeo sem legenda antes da última (Lauro, 28/10). O teto do

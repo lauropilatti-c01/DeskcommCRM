@@ -216,7 +216,7 @@ describe("(C01) a ligação no turno", () => {
     const i = FONTE.indexOf("enviarTexto: (texto) =>");
     expect(i).toBeGreaterThan(-1);
     const bloco = FONTE.slice(i, FONTE.indexOf("send: (bubble) => enviar(bubble)", i));
-    expect(bloco).toMatch(/maxBubbles: Math\.max\(1, maxSendsPerTurn - seq\)/);
+    expect(bloco).toMatch(/maxBubbles: Math\.max\(1, maxSendsPerTurn - seq( - \(arteNoLink \? 1 : 0\))?\)/);
     // (Rodada 6) A sonda passa por `conhecido` (que é `conteudoRegistradoNoJob` no job
     // vivo) e declara a mesma identidade com que a bolha vai ao ledger — o texto sem a
     // emenda da apresentação (`identidadeDoEnvio`).

@@ -107,7 +107,9 @@ describe('ligação no turno (âncoras de código)', () => {
   it('as bolhas comuns usam o "digitando" e a arte no link guarda a vaga dela no teto', () => {
     expect(TURNO).toContain('entreBolhas,\n');
     expect(TURNO).toContain("maxBubbles: Math.max(1, maxSendsPerTurn - seq - (arteNoLink ? 1 : 0)),");
-    expect(TURNO).toContain('await sleep(Math.max(jitter(), calcularAtrasoHumano(proxima, knobsDeAtrasoHumano)));');
+    // a pausa entre as bolhas roda com a trava do número presa: fica no jitter (#654)
+    expect(TURNO).toContain('await sleep(jitter());\n              };');
+    expect(TURNO).not.toMatch(/entreBolhas[\s\S]{0,400}calcularAtrasoHumano/);
   });
   it('o vídeo novo ocupa uma vaga e o teto vale só para as bolhas novas', () => {
     expect(TURNO).toContain('aplicarTetoAsNovas(bolhasNaturais, registradas, Math.max(1, maxSendsPerTurn - seq - (videoConhecido ? 0 : 1)))');
