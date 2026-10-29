@@ -121,17 +121,22 @@ interface ConversaRow {
   assigned_to_user_id: string | null;
   assignee_kind: string | null;
   bot_silenced_until: string | null;
+  channel_session_id: string | null;
 }
+
+/** Janela de 24 h do WhatsApp com folga: mensagem do lead mais velha que isto não pede turno. */
+const IDADE_MAXIMA_DA_PENDENTE_MS = 23 * 60 * 60 * 1000;
 
 export async function devolverAtendimentoAoAgente(
   deps: RetomadaDeps,
   input: { conversationId: string; origem?: OrigemDaRetomada },
 ): Promise<RetomadaResultado> {
   const { supabase, organizationId } = deps;
+  const inicioDaDevolucao = new Date().toISOString();
 
   const { data: convData, error: convErr } = await supabase
     .from("conversations")
-    .select("id, contact_id, status, assigned_to_user_id, assignee_kind, bot_silenced_until")
+    .select("id, contact_id, status, assigned_to_user_id, assignee_kind, bot_silenced_until, channel_session_id")
     .eq("id", input.conversationId)
     .eq("organization_id", organizationId)
     .maybeSingle();
@@ -308,6 +313,10 @@ export async function devolverAtendimentoAoAgente(
     await gravarCheckpointDeRetomada(supabase, organizationId, conv.contact_id, continuidade);
   }
 
+  // (5b) (C01, -c01.14) A mensagem que o lead mandou enquanto estava com humano
+  // ficava sem resposta: a devolução não pedia turno. Depois do checkpoint, para o turno já lê o que a equipe fez.
+  await pedirTurnoDaMensagemPendente(deps, conv, inicioDaDevolucao);
+
   // (6) Passagem de atendimento é evento de vida do negócio — a ida já emitia
   // `handoff_triggered` e a volta não emitia nada, então a linha do tempo mostrava
   // o cliente saindo para uma pessoa e nunca voltando.
@@ -339,6 +348,89 @@ export async function devolverAtendimentoAoAgente(
   });
 
   return { ok: true, conversationId: input.conversationId, jaEstavaComOAgente, continuidade };
+}
+
+/**
+ * (C01, -c01.14) Pede o turno da IA para a última mensagem do lead se ela ficou
+ * sem resposta. Mesmo evento de um texto novo (`reenfileirarTurno` em
+ * `handoff-tecnico.ts`), então o dreno aplica as travas de sempre (status,
+ * "ainda é a última inbound", coalescência). Aqui só o que o dreno não sabe:
+ * idade, resposta posterior e pedido já feito depois do início da devolução
+ * (a ponte provisória `c01.retomar_pendente` ou outra devolução). Falha só loga:
+ * o comando já voltou para a IA.
+ */
+async function pedirTurnoDaMensagemPendente(
+  deps: RetomadaDeps,
+  conv: ConversaRow,
+  inicioDaDevolucao: string,
+): Promise<void> {
+  const { supabase, organizationId } = deps;
+  if (conv.contact_id === null || conv.channel_session_id === null) return;
+  const falhou = (etapa: string, error: { message: string }) =>
+    logger.warn("[escalacao.retomada] turno da mensagem pendente não pedido", {
+      conversation_id: conv.id,
+      etapa,
+      error: error.message,
+    });
+
+  const { data: ultimaData, error: ultimaErr } = await supabase
+    .from("messages")
+    .select("id, type, sent_at, created_at")
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conv.id)
+    .eq("direction", "inbound")
+    .order("sent_at", { ascending: false })
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (ultimaErr) return falhou("ultima_inbound", ultimaErr);
+  const ultima = ultimaData as { id: string; type: string; sent_at: string | null; created_at: string } | null;
+  // Reação e mensagem de sistema não pedem resposta (mesma regra da ponte).
+  if (!ultima || ultima.type === "reaction" || ultima.type === "system") return;
+  if (Date.now() - Date.parse(ultima.sent_at ?? ultima.created_at) > IDADE_MAXIMA_DA_PENDENTE_MS) return;
+
+  const { data: respostas, error: respostaErr } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conv.id)
+    .eq("direction", "outbound")
+    .gt("created_at", ultima.created_at)
+    .limit(1);
+  if (respostaErr) return falhou("resposta_posterior", respostaErr);
+  if ((respostas ?? []).length > 0) return;
+
+  const { data: pedidos, error: pedidoErr } = await supabase
+    .from("event_log")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("event_type", "ai_agent.dispatch_requested")
+    .eq("payload->>inbound_message_id", ultima.id)
+    .gte("created_at", inicioDaDevolucao)
+    .limit(1);
+  if (pedidoErr) return falhou("pedido_existente", pedidoErr);
+  if ((pedidos ?? []).length > 0) return;
+
+  const { error } = await supabase.rpc("emit_event", {
+    p_event_type: "ai_agent.dispatch_requested",
+    p_entity_kind: "message",
+    p_entity_id: ultima.id,
+    p_payload: {
+      organization_id: organizationId,
+      conversation_id: conv.id,
+      contact_id: conv.contact_id,
+      channel_session_id: conv.channel_session_id,
+      inbound_message_id: ultima.id,
+    },
+    p_metadata: {
+      source: "retomada",
+      request_id: deps.requestId,
+      motivo: "devolvido_com_mensagem_pendente",
+    },
+    p_organization_id: organizationId,
+  });
+  if (error) falhou("emit_event", error);
 }
 
 function recusarSempreHumano(
