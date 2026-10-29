@@ -282,6 +282,13 @@ describe("acompanhamento com SQL real e transporte falso", () => {
       1,
     );
   });
+  it("(C01, -c01.13) Cloud API: `sent` com `delivered_at` é entrega; `failed` com a data não é", async () => {
+    // a Meta grava só `sent | failed` e a entrega na data (lib/channels/meta/status-update.ts)
+    await pool.query("update messages set status='failed',delivered_at=sent_at");
+    await expect(enroll()).rejects.toMatchObject({ code: "delivery_unconfirmed" });
+    await pool.query("update messages set status='sent',delivered_at=sent_at");
+    expect((await enroll()).status).toBe("enrolled");
+  });
   it("matrícula vencida usa o relógio do banco mesmo com o processo adiantado", async () => {
     const before = (await pool.query("select now() as at")).rows[0].at;
     const processClock = new Date(Math.max(+new Date(before), +now) + 3600000);
@@ -594,6 +601,19 @@ describe("pausa após vídeo integrada ao SQL existente", () => {
     const f=await lerFatosAcompanhamentoC01(pool,v.videoCfg,{organizationId:org!,contactId:contact!,enrollmentId:e.enrollment_id},now,financial);
     expect(f!.anchor.at).toBe("2026-10-23T13:05:00.000Z");
     expect(f!.videoPolicyReady).toBe(true);
+  });
+  it("(C01, -c01.13) a varredura acha a mensagem da Cloud API (`sent` com data) e os fatos a contam como entregue",async()=>{
+    const v=await videoReady();
+    const {inscreverOrigensConfirmadasC01}=await import("@/lib/followup/c01-acompanhamento-origens");
+    await pool.query("update messages set status='sent',delivered_at=null,read_at=null");
+    await inscreverOrigensConfirmadasC01(pool,now);
+    expect((await pool.query("select count(*)::int as n from followup_enrollments")).rows[0].n).toBe(0);
+    await pool.query("update messages set delivered_at=$1",[new Date(+base+5*60000)]);
+    await inscreverOrigensConfirmadasC01(pool,now);
+    const e=(await pool.query("select id from followup_enrollments")).rows;
+    expect(e).toHaveLength(1);
+    const f=await lerFatosAcompanhamentoC01(pool,v.videoCfg,{organizationId:org!,contactId:contact!,enrollmentId:e[0].id},now,financial);
+    expect(f!.anchor.delivered).toBe(true);
   });
   it("replay e novo balão do mesmo vídeo não geram segunda inscrição",async()=>{
     const v=await videoReady();const first=await registrarOrigemEntregueC01(pool,v.videoCfg,v.origin,now);

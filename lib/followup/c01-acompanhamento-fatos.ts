@@ -153,7 +153,7 @@ export async function lerFatosAcompanhamentoC01(
       !!m.external_id &&
       !!(m.delivered_at ?? m.read_at) &&
       !m.error_code &&
-      ["delivered", "read"].includes(m.status)
+      ["sent", "delivered", "read"].includes(m.status)
     );
   });
   const node = row.graph?.nodes?.find((n: { id: string }) => n.id === row.current_node_id);
@@ -218,7 +218,8 @@ export async function lerFatosAcompanhamentoC01(
         !!anchor.external_id &&
         anchor.direction === "outbound" &&
         !anchor.error_code &&
-        ["delivered", "read"].includes(anchor.status),
+        // a Cloud API grava só `sent | failed`: a entrega é `delivered_at`/`read_at` (exigido acima)
+        ["sent", "delivered", "read"].includes(anchor.status),
     },
     lastInboundAt: iso(row.last_inbound_at),
     hasNewReply:

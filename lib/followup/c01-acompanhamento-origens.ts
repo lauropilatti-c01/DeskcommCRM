@@ -89,7 +89,8 @@ export async function registrarOrigemEntregueC01(
           !row.external_id ||
           row.direction !== "outbound" ||
           row.error_code ||
-          !["delivered", "read"].includes(row.status)
+          // a Cloud API grava só `sent | failed` (lib/channels/meta/status-update.ts): a entrega é a data
+          !["sent", "delivered", "read"].includes(row.status)
         )
           recusar("delivery_unconfirmed");
         if (new Date(delivered) > now || new Date(row.sent_at) > new Date(delivered))
@@ -275,7 +276,8 @@ export async function inscreverOrigensConfirmadasC01(
     const rows = (
       await db.query(
         `select *,metadata->'c01_origin' as origin
-      from messages m where organization_id=$1 and id>$2 and direction='outbound' and status in ('delivered','read')
+      from messages m where organization_id=$1 and id>$2 and direction='outbound' and status in ('sent','delivered','read')
+      and coalesce(delivered_at,read_at) is not null
       and metadata->'c01_origin' is not null and metadata->'c01_origin' <> 'null'::jsonb
       and metadata->'c01_video_omitted' is null and metadata->>'c01_video_processed' is distinct from 'true'
       and not exists(select 1 from followup_enrollment_events ev where ev.organization_id=m.organization_id
