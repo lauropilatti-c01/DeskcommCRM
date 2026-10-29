@@ -278,12 +278,15 @@ export async function inscreverOrigensConfirmadasC01(
         `select *,metadata->'c01_origin' as origin
       from messages m where organization_id=$1 and id>$2 and direction='outbound' and status in ('sent','delivered','read')
       and coalesce(delivered_at,read_at) is not null
+      -- recusa passageira (contato ocupado, humano) é tentada de novo a cada ciclo: sem idade máxima,
+      -- a inscrição sairia dias depois com a âncora velha e os toques vencidos em sequência (-c01.13)
+      and m.sent_at > $3::timestamptz - interval '6 hours'
       and metadata->'c01_origin' is not null and metadata->'c01_origin' <> 'null'::jsonb
       and metadata->'c01_video_omitted' is null and metadata->>'c01_video_processed' is distinct from 'true'
       and not exists(select 1 from followup_enrollment_events ev where ev.organization_id=m.organization_id
         and ev.event_type='c01_origem_entregue' and ev.payload->>'messageId'=m.id::text)
       order by id limit 200`,
-        [cfg.organizationId, cursor],
+        [cfg.organizationId, cursor, now.toISOString()],
       )
     ).rows;
     for (const row of rows) {

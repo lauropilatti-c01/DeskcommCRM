@@ -609,6 +609,9 @@ describe("pausa após vídeo integrada ao SQL existente", () => {
     await inscreverOrigensConfirmadasC01(pool,now);
     expect((await pool.query("select count(*)::int as n from followup_enrollments")).rows[0].n).toBe(0);
     await pool.query("update messages set delivered_at=$1",[new Date(+base+5*60000)]);
+    // enviada há mais de 6 h: a varredura não inscreve atrasado
+    await inscreverOrigensConfirmadasC01(pool,new Date(+base+6*3600000+60000));
+    expect((await pool.query("select count(*)::int as n from followup_enrollments")).rows[0].n).toBe(0);
     await inscreverOrigensConfirmadasC01(pool,now);
     const e=(await pool.query("select id from followup_enrollments")).rows;
     expect(e).toHaveLength(1);
