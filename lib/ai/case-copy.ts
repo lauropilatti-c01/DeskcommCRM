@@ -99,7 +99,7 @@ export interface CaseActionOption {
 export const CASE_ACTIONS: CaseActionOption[] = [
   {
     action: "resolved",
-    label: "Concluí",
+    label: "Responder e seguir",
     help: "A IA avisa o cliente e encerra o assunto.",
   },
   {

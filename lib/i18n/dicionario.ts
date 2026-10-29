@@ -3817,7 +3817,7 @@ export const DICIONARIO: Traducoes = {
     es: "Este caso pasó a atención humana. Ya no necesita respuesta aquí.",
   },
   "Este caso foi cancelado.": { es: "Este caso está cancelado." },
-  "Concluí": { es: "Concluí" },
+  "Responder e seguir": { es: "Responder y seguir" },
   "A IA avisa o cliente e encerra o assunto.": { es: "La IA avisa al cliente y cierra el asunto." },
   "Preciso de info do cliente": { es: "Necesito info del cliente" },
   "A IA pergunta ao cliente e o caso volta pra você quando ele responder.": {

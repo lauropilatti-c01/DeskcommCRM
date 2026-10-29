@@ -187,10 +187,10 @@ test.describe("IA 360 W3 — o agente para, a pessoa continua, o agente retoma s
     // (2) A pessoa decide, escrevendo o que combinou com o cliente.
     // ---------------------------------------------------------------------
     await chamado.click();
-    // "Concluí" = a ação `resolved` (lib/ai/case-copy.ts). O rótulo é lido da
+    // "Responder e seguir" (antes "Concluí", C01 -c01.13) = a ação `resolved` (lib/ai/case-copy.ts). O rótulo é lido da
     // tela, não inventado aqui: se ele mudar, o teste reprova, que é o certo —
     // é a palavra que o atendente vê.
-    await page.getByRole("radio", { name: /Concluí/ }).click();
+    await page.getByRole("radio", { name: /Responder e seguir/ }).click();
     const campo = page.locator("textarea").first();
     await expect(campo).toBeVisible({ timeout: 15_000 });
     await campo.fill(DECISAO_DA_PESSOA);
