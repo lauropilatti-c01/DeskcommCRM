@@ -250,7 +250,9 @@ const envSchema = z.object({
   AGENT_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8000),
   // Teto de mensagens FÍSICAS enviadas ao lead por turno (send_message + send_template
   // somados, bolhas incluídas) — nenhum gate de before-send limita CONTAGEM, só ritmo.
-  MAX_SENDS_PER_TURN: z.coerce.number().int().positive().default(3),
+  // (C01, -c01.15) Padrão 6 no código: o 6 vivia num override manual da VPS e caiu na
+  // recriação pela publicação da c01.14 (preço, arte e link no mesmo turno precisam de vaga).
+  MAX_SENDS_PER_TURN: z.coerce.number().int().positive().default(6),
   // (C01) Frase de espera do fail-safe de vocabulário interno (3 vetos seguidos): o que o
   // cliente lê enquanto uma pessoa assume. Sem valor = `FRASE_DE_ESPERA_PADRAO` do turno.
   AGENT_FRASE_DE_ESPERA: z.string().trim().min(1).optional(),
