@@ -189,6 +189,10 @@ describe("o pedido não leva dado pessoal", () => {
                 em: new Date("2026-07-30T14:56:00Z"), situacao: "failed", erro: "131026",
               },
               { direction: "inbound", type: "image", body: null, interativo: null, em: new Date("2026-07-30T14:55:00Z"), situacao: "delivered", erro: null },
+              {
+                direction: "inbound", type: "text", body: "Quero meu cronograma", interativo: { type: "button" },
+                em: new Date("2026-07-30T14:54:00Z"), situacao: null, erro: null, disparo_citado: "lote-a",
+              },
             ],
           };
         return { rows: [] };
@@ -222,6 +226,7 @@ describe("o pedido não leva dado pessoal", () => {
       contato_id: CONTATO,
       lead: { id: "card-1", etapa: "novo", campos: { interesse: "plano-b" }, etiquetas: ["etiqueta-antiga", "cliente"] },
       mensagens: [
+        { direcao: "entrada", texto: "Quero meu cronograma", em: "2026-07-30T14:54:00.000Z", interativo: { type: "button" }, disparo_citado: "lote-a" },
         { direcao: "entrada", texto: "[image]", em: "2026-07-30T14:55:00.000Z", interativo: null, status: "delivered" },
         {
           direcao: "saida", texto: "Responda o formulário", em: "2026-07-30T14:56:00.000Z", interativo: { type: "flow" },
