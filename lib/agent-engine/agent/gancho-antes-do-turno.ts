@@ -438,9 +438,17 @@ export async function montarPedidoDoGancho(
     situacao?: string | null;
     erro?: string | null;
     video_arquivo?: string | null;
+    disparo_citado?: string | null;
   }>(
     `select direction, type, body, metadata->'interactive' as interativo, coalesce(sent_at, created_at) as em,
             case when type = 'video' then media_storage_path end as video_arquivo,
+            -- (C01, CRM-131) O lote da mensagem que o toque cita: a Meta manda o wamid dela em
+            -- context.id. Pelo id, não pelo último disparo: dois lotes antes do toque não se confundem.
+            case when direction = 'inbound' and metadata->>'context_id' is not null then (
+              select o.metadata->>'c01_disparo' from messages o
+               where o.organization_id = $1 and o.conversation_id = $2 and o.direction = 'outbound'
+                 and o.external_id = messages.metadata->>'context_id'
+            ) end as disparo_citado,
             case when status = 'failed' then 'failed'
                  when read_at is not null then 'read'
                  when delivered_at is not null then 'delivered'
@@ -490,6 +498,7 @@ export async function montarPedidoDoGancho(
       texto: m.body ?? `[${m.type}]`,
       em: iso(m.em) ?? '',
       interativo: objeto(m.interativo),
+      ...(m.disparo_citado ? { disparo_citado: m.disparo_citado } : {}),
       ...(m.situacao ? { status: m.situacao } : {}),
       ...(m.erro ? { erro: m.erro.slice(0, 40) } : {}),
       ...(chaveDoVideo(m.video_arquivo) ? { video_chave: chaveDoVideo(m.video_arquivo) } : {}),
